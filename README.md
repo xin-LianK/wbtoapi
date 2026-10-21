@@ -19,20 +19,21 @@
 ---
 
 > [!IMPORTANT]
-> **项目已停止维护（2026-10-21）**：后续不再更新代码、不跟进上游变化、不再处理新的 issue / PR。
+> **本仓库已接手维护（2026-10-21）**：新主页为 [`xin-LianK/wbtoapi`](https://github.com/xin-LianK/wbtoapi)，代码自即日起在此继续演进。
 >
-> 原因有三：
-> 1. **上游已开始禁用反代**——WorkBuddy 对非官方客户端的识别与拦截正在收紧（通道校验、账号限制等），反代通道的稳定性与存活周期已不可控，继续做适配意义有限；
-> 2. **个人精力有限**——本项目本就是个人自用工具，无力长期跟进协议变化与风控对抗；
-> 3. **非法转卖泛滥**——发现大量批量注册小号、对外售卖额度、二次加壳 / 卡密分发的滥用行为，与本项目初衷完全相悖。
+> 原仓库 [`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel) 已于同日发布停止维护声明，原因有三：
+> 1. **上游已开始禁用反代**——WorkBuddy 对非官方客户端的识别与拦截正在收紧（通道校验、账号限制等），反代通道的稳定性与存活周期已不可控；
+> 2. **个人精力有限**——原作者无力长期跟进协议变化与风控对抗；
+> 3. **非法转卖泛滥**——大量批量注册小号、对外售卖额度、二次加壳 / 卡密分发，与项目初衷完全相悖。
 >
-> 仓库保持现状可用（已合入的修复不会回退），但请自行评估风险：**上游随时可能彻底收紧导致不可用**；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
+> 本仓库保留原仓库的全部历史与代码，并继续做两件事：**逐项对齐官方客户端的出站形态**（当前对齐 WorkBuddy Desktop `5.8.3`），**以及补齐协议之外的存活能力**（出站节奏、并发约束）。但请清楚认知：**这是一场不对称对抗，上游加一条规则的成本远低于我们适配的成本**。仓库保持可用，但**上游随时可能再次收紧**；因使用非官方客户端导致的账号风控 / 封禁，由使用者自行承担。
 >
-> **维护方式披露**：本仓库近期的 issue / PR 处置、代码审查、测试与修复实现**大量由 AI 辅助完成**（自动化编码 agent），合并与发布决策由维护者作出。请知悉后再使用或参与贡献。
+> 维护与排障请先看 [MAINTENANCE.md](MAINTENANCE.md)：上游失效症状分流（协议漂移 / 通道校验）、错误码字典、跟随客户端升级的复查步骤、存活策略分层。
+>
+> **维护方式披露**：本仓库的代码审查、测试与修复实现**大量由 AI 辅助完成**（自动化编码 agent），合并与发布决策由维护者作出。请知悉后再使用或参与贡献。
 
-> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
-> 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
-> 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
+> **代码血缘**：`xin-LianK/wbtoapi` ← [`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel) ← [`Sliverkiss/workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)（已删库）。
+> 本仓库保留完整提交历史，并已吸收上游删库前的最后一次更新（`ea8b1e5`）。在上游基础上重构了可视化运维层，差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
@@ -74,6 +75,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏱️ **出站节奏** | 同账号最小间隔 + 随机抖动 + 每分钟上限（默认 120ms/180ms/90 次）。在途租约只管「同时几个」，这层管「每秒几个」——高频出站比请求头更容易被风控选中，详见 [MAINTENANCE.md §6](MAINTENANCE.md) |
+| 🎭 **官方出站形态** | 出站头按 WorkBuddy 桌面端 `5.8.3` 实测形态组装（非企业 27 头 / 带 domain 28 头 / 企业号 29 头），UA、trace、UUID v4 全部对齐；`legacy` profile 可一键回滚；`./deploy.sh headers` 离线打印实际出站头（见[出站请求头形态](#出站请求头形态upstreamprofile)） |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
@@ -193,7 +195,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 上游改动 | 吸收内容 |
 |---|---|
 | 净化增强 | `tool_calls.arguments` 盲区修复（content=null 的工具调用轮此前完全漏净化）、裸 `11128` 反探测改写、桌面版身份句（逗号形态）漏网修复、反馈句整句改写 |
-| 出站头族 | UA 对齐官方三段式 `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>`（默认 5.5.4/2.137.1，可配）；`X-IDE-*` 用量归属四头 + `X-Agent-Purpose`（`client_name` 配 `WorkBuddy` 即对齐官方桌面端）；`X-Device-Token` 设备风控头（auth 每号 / config / 文件三源）；`X-IDE-Version` 补齐 |
+| 出站头族 | UA 对齐官方三段式 `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>`（当时默认 5.5.4/2.137.1；**现在默认已是 5.8.3/2.161.0**，见[字段速查](#字段速查)）；`X-IDE-*` 用量归属四头 + `X-Agent-Purpose`（`client_name` 配 `WorkBuddy` 即对齐官方桌面端）；`X-Device-Token` 设备风控头（auth 每号 / config / 文件三源）；`X-IDE-Version` 补齐 |
 | 并发修复 | 客户端 IP 改按请求参数传递（消除共享字段竞态）；billing 单段 UA 形态 |
 | 签到幂等 | `IsAlreadyCheckin` 识别"今天已签到"（code=10001/14001），调度日志不再把重复签到当失败 |
 | 粘性按模型判活 | 会话绑定的账号被 6004 模型级限额后，换模型请求自动解绑重分配（治"限额后换不动号"）；`/healthz` 探活计入模型豁免形态（治"全号被单模型限流探活误报 503"） |
@@ -202,6 +204,22 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
 > 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+
+### 接手后的增量（2026-10）
+
+原仓库停更后，本仓库只做两件事：**对齐官方客户端的出站形态**，以及**补齐协议之外的存活能力**——前者是修 bug，后者是运营，两者不能互相替代。
+
+| 能力 | 说明 |
+|---|---|
+| **出站头逐项对齐 5.8.3** | 基准取官方客户端**分发代码的静态提取**（比抓包更准，能看到条件分支），不用抓包猜测。删掉从 fork 移植时猜出来、官方 chat 根本不发的 8 类头；`X-Trace-ID` 改独立随机（此前与 `X-Conversation-Request-ID` 恒等）；UUID 强制 v4 版本位；`Accept-Encoding: identity`。新增 `upstream.profile`（`desktop` / `legacy` 回滚）与 `cmd/headers-dump` 离线核对。详见[出站请求头形态](#出站请求头形态upstreamprofile) |
+| **出站节奏 `internal/pace`** | 账号维度三档：最小间隔（锁内串行推进 `nextAt`，并发绕不过）+ 随机抖动（打散等间距指纹）+ 滑动 60s 上限。默认 120ms / 180ms / 90 次每分。**热改只换参数、不重建实例**——重建会让所有账号 `nextAt` 归零，等于瞬间放行一波突发，恰好是这层要防的事 |
+| **本地快速部署** | `deploy.sh` + `Dockerfile.local`：宿主编译、容器只跑产物，改一行代码约 1 分钟验证；顺带修正原版就绪探针导致「刚部署还没加账号时永远 unhealthy」 |
+| **维护决策树** | [MAINTENANCE.md](MAINTENANCE.md)：失效分类（协议漂移 / 通道校验）、7 分支决策树、错误码字典、跟随客户端升级的复查步骤、存活策略按性价比分层 |
+
+**已知硬伤（未解决，别再往代码里找 bug）**：
+
+- **TLS 指纹（JA3/JA4）**：Go `crypto/tls` 的 ClientHello 与 Chromium 的 cipher 顺序、extension 集合、曲线顺序都不同，哈希值稳定可枚举可拉黑。要过这关只能换 `refraction-networking/utls` 自造 ClientHello，改 header 无用
+- **真机设备令牌**：`X-Device-Token` 带设备签名，伪造不了。项目留了 `upstream.chat_device_token` + 令牌文件挂载的接口，**默认关闭**——拿插件 OAuth 令牌去凑 `qimei36` 形态反而更像异常设备
 
 ## 架构总览
 
@@ -212,7 +230,8 @@ flowchart LR
     subgraph GWI["WorkBuddy2API 网关 :7863"]
         H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
         H --> S
-        P["账号池\n快过期加权 · 成本分层 · 熔断 · 冷却 · 租约"] --> U
+        P["账号池\n快过期加权 · 成本分层 · 熔断 · 冷却 · 租约"] --> PC
+        PC["出站节奏\n单号间隔 · 抖动 · 每分钟上限"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
         T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
@@ -224,7 +243,7 @@ flowchart LR
     U -->|"billing / auth / growth"| CB
 ```
 
-上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
+上游请求在出站前过两段管线：**头部**由 `internal/upstream/headers.go` 按 `upstream.profile` 组装（协议头 + 身份头分层，见[出站请求头形态](#出站请求头形态upstreamprofile)）；**请求体**由 `internal/upstream/payload.go` 统一改写——强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。两段之后才进入 `internal/pace` 的节奏闸门。
 
 ## 快速开始
 
@@ -248,24 +267,25 @@ mkdir -p auths data && cp config.example.json config.json
 docker run -d --name workbuddy2api \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/xin-liank/wbtoapi:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
 ```
 
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `wbtoapi` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
-> `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
+> `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。镜像名取 `github.repository`
+> 自动小写化，所以 fork 到其他账号下会自动变成 `<owner>/<repo>`，无需改工作流。
 
 ### 方式一：Docker Compose（推荐服务器部署）
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
-cd workbuddy2api-panel
+git clone https://github.com/xin-LianK/wbtoapi.git
+cd wbtoapi
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
 cp config.example.json config.json
@@ -321,6 +341,26 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ```
+
+### 方式四：本地快速重建（`deploy.sh`，约 1 分钟）
+
+改代码后要立刻跑起来时用这条——**不在容器里跑 `go build`**：宿主编译 Linux 二进制，容器只负责运行（`Dockerfile.local` 只 `COPY` 产物，不拉 `golang` 镜像）。
+
+```bash
+./deploy.sh            # 编译 + 起容器（等价 rebuild + up）
+./deploy.sh rebuild    # 不重新编译，只重建容器
+./deploy.sh down       # 停止并删除容器（auths/ 与 data/ 不受影响）
+./deploy.sh native     # 本机直接跑，需要装 Go（调试用）
+./deploy.sh key        # 打印当前 api_key
+./deploy.sh headers    # 打印实际出站 chat 请求头（dry-run，不连上游）
+```
+
+要点：
+
+- **复用宿主编译产物**：起容器前后不到 1 分钟，比 `docker compose up --build` 快一个量级，改一行代码也能立刻验证
+- **健康判断看 `.State.Health.Status` 精确值**：`grep healthy` 会匹配到 `unhealthy`，脚本已改成精确比较；就绪探针也不再要求「至少一个可用账号」，否则刚部署、还没加账号的阶段会永远 `unhealthy`
+- **`headers` 子命令不碰上游**：只打印将要发出的头，用来核对「当前这套头跟官方客户端差在哪」，见 [出站请求头形态](#出站请求头形态upstreamprofile)
+- Windows 走 Git Bash；**路径前导斜杠会被 MSYS 改写**，在 Git Bash 里调 NAS 上的组件前先 `export MSYS_NO_PATHCONV=1`
 
 ### 添加账号（登录）
 
@@ -402,7 +442,13 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
-| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
+| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 按账号域自动生成官方桌面端三段式 `WorkBuddy/<client_version> WorkBuddy/<client_version> CLI/<cli_version>`，global 账号中段换 `WorkBuddy AI`）。官网「使用端」列按出站 UA 服务端归因 |
+| `upstream.client_version` | `5.8.3` | UA 与 `X-Client-Version` 里的 WorkBuddy 版本号。**跟随官方客户端升级时只改这里**；与 `X-IDE-Version` 无关 |
+| `upstream.cli_version` | `2.161.0` | UA 尾段 `CLI/<ver>`，取自官方 5.8.3 内嵌 `codebuddy-code` 的 customPackage 版本 |
+| `upstream.profile` | `desktop` | 出站头形态：`desktop` = 按 WorkBuddy 桌面端实测形态组装（**非企业 27 头 / 带 domain 28 头 / 企业号 29 头**）；`legacy` = 回到改动前的旧头集合，一键回滚用 |
+| `upstream.ide_version` | `0.0.0` | `X-IDE-Version` 取值。官方桌面端就发 `0.0.0`（不是 `client_version`），别「顺手对齐」成 5.8.3 |
+| `upstream.product` | `SaaS` | `X-Product` 取值（不是产品名 `WorkBuddy`）。官方桌面端 cookie/session 形态取 `SaaS` |
+| `upstream.chat_device_token` | `false` | 是否把 `X-Device-Token` 注入 **chat** 请求（默认关）。插件 OAuth 拿不到真机 Turing 令牌，伪造成 `qimei36` 形态反而更像异常设备，故默认不注入；配好真机令牌文件（`upstream.device_token_file`）后再开 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `models.hidden` | `[]` | 模型黑名单：不对外暴露的模型。裸名=两域都藏；`"cn:xxx"`/`"global:xxx"`=只藏该域。`GET /v1/models` 列表过滤 + `POST /v1/chat/completions` 点名拒绝（400 `model_unavailable`）。面板保存后热生效 |
 | `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
@@ -410,6 +456,10 @@ curl -s http://localhost:7863/v1/search/messages \
 | `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
 | `pool.max_in_flight_global` | `2` | global 域单账号在途上限（国际版 WAF 风控更紧，压低并发） |
+| `pacing.enabled` | `true` | 出站节奏总开关。`false` = 三档参数一律不生效，完全回到接入这一层之前的行为 |
+| `pacing.min_interval_ms` | `120` | **同账号**两次出站的最小间隔（ms）。并发请求在锁内串行推进 `nextAt`，多线程也绕不过去。与 `max_in_flight` 是两件事：那个管「同时几个在路上」，这个管「每秒几个」 |
+| `pacing.jitter_ms` | `180` | 在最小间隔上叠加 `[0,N)` 随机量，打散「等间距」这个指纹 |
+| `pacing.per_minute` | `90` | **同账号**滑动 60s 请求上限，防「间隔很小但持续打满」。触发 `11128` 时的第一动作是把它砍到 20–30 观察一天，别先动 header |
 | `pool.degrade_threshold` | `5` | 连败降权阈值：未知错误（ErrClient/传输层）连败 N 次临时出池 |
 | `pool.degrade_cooldown` / `pool.degrade_cooldown_max` | `10m` / `2h` | 连败降权时长与上限钳制 |
 | `pool.cost_explore_interval` | `30m` | costTier 条件探索窗口：免费层垄断且存在未知号时，每窗口把一个真实请求搭车改道给未知号（零新增上游请求；成功即毕业，失败走既有错误策略）。`0` = 关停 |
@@ -443,9 +493,42 @@ curl -s http://localhost:7863/v1/search/messages \
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_DNS`(逗号分隔多个) · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+**基础**：`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_DNS`(逗号分隔多个) · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS`
+
+**出站形态**：`WB2A_USER_AGENT` · `WB2A_CLIENT_VERSION` · `WB2A_CLI_VERSION` · `WB2A_CLIENT_NAME` · `WB2A_UPSTREAM_PROFILE` · `WB2A_IDE_VERSION` · `WB2A_PRODUCT` · `WB2A_DEVICE_TOKEN` · `WB2A_DEVICE_TOKEN_FILE` · `WB2A_CHAT_DEVICE_TOKEN`(bool) · `WB2A_PASSTHROUGH_IP`(bool)
+
+**行为**：`WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE` · `WB2A_PREFER_EXPIRING`(bool) · `WB2A_EXPIRING_SOON`(duration)
+
+**出站节奏**：`WB2A_PACE_ENABLED`(bool) · `WB2A_PACE_MIN_INTERVAL_MS` · `WB2A_PACE_JITTER_MS` · `WB2A_PACE_PER_MINUTE`
 
 ## 核心行为语义
+
+### 出站请求头形态（`upstream.profile`）
+
+上游的风控至少分两路：一路看**请求形态**（头 + 请求体指纹），另一路看**出口 IP 与节奏**。本仓库把第一路拆成可配的一层：
+
+| 模式 | 行为 |
+|---|---|
+| `desktop`（默认） | 按 WorkBuddy 桌面端 `5.8.3` 实测形态组装。头数量随账号形态变化：**非企业 27 个 / 带租户 domain 28 个 / 企业号 29 个**。UA 三件套 `WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0`（global 账号中段为 `WorkBuddy AI`） |
+| `legacy` | 回到接入 desktop 形态之前的旧头集合。**只用于一键回滚**——旧形态与官方差距较大，长期使用等于自曝身份 |
+
+这一层里几个容易被写错的点，都在代码里有测试锁住（`internal/upstream/headers_desktop_test.go`）：
+
+- **不该发的头不发**：chat 请求不带 `Origin` / `Referer` / `Accept-Language` / `X-Machine-ID` / `X-Session-ID` / `X-Root-Request-ID` / `X-No-*` / 设备族头。此前从 fork 移植时凭猜测带上了这些，属于典型的「多发头」——官方客户端根本不发
+- **`X-IDE-Version` 就是 `0.0.0`**：这不是占位符，官方桌面端确实这么发。它与 UA 里的版本号**没有关系**，不要「顺手对齐」成 `5.8.3`
+- **`X-Trace-ID` 必须独立随机**：官方每请求新生成 16 字节。此前复用 `X-Conversation-Request-ID`，两个头恒等本身就是破绽
+- **UUID 要是合法 v4**：版本位（第 13 位 `4`）与变体位（第 17 位 `8/9/a/b`）都强制写对，否则 `X-Conversation-*` 一眼假
+- **`Accept-Encoding: identity`**：与客户端实际行为一致，避免中间层压缩差异带来的形态偏差
+
+核对当前实际出站的头（不连上游、不消耗额度）：
+
+```bash
+./deploy.sh headers                      # 默认 desktop 形态
+./deploy.sh headers -profile legacy      # 对比旧形态
+go run ./cmd/headers-dump -profile desktop  # 直接跑工具，输出全部出站头
+```
+
+> ⚠️ **这一层只能解决「这一版校验」。** 两个改不动的地方：**TLS 指纹**（Go `crypto/tls` 的 ClientHello 与 Chromium 差得远，JA3/JA4 可枚举可拉黑，要过只能换 `utls` 自造指纹）与**真机设备令牌**（带设备签名，伪造不了）。上游发版或收紧校验后怎么复查，见 [MAINTENANCE.md](MAINTENANCE.md) 的失效决策树。
 
 ### 系统提示词体系
 
@@ -763,7 +846,7 @@ http://127.0.0.1:7863/panel/
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
+`models.hidden`、`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`pacing.*`（出站节奏三档）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
@@ -893,10 +976,23 @@ http://127.0.0.1:7863/panel/
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
+| `./deploy.sh` | 本地快速重建容器（编译 → 换二进制 → 重建，约 1 分钟）；`headers` 子命令打印实际出站头 |
 | `python3 scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
 | `python3 scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（区分静默钳制与模型主动收尾），`--panel-out` 结果可直接进面板展示（见下节） |
 
 二进制不在 git 中：脚本首次使用自动 `go build` 对应 `cmd/*`（Docker 镜像内已预编译）。
+
+### 上游失效排查（接手维护必读）
+
+[MAINTENANCE.md](MAINTENANCE.md) 是本仓库的排障主文档，按「症状 → 判定 → 处置」组织，核心是按错误码分流：
+
+| 症状 | 去哪 |
+|---|---|
+| `11128` / `request illegal`（通道校验） | **先降 `pacing.per_minute` 观察 24h**，再 `./deploy.sh headers` 与官方客户端逐项对diff；两者都排除才怀疑 TLS 指纹 |
+| `11101` / `Unmarshal chat params failed` | 请求体转换（`internal/upstream/payload.go`）——客户端畸形 JSON，不罚账号 |
+| 客户端解析崩 / 流卡住 / 工具调用断 | 响应重建（`internal/upstream/sse.go`、`dsml.go`） |
+| 429 频繁 / 某个号连续失败 | 调度层（`internal/pool` 冷却与熔断、`internal/pace` 节奏） |
+| 官方客户端发版 | MAINTENANCE §5：重解包 asar → 比对头字段 → 只改 `upstream.*`，别动协议头 |
 
 ### 探测模型真实输出上限
 
@@ -948,7 +1044,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
+- **产物来源**：日常 = 源码自构建（`deploy.sh` / `docker compose build`）；打 `v*` tag 时 CI 才会构建五平台二进制并附校验和发布到 Release。**官方分发渠道只有本仓库与 GHCR**，任何第三方「加速下载」「整合包」都不是本项目产物
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
 - **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
