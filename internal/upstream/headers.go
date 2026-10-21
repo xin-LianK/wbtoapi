@@ -304,7 +304,7 @@ func (c *Client) injectCodeBuddyRequest(req *http.Request) {
 type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
-	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	TraceID               string // X-Trace-ID：legacy 形态透传入站值，空则回落 conversationRequestID（desktop 形态无视入站值，每请求新随机）
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
@@ -432,7 +432,12 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 //   - 不发 X-Root-Request-ID（网关路径没有这个头，多发即特征）
 //   - 补全 W3C traceparent + 单头 b3 + X-B3-ParentSpanId
 func (c *Client) injectDesktopConversationHeaders(req *http.Request, meta ChatMeta) {
-	convReqID := meta.ConversationRequestID
+	// 官方这两个 ID 都出自 metadata 里的 randomUUID()（VlmSessionLedger.acquire
+	// 一次生成、按 session 缓存），**恒为带连字符的 8-4-4-4-12**。网关内部的聚合键
+	// （TurnRequestID / RequestIDForKey）是 32 位裸 hex，直接透传就是一处形态差异：
+	// 同一字段官方永远是 36 字符带横线，我们永远是 32 字符裸 hex，一条正则即可区分。
+	// 只改出站字符串形态，不动内部聚合键（日志/面板分组口径不变）。
+	convReqID := uuidDashed(meta.ConversationRequestID)
 	if convReqID == "" {
 		convReqID = uuidDashed(session.NewMessageID())
 	}
@@ -442,19 +447,19 @@ func (c *Client) injectDesktopConversationHeaders(req *http.Request, meta ChatMe
 	//   X-Request-ID              = randomUUID()
 	// 不能复用同一个值——「消息 ID 与请求 ID 恒等」是真实客户端不会出现的形态。
 	requestID := uuidDashed(session.NewMessageID())
-	conversationID := meta.ConversationID
+	// X-Conversation-ID 官方取的是 ACP sessionId（同样是 randomUUID 形态）。
+	// 本网关的会话键是 32 位裸 hex（sessKey / 客户端透传值），同样规范成 UUID 形态。
+	conversationID := uuidDashed(meta.ConversationID)
 	if conversationID == "" {
 		conversationID = uuidDashed(session.NewMessageID())
 	}
 	// 链路 trace：官方 applyTraceHeaders **每次请求都重新 randomBytes(16)**，
-	// 与 conversationRequestId 无任何关系。早期实现拿 convReqID 当兜底，
-	// 结果 X-Trace-ID 恒等于 X-Conversation-Request-ID（仅去掉横线）——
+	// 与 conversationRequestId 无任何关系，也不看入站值。早期实现拿 convReqID
+	// 当兜底，结果 X-Trace-ID 恒等于 X-Conversation-Request-ID（仅去掉横线）——
 	// 两个本应独立的随机值永远相等，一条比对就能和真实客户端区分开。
-	traceID := strings.ReplaceAll(meta.TraceID, "-", "")
-	if len(traceID) != 32 || !validTraceID(traceID) {
-		traceID = strings.ReplaceAll(session.NewMessageID(), "-", "")
-	}
-	if len(traceID) != 32 || !validTraceID(traceID) {
+	// 入站 X-Trace-ID 一律无视：客户端若发常量大，透传就等于把随机值变成固定值。
+	traceID := strings.ReplaceAll(session.NewMessageID(), "-", "")
+	if !validTraceID(traceID) {
 		traceID = strings.ReplaceAll(messageID, "-", "")
 	}
 	spanID := strings.ReplaceAll(session.NewMessageID(), "-", "")[:16]

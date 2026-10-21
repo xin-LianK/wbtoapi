@@ -211,14 +211,15 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 | 能力 | 说明 |
 |---|---|
-| **出站头逐项对齐 5.8.3** | 基准取官方客户端**分发代码的静态提取**（比抓包更准，能看到条件分支），不用抓包猜测。删掉从 fork 移植时猜出来、官方 chat 根本不发的 8 类头；`X-Trace-ID` 改独立随机（此前与 `X-Conversation-Request-ID` 恒等）；UUID 强制 v4 版本位；`Accept-Encoding: identity`。新增 `upstream.profile`（`desktop` / `legacy` 回滚）与 `cmd/headers-dump` 离线核对。详见[出站请求头形态](#出站请求头形态upstreamprofile) |
+| **出站头逐项对齐 5.8.3** | 基准取官方客户端**分发代码的静态提取**（比抓包更准，能看到条件分支），不用抓包猜测。删掉从 fork 移植时猜出来、官方 chat 根本不发的 8 类头；`X-Trace-ID` 改独立随机（此前与 `X-Conversation-Request-ID` 恒等，且现在不再透传入站值）；`X-Conversation-*` 的 ID 出站统一规范化成 UUID v4 形态（内部聚合键保持 32 hex）；`Accept-Encoding: identity`。新增 `upstream.profile`（`desktop` / `legacy` 回滚）、`cmd/headers-dump` 离线核对与 `tools/header-parity.py` 自动对账。详见[出站请求头形态](#出站请求头形态upstreamprofile) |
 | **出站节奏 `internal/pace`** | 账号维度三档：最小间隔（锁内串行推进 `nextAt`，并发绕不过）+ 随机抖动（打散等间距指纹）+ 滑动 60s 上限。默认 120ms / 180ms / 90 次每分。**热改只换参数、不重建实例**——重建会让所有账号 `nextAt` 归零，等于瞬间放行一波突发，恰好是这层要防的事 |
 | **本地快速部署** | `deploy.sh` + `Dockerfile.local`：宿主编译、容器只跑产物，改一行代码约 1 分钟验证；顺带修正原版就绪探针导致「刚部署还没加账号时永远 unhealthy」 |
 | **维护决策树** | [MAINTENANCE.md](MAINTENANCE.md)：失效分类（协议漂移 / 通道校验）、7 分支决策树、错误码字典、跟随客户端升级的复查步骤、存活策略按性价比分层 |
 
 **已知硬伤（未解决，别再往代码里找 bug）**：
 
-- **TLS 指纹（JA3/JA4）**：Go `crypto/tls` 的 ClientHello 与 Chromium 的 cipher 顺序、extension 集合、曲线顺序都不同，哈希值稳定可枚举可拉黑。要过这关只能换 `refraction-networking/utls` 自造 ClientHello，改 header 无用
+- **TLS 指纹（JA3/JA4）**：Go `crypto/tls` 的 ClientHello 与官方客户端不同，哈希值稳定可枚举可拉黑。⚠️ 官方这条链路走 Electron 主进程的全局 `fetch`（undici），TLS 是 **Node 的 OpenSSL**、不是 Chrome，所以 `utls` 的 `HelloChrome_*` 预设也对不上，得按 Node 的 cipher 顺序手搓。改 header 无用
+- **头名字大小写与发送顺序**：HTTP 头名大小写不敏感、协议层完全合法，但 undici 写小写 + 插入顺序，Go 写 Title-Case + 字典序，抓包能看出差别。要改只能自写 HTTP/1.1 写出器；实测它比请求头集合那层弱得多，暂不值得
 - **真机设备令牌**：`X-Device-Token` 带设备签名，伪造不了。项目留了 `upstream.chat_device_token` + 令牌文件挂载的接口，**默认关闭**——拿插件 OAuth 令牌去凑 `qimei36` 形态反而更像异常设备
 
 ## 架构总览
@@ -515,9 +516,10 @@ curl -s http://localhost:7863/v1/search/messages \
 这一层里几个容易被写错的点，都在代码里有测试锁住（`internal/upstream/headers_desktop_test.go`）：
 
 - **不该发的头不发**：chat 请求不带 `Origin` / `Referer` / `Accept-Language` / `X-Machine-ID` / `X-Session-ID` / `X-Root-Request-ID` / `X-No-*` / 设备族头。此前从 fork 移植时凭猜测带上了这些，属于典型的「多发头」——官方客户端根本不发
-- **`X-IDE-Version` 就是 `0.0.0`**：这不是占位符，官方桌面端确实这么发。它与 UA 里的版本号**没有关系**，不要「顺手对齐」成 `5.8.3`
-- **`X-Trace-ID` 必须独立随机**：官方每请求新生成 16 字节。此前复用 `X-Conversation-Request-ID`，两个头恒等本身就是破绽
+- **`X-IDE-Version` = appVersion（`5.8.3`），不是 `0.0.0`**：`applyGatewayHeaders` 末尾那张常量表里写的是 `0.0.0`，但它只做「缺则填」，`buildVlmGatewayHeaders` 已经先写入了真实 `appVersion`。**判断一个头该取什么值，要看先写入它的那个函数，不是后面的兜底表**——这条曾让我误判过一次
+- **`X-Trace-ID` 必须独立随机**：官方每请求新生成 16 字节，且**不看入站值**。此前复用 `X-Conversation-Request-ID`，两个头恒等本身就是破绽
 - **UUID 要是合法 v4**：版本位（第 13 位 `4`）与变体位（第 17 位 `8/9/a/b`）都强制写对，否则 `X-Conversation-*` 一眼假
+- **ID 形态也要对齐**：`X-Conversation-ID` / `X-Conversation-Request-ID` 官方恒为 36 字符带横线 UUID，网关内部聚合键是 32 位裸 hex，出站前要规范化（`uuidDashed`）；内部口径不变
 - **`Accept-Encoding: identity`**：与客户端实际行为一致，避免中间层压缩差异带来的形态偏差
 
 核对当前实际出站的头（不连上游、不消耗额度）：
@@ -526,9 +528,10 @@ curl -s http://localhost:7863/v1/search/messages \
 ./deploy.sh headers                      # 默认 desktop 形态
 ./deploy.sh headers -profile legacy      # 对比旧形态
 go run ./cmd/headers-dump -profile desktop  # 直接跑工具，输出全部出站头
+python tools/header-parity.py <解包目录>/main/server.js   # 与官方 JS 里提的头集合自动对账
 ```
 
-> ⚠️ **这一层只能解决「这一版校验」。** 两个改不动的地方：**TLS 指纹**（Go `crypto/tls` 的 ClientHello 与 Chromium 差得远，JA3/JA4 可枚举可拉黑，要过只能换 `utls` 自造指纹）与**真机设备令牌**（带设备签名，伪造不了）。上游发版或收紧校验后怎么复查，见 [MAINTENANCE.md](MAINTENANCE.md) 的失效决策树。
+> ⚠️ **这一层只能解决「这一版校验」。** 三个改不动的地方：**TLS 指纹**（Go `crypto/tls` 的 ClientHello 与官方的 Node/OpenSSL 不同，JA3/JA4 可枚举可拉黑）、**头名大小写与顺序**（undici 全小写 + 插入顺序，Go 是 Title-Case + 字典序）与**真机设备令牌**（带设备签名，伪造不了）。上游发版或收紧校验后怎么复查，见 [MAINTENANCE.md](MAINTENANCE.md) 的失效决策树；客户端升级后先跑 `python tools/header-parity.py <解包目录>/main/server.js` 对账。
 
 ### 系统提示词体系
 

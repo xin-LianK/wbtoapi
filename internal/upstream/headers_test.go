@@ -45,13 +45,22 @@ func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 }
 
 // TestChatHeadersPreservesConversationID 入站带来的会话 ID 优先透传，不被兜底覆盖。
+// 注意：desktop 形态会把 32 位裸 hex 规范成官方 randomUUID 的带连字符形态（同一个值、
+// 只改文本形态），所以这里比较的是规范化后的等价形态，不是原始字节。
 func TestChatHeadersPreservesConversationID(t *testing.T) {
 	c := &Client{}
 	req, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
 	const conv = "0123456789abcdef0123456789abcdef"
 	c.ChatHeaders(req, testAuth(), "", ChatMeta{ConversationID: conv})
-	if got := req.Header.Get("X-Conversation-ID"); got != conv {
-		t.Errorf("X-Conversation-ID = %q, want supplied %q", got, conv)
+	if got := req.Header.Get("X-Conversation-ID"); got != uuidDashed(conv) {
+		t.Errorf("X-Conversation-ID = %q, want supplied %q", got, uuidDashed(conv))
+	}
+	// legacy 形态保持原样透传（回滚路径零漂移）。
+	legacy := &Client{Profile: "legacy"}
+	lreq, _ := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
+	legacy.ChatHeaders(lreq, testAuth(), "", ChatMeta{ConversationID: conv})
+	if got := lreq.Header.Get("X-Conversation-ID"); got != conv {
+		t.Errorf("legacy X-Conversation-ID = %q, want raw %q", got, conv)
 	}
 }
 

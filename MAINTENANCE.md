@@ -342,6 +342,9 @@ getRequestHeaders: () => buildVlmGatewayHeaders({...})   // ← 不含任何设�
   仅用于验证「上游是否按设备绑定账号」，平时别开。
 - `upstream.product`：默认 `SaaS`（= deploymentType）。
 - 回归由 `internal/upstream/headers_desktop_test.go` 锁定：哪个头多发/少发，测试直接红。
+- **ID 形态规范化**：`X-Conversation-ID` / `X-Conversation-Request-ID` 出站前统一走 `uuidDashed()`
+  （32 裸 hex → 36 字符 UUID v4 形态），内部聚合键不动；`X-Trace-ID` 在 desktop 形态下每请求新随机，
+  不再透传入站值。详见 §5.6。
 - 环境变量覆盖：`WB2A_UPSTREAM_PROFILE` / `WB2A_CLIENT_VERSION` / `WB2A_CLI_VERSION` / `WB2A_PRODUCT`。
 - **改完配置先自查**（不连上游、不用账号）：
 
@@ -354,6 +357,18 @@ getRequestHeaders: () => buildVlmGatewayHeaders({...})   // ← 不含任何设�
 
 正常输出应该是 **27 个头**（非企业号），与官方 `buildVlmGatewayHeaders + applyGatewayHeaders
 + applyTraceHeaders + identity + Authorization` 一一对应。多一个或少一个都要查 §5.2 的表。
+
+- **自动对账**（比人眼可靠，客户端升级后必跑）：
+
+```bash
+python tools/header-parity.py ../_wb_client/main/server.js
+# 直接读官方 JS 里的 buildVlmGatewayHeaders / applyGatewayHeaders / applyTraceHeaders / YN，
+# 与 `go run ./cmd/headers-dump` 的实际输出比对；退出码 1 = 有少发/多发。
+# X-Enterprise-Id / X-Tenant-Id / X-Domain 视为条件头，非企业形态缺失不算错。
+```
+
+脚本按**头名集合**比对（大小写不敏感）。**取值对不对它管不了**，取值要人看 §5.2 的表；
+**字节形态（大小写/顺序）它也管不了**，见 §5.6。
 
 ### 5.4 客户端升级后怎么复查
 
@@ -385,7 +400,53 @@ go test ./internal/upstream/
 只能从真实桌面端状态文件里取（Turing SDK 产物），**不要伪造**。
 伪造值比不带更容易被判定：长度和字符集都对不上，等于自己举牌。
 
-### 5.6 灰度
+### 5.6 头对了，不等于字节一样（2026-10-21 复核结论）
+
+做完 §5.3 之后可以问一句「是不是和官方一样了」。答案要分层看，**别把「集合一致」当成「字节一致」**：
+
+| 维度 | 状态 | 怎么验 |
+|---|---|---|
+| 头的**集合** | ✅ 27 / 28（带 domain）/ 29（企业号）与官方一一对应 | `python tools/header-parity.py ../_wb_client/main/server.js` |
+| 头的**语义与取值** | ✅ 版本号、`X-Product`、UID/企业/域、`Accept`/`Accept-Encoding` 全部对齐 | `./deploy.sh headers` |
+| ID 的**形态** | ✅ 已修（下表） | `go test ./internal/upstream -run Desktop` |
+| 头名的**大小写 / 顺序** | ❌ 不一致（见下） | 起一个回环监听抓原文，或看线上 `curl -v` |
+| TLS **指纹** | ❌ 不一致（§6.4 第 2 条） | JA3 在线比对 |
+
+**本轮修掉的两处（都是「值形态」而非「头集合」，所以 §5.2 的对照表看不出来）**
+
+| 头 | 官方 | 修前 | 为什么能识别 |
+|---|---|---|---|
+| `X-Conversation-ID` | ACP sessionId = `randomUUID()`，36 字符带横线 | 网关会话键是 32 位裸 hex，原样透传 | 同一字段官方永远 36 字符，我们永远 32 字符 |
+| `X-Conversation-Request-ID` | `randomUUID()`（`VlmSessionLedger.acquire` 一次生成、按 session 缓存） | `TurnRequestID()` 的 32 位裸 hex | 同上，一条正则即可分流 |
+| `X-Trace-ID` | 每请求 `randomBytes(16)`，**不看入站值** | 入站值合法就透传 | 客户端若发常量，随机值就变成固定值 |
+
+注意第三行的边界：内部聚合键（`TurnRequestID` / `RequestIDForKey`）**仍然是 32 hex**，只在出站时
+规范成 UUID 形态，日志与面板的分组口径不变。`legacy` profile 保持原样透传，用于回滚对照。
+
+**仍然不一致的一处：头名字大小写与发送顺序（这是真正「字节级」的差异）**
+
+官方走 undici（Electron 主进程的全局 `fetch`），HTTP/1.1 写出时**头名全部小写、顺序 = 插入顺序**；
+Go 的 `net/http` 写的是 **Title-Case 且按键名字典序**，还会把 `X-B3-TraceId` 规范成 `X-B3-Traceid`、
+`b3` 规范成 `B3`。抓包对比一眼可见：
+
+```
+# 官方（undici）                              # 本网关（Go net/http）
+x-user-id: u_xxx                              X-User-Id: u_xxx
+x-product: SaaS                               X-Product: SaaS
+x-ide-type: WorkBuddy                         X-Ide-Type: WorkBuddy
+...（按代码里 set 的顺序）                      ...（按 ASCII 升序）
+```
+
+HTTP 头名大小写不敏感，所以**协议层完全合法**；但它是一个稳定的客户端指纹。要改只能自写 HTTP/1.1
+写出器（自己 dial + TLS + 手写请求行/头，再 `http.ReadResponse` 读响应），代价是接管连接复用、
+超时与 SSE 流式读取——目前判断**收益不抵风险**，先记在这里，等真的因为这条被拦了再做。
+
+> 一个顺带纠正：这个客户端的 TLS 是 **Node 的 OpenSSL**，不是 Chrome/Chromium。之前文档里
+> 写的「与 Chromium 差得远」是错的，`utls` 的 `HelloChrome_*` 预设也对不上 Node。
+> 这类结论一定要顺着 `fetch` 的来源往上找（`serverFetch → bootstrapWorkbuddyAppServer → 全局 fetch`），
+> 不能看到 Electron 就假定 Chromium 网络栈。
+
+### 5.7 灰度
 
 改完先在**单个号**上验（其余号设 `paused`），确认不再是 11128 再放量。
 11128 是「不罚号」的，所以拿单号试错成本很低。
@@ -420,7 +481,8 @@ go test ./internal/upstream/
 | **节奏** | **QPS、请求间隔分布、24h 持续性** | ✅ **`pacing`（本节 6.3）** | 最容易忽略、也不需要逆向 |
 | 并发 | 单号同时在途数 | ✅ `max_in_flight`（默认 3，global 域 2） | 租约，管数量不管速率 |
 | 出口 IP | ASN / 地理位置 / IP 跳变 | ⚠️ 靠部署 | 机房 IP + 高频是最显眼的组合 |
-| **TLS 指纹** | **JA3 / JA4（cipher 顺序、extension 集合）** | ❌ **未做，硬伤** | Go `crypto/tls` 与 Chromium 差得远，要过这关只能上 `utls` |
+| **TLS 指纹** | **JA3 / JA4（cipher 顺序、extension 集合）** | ❌ **未做，硬伤** | 目标是 **Node/OpenSSL**（官方这条链路走 Electron 主进程的全局 `fetch` = undici），不是 Chrome——见下方更正 |
+| 请求头**字节形态** | 头名大小写、发送顺序 | ❌ 未对齐 | Go 按字典序写 Title-Case，undici 写小写 + 插入顺序；§5.7 |
 | **设备令牌** | `X-Device-Token`（Turing Shield / qimei36） | ⚠️ 留了文件挂载口，默认关 | **伪造不了**，签名绑设备，只能借真机的 |
 | 账号画像 | 注册渠道、登录设备一致性、积分获取模式 | ⚠️ 靠养号 | 单请求无关，池层面问题 |
 
@@ -453,7 +515,10 @@ go test ./internal/upstream/
 ### 6.4 还没做的三件事（按性价比）
 
 1. **出口 IP 稳定**——不要一台机器一会儿国内一会儿国外；IP 跳变比高频更容易触发风控。这是部署问题，不是代码问题。
-2. **uTLS 伪装 ClientHello**（`refraction-networking/utls`）——TLS 层唯一的解，但要自己维护 Chrome 指纹配置，客户端升级还得跟。
+2. **uTLS 伪装 ClientHello**（`refraction-networking/utls`）——TLS 层唯一的解。⚠️ 目标不是 Chrome：
+   官方这条链路走 Electron 主进程的全局 `fetch`（undici），TLS 是 **Node 的 OpenSSL**，JA3 属于
+   Node 类而非浏览器类，`utls` 现成的 `HelloChrome_*` 预设**对不上**，得自己按 Node 的 cipher 顺序
+   与 extension 集合手搓 `ClientHelloSpec`。
 3. **真机 `X-Device-Token`**——`upstream.chat_device_token` + `WB2A_DEVICE_TOKEN_FILE` 已留好接口，需要一台真机持续供 token。
 
 ---

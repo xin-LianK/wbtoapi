@@ -85,6 +85,24 @@ func TestDesktopProfileHeaders(t *testing.T) {
 			t.Errorf("%s = %q, want UUID v4 形态", k, v)
 		}
 	}
+	// 调用方传入的聚合键是 32 位裸 hex（TurnRequestID / RequestIDForKey / sessKey），
+	// 官方同字段恒为 randomUUID 的 8-4-4-4-12 形态，必须规范化后再发。
+	hexed, _ := http.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
+	c.ChatHeaders(hexed, testAuth(), "", ChatMeta{
+		ConversationID:        strings.Repeat("a", 32),
+		ConversationRequestID: strings.Repeat("b", 32),
+	})
+	for _, k := range []string{"X-Conversation-ID", "X-Conversation-Request-ID"} {
+		if v := hexed.Header.Get(k); !uuidV4Re.MatchString(strings.ToLower(v)) {
+			t.Errorf("%s = %q，32 hex 入参应规范成 UUID v4 形态", k, v)
+		}
+	}
+	// 入站 X-Trace-ID 一律无视：官方每请求 randomBytes(16)，透传常量即变成固定值。
+	fixed, _ := http.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
+	c.ChatHeaders(fixed, testAuth(), "", ChatMeta{TraceID: strings.Repeat("c", 32)})
+	if got := fixed.Header.Get("X-Trace-ID"); strings.Contains(got, "cccc") {
+		t.Errorf("X-Trace-ID 不该透传入站值，得到 %q", got)
+	}
 }
 
 // TestLegacyProfileRestoresOldHeaders 确认 "legacy" 能完整回到停更前的形态，
