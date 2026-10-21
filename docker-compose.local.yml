@@ -1,0 +1,34 @@
+# 本地/自托管部署编排：配合 ./deploy.sh 使用。
+#
+#   ./deploy.sh            # 编译 Linux 二进制 + 起容器（推荐）
+#   ./deploy.sh rebuild    # 只重启容器，不重新编译
+#   ./deploy.sh down       # 停容器
+#   ./deploy.sh native     # 不起容器，直接本机跑（调试用）
+#
+# 前置：根目录必须有 config.json（deploy.sh 会自动从 example 生成并写入随机 api_key）。
+services:
+  wb2api:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    image: wb2api:local
+    container_name: workbuddy2api
+    restart: unless-stopped
+    # 容器内默认 app(10001)。绑定挂载目录属主不一致会导致写 auths/*.json.tmp 失败：
+    #   Linux/NAS：PUID=$(id -u) PGID=$(id -g) 传入（deploy.sh 已自动处理）
+    #   Windows Docker Desktop：默认 0:0 最省事，deploy.sh 也会自动切
+    user: "${PUID:-10001}:${PGID:-10001}"
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "${WB2A_PORT:-7863}:7863"
+    volumes:
+      - ./auths:/app/auths
+      - ./data:/app/data
+      # 不挂 :ro —— 面板「配置」页保存后会写回此文件并热生效
+      - ./config.json:/app/config.json
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"

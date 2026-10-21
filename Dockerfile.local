@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+# 本地快速部署镜像：复用宿主机已编译好的 Linux 二进制，镜像内不装 Go 工具链。
+#
+# 为什么不直接用根目录 Dockerfile：
+#   1) 原 Dockerfile 第一阶段要拉 golang:1.23-alpine 并 go mod download，国内经常卡住；
+#   2) 上游已停更，你改代码后需要的是「快速验证」，不是可复现的干净构建。
+# 需要干净构建时仍然用 `docker build .`（原 Dockerfile）。
+FROM alpine:3.20
+
+RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
+ && adduser -D -u 10001 app \
+ && mkdir -p /app/auths /app/data /app/scripts \
+ && chown -R app:app /app
+
+WORKDIR /app
+
+COPY dist/linux-amd64/wb2api    /app/wb2api
+COPY dist/linux-amd64/signin_bin /app/signin_bin
+COPY dist/linux-amd64/login     /app/login
+COPY dist/linux-amd64/credit    /app/credit
+
+COPY login.sh signin.sh credit.sh /app/
+COPY scripts/probe_active.py scripts/probe_max_tokens.py /app/scripts/
+
+# Windows 检出的脚本可能是 CRLF，bash 直接跑会报 $'\r': command not found
+RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh \
+ && chmod 755 /app/wb2api /app/signin_bin /app/login /app/credit \
+ && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
+
+# 镜像内只放 example；真实配置由 compose 以只读外的绑定挂载覆盖（面板需写回）
+COPY config.example.json /app/config.json
+
+USER app
+EXPOSE 7863
+
+# 注意：/healthz 是**就绪**探针（池里没有可服务账号时返回 503，进程本身是好的）。
+# 原版 Dockerfile 直接用 `wget ... || exit 1`，导致「刚部署还没加账号」阶段永远是 unhealthy。
+# 这里接受 wget 的 exit 8（服务端返回了错误响应）——它同样证明进程在监听。
+# 真正的就绪状态请用 `docker compose ps` 之外的方式看：curl /healthz 里的 healthy 字段。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD wget -qO- http://127.0.0.1:7863/healthz >/dev/null 2>&1 || [ $? -eq 8 ]
+
+ENTRYPOINT ["/app/wb2api", "-config", "/app/config.json"]

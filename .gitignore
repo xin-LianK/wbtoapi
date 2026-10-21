@@ -34,6 +34,11 @@ docs/
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 !README.md
+# 维护手册必须进版本库（上游停更后这是最重要的文档）
+!MAINTENANCE.md
+
+# 本地部署产物（deploy.sh 的编译输出，体积约 30MB，不进库）
+/dist/
 
 # Windows binaries
 /wb2api.exe
