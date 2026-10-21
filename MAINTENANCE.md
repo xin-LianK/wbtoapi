@@ -372,6 +372,21 @@ python tools/header-parity.py ../_wb_client/main/server.js
 
 ### 5.4 客户端升级后怎么复查
 
+**一条命令（推荐）**——版本没变就毫秒级跳过，变了才做完整对比：
+
+```bash
+./deploy.sh watch          # 每日入口：读 app.asar 里的 version，没变直接退出
+./deploy.sh shape          # 有变化时看完整 diff（退出码 1 = 有漂移）
+./deploy.sh shape --ours   # 顺带核对本网关实际出站的头
+./deploy.sh shape --selftest   # 先确认检测器本身还能抓出漂移（9 项）
+```
+
+`shape` 直接按偏移读 app.asar 里的 `main/server.js`，不解 96 MB 整包，0.8 秒出结果。
+它对比的是**形态**（头名 + 值形态 + 条件 + 端点），不是头名集合——上一轮那三个
+「36 字符 vs 32 字符」的 bug 就是头名集合一致、形态不一致。
+
+**手工路径**（脚本挂了、或需要看原文时）：
+
 ```bash
 # 1) 当前版本（两个来源互相印证）
 curl -s "https://www.codebuddy.cn/v2/update?platform=workbuddy-win32-x64-user"
@@ -382,10 +397,6 @@ node tools/asar-extract.js "/c/Program Files/WorkBuddy/resources/app.asar" ../_w
 
 # 3) 重新提取三个函数
 python tools/slice.py ../_wb_client/main/server.js 'buildVlmGatewayHeaders|applyGatewayHeaders|applyTraceHeaders' 900 2
-
-# 4) 版本变了先只改配置，别改代码
-#    config.json -> upstream.client_version = "5.8.x"
-go test ./internal/upstream/
 ```
 
 **改配置能解决 80% 的失效**：版本号落后是最常见的 11128 触发原因，而版本号是配置项。
@@ -453,6 +464,69 @@ HTTP 头名大小写不敏感，所以**协议层完全合法**；但它是一�
 
 > 如果上游开始校验请求体的签名/时间戳，这条路基本走到头了。届时唯一可持续的方向是自己实现官方 CLI 协议
 > （如果官方有开放 CLI），而不是继续对抗。
+
+### 5.8 形态快照：解包为主、抓包为辅（`tools/upstream-shape.py`）
+
+**分工先讲清**，这也是原作者留下的方法（`git show 19dd3a9` 的注释）：
+解包给**全集**（能看到所有条件分支、默认值、事件码枚举），抓包给**实例**
+（真实取值、时序、必填字段）。只有解包会写出「字段齐全但值瞎填」的请求，
+只有抓包会漏掉没走到的分支。原作者两份方法论文档（`docs/api-reference.md`、
+`data/desktop-task-protocol.md`）被 `.gitignore` 排除、从未入库，现已丢失——本工具是它的替代品。
+
+两条路写进**同一个 shape 结构**，因此 diff 只有一份：
+
+```jsonc
+{
+  "source": "static",                    // 或 "capture"
+  "client_version": "5.8.3",
+  "endpoints": ["/v2/chat/completions", …],   // 客户端代码里出现的全部路径
+  "headers": {
+    "X-Trace-ID":  {"from": "applyTraceHeaders", "when": "always",
+                    "value": {"kind": "hex", "detail": 32}},
+    "X-Tenant-Id": {"from": "buildVlmGatewayHeaders", "when": "if enterpriseId",
+                    "value": {"kind": "param"}},
+    "X-IDE-Version": {"from": "buildVlmGatewayHeaders", "when": "always",
+                      "value": {"kind": "input", "default": "0.0.0"}}
+  },
+  "structure": {"buildVlmGatewayHeaders": true, …}   // 锚点探针
+}
+```
+
+**值形态（`kind`）才是关键**：`uuid` / `hex`(带位数) / `const`(带值) / `input`(带默认) /
+`template` / `param`。上一轮的三个 bug 全部属于「头名一致、`kind` 不一致」。
+
+三个实现细节值得记住，都是踩过的坑：
+
+1. **必须解析局部变量别名**。`X-IDE-Version: r` 里的 `r` 是
+   `e.appVersion?.trim()||\`0.0.0\``。不解析就会把 `0.0.0` 当成真实值——
+   上一轮「X-IDE-Version 就是 0.0.0」的判断错误正是漏了这一层。
+   `X-Trace-ID: n` 同理，`n` 是 `randomBytes(16).toString('hex')`。
+2. **条件组要按括号回溯**。企业号的 `X-Enterprise-Id` 与 `X-Tenant-Id` 共用一个
+   `e.enterpriseId?.trim()&&( … )`，只看紧跟的逗号会把第二个记成「必发」。
+3. **fetch 层还有两个头**。`VlmUpstream.send` 在 `applyGatewayHeaders` 之后补
+   `Accept-Encoding: identity` 与 `Authorization: Bearer <token>`，漏了会数错
+   （24 + 2 + X-User-Id = 27，加 domain 28、加企业 29）。
+
+**抓包怎么进来**：不用常驻 MITM。chat 链路走 Electron 主进程全局 fetch（undici），
+**不读系统代理、主进程也不同步 env**，常规 mitmproxy 方案对它无效，且抓到后出去那程的
+TLS 会变成 mitmproxy 的指纹——正好是我们想去对齐的东西。所以抓包只在「解包给不出实例」
+时手动做一次（Sunny / Charles 导出 HAR），然后：
+
+```bash
+./deploy.sh shape --har capture.har --save     # 导入并建基线
+./deploy.sh shape --har next.har               # 与上一份抓包对比（含 body 键集）
+```
+
+**每日检查怎么做**：`./deploy.sh watch`。它只做一件事——读 asar 里的 version 与最新快照比，
+相同就一行退出。**不要按日期对比抓包数据**：UUID/trace/时间戳每次都变，按值 diff 是纯噪声；
+同版本的静态提取结果则是逐字节相同的，所以「版本变了才比」既省事又没有误报。
+
+**先自检再信任**：`./deploy.sh shape --selftest` 会制造 9 类漂移（删头/加头/值形态变/值长度变/
+常量变/条件变/端点新增/出站值长度不符/出站漏发），逐个验证能被抓到。一个抓不出漂移的检测器
+比没有更糟——它会给你「一致」的假结论。
+
+**能力边界**：这一层看得见头、端点、值形态；看不见请求体字段（静态提取在压缩后的 JS 里
+不可靠，交给抓包）、看不见 TLS 指纹、看不见运行时走了哪条条件分支。
 
 ---
 

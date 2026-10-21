@@ -75,6 +75,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏱️ **出站节奏** | 同账号最小间隔 + 随机抖动 + 每分钟上限（默认 120ms/180ms/90 次）。在途租约只管「同时几个」，这层管「每秒几个」——高频出站比请求头更容易被风控选中，详见 [MAINTENANCE.md §6](MAINTENANCE.md) |
+| 🔍 **上游形态快照** | 客户端升级后自动发现协议漂移：解包提取（主）+ 抓包导入（辅）写进同一份 shape，跨版本 diff 头名/值形态/条件/端点；`./deploy.sh shape --selftest` 自检 9 类漂移，`./deploy.sh watch` 每日跑（版本没变毫秒级跳过） |
 | 🎭 **官方出站形态** | 出站头按 WorkBuddy 桌面端 `5.8.3` 实测形态组装（非企业 27 头 / 带 domain 28 头 / 企业号 29 头），UA、trace、UUID v4 全部对齐；`legacy` profile 可一键回滚；`./deploy.sh headers` 离线打印实际出站头（见[出站请求头形态](#出站请求头形态upstreamprofile)） |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
@@ -354,6 +355,8 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ./deploy.sh native     # 本机直接跑，需要装 Go（调试用）
 ./deploy.sh key        # 打印当前 api_key
 ./deploy.sh headers    # 打印实际出站 chat 请求头（dry-run，不连上游）
+./deploy.sh shape      # 上游形态快照：解包 vs 仓库基线（有漂移退出码 1）
+./deploy.sh watch      # 每日入口：客户端版本没变就跳过
 ```
 
 要点：
@@ -529,7 +532,12 @@ curl -s http://localhost:7863/v1/search/messages \
 ./deploy.sh headers -profile legacy      # 对比旧形态
 go run ./cmd/headers-dump -profile desktop  # 直接跑工具，输出全部出站头
 python tools/header-parity.py <解包目录>/main/server.js   # 与官方 JS 里提的头集合自动对账
+./deploy.sh shape --ours                                 # 形态级对账（头名 + 值形态 + 条件 + 端点）
 ```
+
+客户端升级后**先跑 `watch`**：版本没变就毫秒级跳过，变了才做完整对比。
+`shape` 按偏移直读 asar 里的 `main/server.js`，不解 96 MB 整包；`--har` 可导入 Sunny/Charles
+导出的 HAR 做抓包侧对比（含请求体键集合）。设计取舍见 [MAINTENANCE.md §5.8](MAINTENANCE.md)。
 
 > ⚠️ **这一层只能解决「这一版校验」。** 三个改不动的地方：**TLS 指纹**（Go `crypto/tls` 的 ClientHello 与官方的 Node/OpenSSL 不同，JA3/JA4 可枚举可拉黑）、**头名大小写与顺序**（undici 全小写 + 插入顺序，Go 是 Title-Case + 字典序）与**真机设备令牌**（带设备签名，伪造不了）。上游发版或收紧校验后怎么复查，见 [MAINTENANCE.md](MAINTENANCE.md) 的失效决策树；客户端升级后先跑 `python tools/header-parity.py <解包目录>/main/server.js` 对账。
 
@@ -979,7 +987,7 @@ http://127.0.0.1:7863/panel/
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
-| `./deploy.sh` | 本地快速重建容器（编译 → 换二进制 → 重建，约 1 分钟）；`headers` 子命令打印实际出站头 |
+| `./deploy.sh` | 本地快速重建容器（编译 → 换二进制 → 重建，约 1 分钟）；`headers` 打印实际出站头，`shape` 做上游形态 diff，`watch` 是每日检查入口 |
 | `python3 scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
 | `python3 scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（区分静默钳制与模型主动收尾），`--panel-out` 结果可直接进面板展示（见下节） |
 

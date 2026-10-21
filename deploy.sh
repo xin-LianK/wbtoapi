@@ -7,6 +7,8 @@
 #   ./deploy.sh native     本机直接跑（需要装 Go，调试用）
 #   ./deploy.sh key        打印当前 api_key
 #   ./deploy.sh headers    打印实际出站 chat 请求头（dry-run，不连上游）
+#   ./deploy.sh shape      上游形态快照：解包提取 vs 仓库基线（有漂移退出码 1）
+#   ./deploy.sh watch      每日入口：客户端版本没变就跳过
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -18,6 +20,15 @@ warn() { printf '\033[33mWARN: %s\033[0m\n' "$*"; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# python 解析：PYTHON 环境变量优先，其次 python3/python/py 启动器。
+# 不要把 PY 设成自定义函数名——那样 "$PY" 会调到函数而不是解释器。
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+  for c in python3 python py; do
+    if have "$c"; then PY="$c"; break; fi
+  done
+fi
 rand_hex() {
   if have openssl; then openssl rand -hex 24
   else date +%s%N | sha256sum | cut -c1-48; fi
@@ -83,6 +94,20 @@ case "$MODE" in
     have go || die "未找到 go"
     shift
     go run ./cmd/headers-dump "$@"
+    ;;
+
+  shape)
+    # 上游形态快照：解包提取为主、抓包导入为辅，同一份 schema 做跨版本 diff。
+    # 不连上游、不碰账号，只读本机客户端产物。
+    [ -n "$PY" ] || die "未找到 python"
+    shift
+    "$PY" tools/upstream-shape.py "$@"
+    ;;
+
+  watch)
+    # 每日入口：客户端版本没变就一行退出（毫秒级），变了才跑完整对比。
+    [ -n "$PY" ] || die "未找到 python"
+    "$PY" tools/upstream-shape.py --watch
     ;;
 
   native)

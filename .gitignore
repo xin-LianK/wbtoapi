@@ -50,3 +50,7 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# python 字节码
+__pycache__/
+*.pyc

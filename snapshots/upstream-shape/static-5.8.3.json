@@ -1,0 +1,345 @@
+{
+  "schema": 1,
+  "source": "static",
+  "client_version": "5.8.3",
+  "meta": {
+    "package_name": "@genie/workbuddy-desktop"
+  },
+  "structure": {
+    "buildVlmGatewayHeaders": true,
+    "applyGatewayHeaders": true,
+    "applyTraceHeaders": true,
+    "YN": true
+  },
+  "endpoints": [
+    "/api/memory/clear_profile",
+    "/api/memory/profile",
+    "/api/memory/search",
+    "/api/memory/update_profile",
+    "/api/v1/artifact-recommend/v1/post-session/suggestions",
+    "/api/v1/artifact-recommend/v1/query-consistency",
+    "/api/v1/artifact-recommend/v1/recommendations",
+    "/api/v1/client/resources/complete",
+    "/api/v1/client/resources/presign",
+    "/api/v1/open-platform/charge-user/entitlement/check",
+    "/api/v1/plugins",
+    "/api/v1/plugins/reload",
+    "/api/v2/open-platform/skills",
+    "/api/v2/open-platform/skills/search",
+    "/api/v2/open-platform/tags",
+    "/api/v6/open/agent/manage/apply_upload",
+    "/api/v6/open/agent/manage/complete_upload",
+    "/api/v6/open/agent/manage/create_file",
+    "/api/v6/open/agent/manage/delete_file",
+    "/api/v6/open/agent/manage/list_file",
+    "/api/v6/open/agent/manage/query_file_info",
+    "/api/v6/open/agent/manage/query_task",
+    "/api/v6/open/agent/manage/rename_file_title",
+    "/api/v6/open/agent/manage/search_file",
+    "/api/v6/open/tdrive/capacity",
+    "/api/v6/open/tdrive/dir/create",
+    "/api/v6/open/tdrive/dir/info",
+    "/api/v6/open/tdrive/dir/list",
+    "/api/v6/open/tdrive/dir/move",
+    "/api/v6/open/tdrive/dir/rename",
+    "/api/v6/open/tdrive/dir/trash",
+    "/api/v6/open/tdrive/download",
+    "/api/v6/open/tdrive/drive/app-list",
+    "/api/v6/open/tdrive/drive/subapp-list",
+    "/api/v6/open/tdrive/file/move",
+    "/api/v6/open/tdrive/file/preview-url",
+    "/api/v6/open/tdrive/history/clear",
+    "/api/v6/open/tdrive/history/config/get",
+    "/api/v6/open/tdrive/history/config/set",
+    "/api/v6/open/tdrive/history/delete",
+    "/api/v6/open/tdrive/history/list",
+    "/api/v6/open/tdrive/history/set_latest",
+    "/api/v6/open/tdrive/search/content",
+    "/api/v6/open/tdrive/search/file",
+    "/api/v6/open/tdrive/search/rag-doc",
+    "/api/v6/open/tdrive/search/rag-image",
+    "/api/v6/open/tdrive/shared-folder/create",
+    "/api/v6/open/tdrive/trans_ownership",
+    "/api/v6/open/tdrive/upload/apply",
+    "/api/v6/open/tdrive/upload/cancel",
+    "/api/v6/open/tdrive/upload/complete",
+    "/api/v6/open/tdrive/upload/renew",
+    "/openapi/drive/v2/util/temp-scene",
+    "/openapi/v2/skill-token",
+    "/v1/query-consistency",
+    "/v1/traces",
+    "/v2/activity/banner",
+    "/v2/api-keys",
+    "/v2/as/connector",
+    "/v2/as/connector/agentmail/bind",
+    "/v2/as/connector/agentmail/deactivate",
+    "/v2/as/connector/agentmail/me",
+    "/v2/as/connector/agentmail/reactivate",
+    "/v2/as/connector/agentmail/sms/send",
+    "/v2/as/connector/agentmail/url/admin",
+    "/v2/as/connector/agentmail/url/realname",
+    "/v2/as/conversations/",
+    "/v2/as/custom-model-domain/check",
+    "/v2/as/inspiration/code/decode",
+    "/v2/as/inspiration/code/encode",
+    "/v2/as/netdisk/upload",
+    "/v2/as/scheduler/tasks",
+    "/v2/backgroundagent/localProxy/upload",
+    "/v2/chat/completions",
+    "/v2/enterprises",
+    "/v2/enterprises/personal/models",
+    "/v2/enterprises/{enterpriseId}/claw/control",
+    "/v2/feature-flag/api",
+    "/v2/msg-center/message",
+    "/v2/operation-platform/market",
+    "/v2/user-asset/custom-skills",
+    "/v2/user-asset/skill",
+    "/v2/user/cloudagent/agents",
+    "/v2/user/cloudagent/agents/granted",
+    "/v2/user/cloudagent/agents/pin",
+    "/v2/user/cloudagent/agents/unpin",
+    "/v2/user/cloudagent/entitlement",
+    "/v2/user/cloudagent/instances",
+    "/v2/user/cloudagent/orchestrator",
+    "/v2/user/cloudagent/quota",
+    "/v2/user/cloudagent/tasks"
+  ],
+  "headers": {
+    "Accept": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "application/json"
+      }
+    },
+    "Accept-Encoding": {
+      "from": "VlmUpstream.send",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "identity"
+      }
+    },
+    "acp-connection-id": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "param",
+        "detail": "r.acpConnectionId"
+      }
+    },
+    "Authorization": {
+      "from": "VlmUpstream.send",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "Bearer <accessToken>"
+      }
+    },
+    "b3": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "`${n}-${r}-1-${i}`"
+      }
+    },
+    "Content-Type": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "application/json"
+      }
+    },
+    "traceparent": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "`00-${n}-${r}-01`"
+      }
+    },
+    "User-Agent": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "[`WorkBuddy/${r}`,`WorkBuddy/${r}`,...i?[`CLI/${i}`]:[]].join(` `)"
+      }
+    },
+    "X-Agent-Intent": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "craft"
+      }
+    },
+    "X-Agent-Purpose": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "conversation"
+      }
+    },
+    "X-B3-ParentSpanId": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 16
+      }
+    },
+    "X-B3-Sampled": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "1"
+      }
+    },
+    "X-B3-SpanId": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 16
+      }
+    },
+    "X-B3-TraceId": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 32
+      }
+    },
+    "x-codebuddy-request": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "1"
+      }
+    },
+    "X-Conversation-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "param",
+        "detail": "n"
+      }
+    },
+    "X-Conversation-Message-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "uuid",
+        "detail": 36
+      }
+    },
+    "X-Conversation-Request-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "param",
+        "detail": "r.conversationRequestId"
+      }
+    },
+    "X-Domain": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if domain",
+      "value": {
+        "kind": "input"
+      }
+    },
+    "X-Enterprise-Id": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if enterpriseId",
+      "value": {
+        "kind": "input"
+      }
+    },
+    "X-IDE-Name": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "WorkBuddy"
+      }
+    },
+    "X-IDE-Type": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "WorkBuddy"
+      }
+    },
+    "X-IDE-Version": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "input",
+        "default": "0.0.0"
+      }
+    },
+    "X-Private-Data": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "true"
+      }
+    },
+    "X-Product": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "input",
+        "default": "SaaS"
+      }
+    },
+    "X-Request-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "uuid",
+        "detail": 36
+      }
+    },
+    "x-requested-with": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "XMLHttpRequest"
+      }
+    },
+    "X-Tenant-Id": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if enterpriseId",
+      "value": {
+        "kind": "input"
+      }
+    },
+    "X-Trace-ID": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 32
+      }
+    },
+    "X-User-Id": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if userId",
+      "value": {
+        "kind": "input"
+      }
+    }
+  }
+}
