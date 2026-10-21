@@ -53,8 +53,12 @@
     "client_version": "",
     "cli_version": "",
     "client_name": "",
+    "profile": "desktop",
+    "ide_version": "0.0.0",
+    "product": "SaaS",
     "device_token": "",
     "device_token_file": "",
+    "chat_device_token": false,
     "passthrough_ip": false
   },
   "features": {
@@ -101,5 +105,11 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "pacing": {
+    "enabled": true,
+    "min_interval_ms": 120,
+    "jitter_ms": 180,
+    "per_minute": 90
   }
 }

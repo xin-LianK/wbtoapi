@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
@@ -155,16 +156,26 @@ type Config struct {
 		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
 		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
 		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.161.0）。
 		CliVersion string `json:"cli_version"`
 		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
 		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
 		ClientName string `json:"client_name"`
+		// Profile 出站头形态："desktop"（缺省，WorkBuddy 桌面端 37.x 实测形态）
+		// 或 "legacy"（停更前的 CodeBuddy IDE 5.x 形态，用于回滚对比）。
+		Profile string `json:"profile"`
+		// IDEVersion X-IDE-Version 取值，空 = "0.0.0"（桌面端缺省；与 UA 版本号无关）。
+		IDEVersion string `json:"ide_version"`
+		// Product X-Product 取值，空 = "SaaS"（不是产品名 WorkBuddy）。
+		Product string `json:"product"`
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
 		// 每号 auth 文件的 device_token 键优先于本项。
 		DeviceToken string `json:"device_token"`
 		// DeviceTokenFile device token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
 		DeviceTokenFile string `json:"device_token_file"`
+		// ChatDeviceToken 是否把 X-Device-Token 注入 chat 请求（默认 false）。
+		// 官方桌面端 chat 不带此头；仅在需要验证「上游是否按设备绑定账号」时打开。
+		ChatDeviceToken bool `json:"chat_device_token"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
@@ -248,6 +259,26 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	// Pacing 出站请求节奏（账号维度，见 internal/pace）。
+	//
+	// pool.max_in_flight 限的是「同时在途几个」，对**速率**不设防：3 个在途名额
+	// 配短请求能一秒打出十几次，而任何真实客户端都不会有这种分布。上游的风控
+	// 模型（IP 级 403、通道级 11128）看的正是这种「不像人」的节奏，而不是单次
+	// 请求长什么样。三档参数互相独立，全部为 0 即整层关闭（等价 enabled=false）。
+	Pacing struct {
+		// Enabled 总开关，缺省 true；显式 false 时三档参数一律不生效。
+		Enabled bool `json:"enabled"`
+		// MinIntervalMS 同账号两次出站的最小间隔（毫秒）；0 = 不限制。
+		// 并发请求按到达顺序排队，第 N 个等 (N-1)×间隔——节奏无法被并发绕过。
+		MinIntervalMS int `json:"min_interval_ms"`
+		// JitterMS 在间隔上叠加的随机量上界 [0, JitterMS)（毫秒）；0 = 不加抖动。
+		// 等间距的机器时钟本身就是指纹，抖动把它打散成泊松样分布。
+		JitterMS int `json:"jitter_ms"`
+		// PerMinute 单账号滑动 60s 窗口内的请求数上限；0 = 不限制。
+		// 防「间隔很小但持续打满」——单靠 MinInterval 挡不住高频长跑。
+		PerMinute int `json:"per_minute"`
+	} `json:"pacing"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -264,6 +295,8 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// PacingCfg 解析后的出站节奏参数（零值 = 全关）。
+	PacingCfg pace.Config `json:"-"`
 }
 
 // Default 默认配置。
@@ -317,6 +350,14 @@ func Default() *Config {
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键
 	// 的 0 没有合理语义，回退分档默认最稳）。
 	c.Pool.MaxInFlightGlobal = 2
+	// 出站节奏默认开启（温和档）：120ms 间隔 + 180ms 抖动 ≈ 平均每请求多等
+	// ~210ms（TTFB 可感知但无体感），而每分钟 90 次对单人对话绰绰有余（正常
+	// 使用 10-20 次/分）。脚本狂刷、循环重试、批量跑任务都会被这一层削掉峰值。
+	// 想要完全复现改动前的行为：pacing.enabled=false。
+	c.Pacing.Enabled = true
+	c.Pacing.MinIntervalMS = 120
+	c.Pacing.JitterMS = 180
+	c.Pacing.PerMinute = 90
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
@@ -458,11 +499,25 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
 	}
+	if v := os.Getenv("WB2A_UPSTREAM_PROFILE"); v != "" {
+		c.Upstream.Profile = v
+	}
+	if v := os.Getenv("WB2A_IDE_VERSION"); v != "" {
+		c.Upstream.IDEVersion = v
+	}
+	if v := os.Getenv("WB2A_PRODUCT"); v != "" {
+		c.Upstream.Product = v
+	}
 	if v := os.Getenv("WB2A_DEVICE_TOKEN"); v != "" {
 		c.Upstream.DeviceToken = v
 	}
 	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
 		c.Upstream.DeviceTokenFile = v
+	}
+	if v := os.Getenv("WB2A_CHAT_DEVICE_TOKEN"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.ChatDeviceToken = b
+		}
 	}
 	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -490,6 +545,28 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_DNS"); v != "" {
 		c.DNSServers = splitCSV(v)
+	}
+	// 出站节奏（见 internal/pace）。解析失败静默忽略，keep 默认值——与本函数
+	// 其他数值型环境变量同一约定。
+	if v := os.Getenv("WB2A_PACE_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Pacing.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_PACE_MIN_INTERVAL_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Pacing.MinIntervalMS = n
+		}
+	}
+	if v := os.Getenv("WB2A_PACE_JITTER_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Pacing.JitterMS = n
+		}
+	}
+	if v := os.Getenv("WB2A_PACE_PER_MINUTE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Pacing.PerMinute = n
+		}
 	}
 }
 
@@ -588,6 +665,26 @@ func (c *Config) normalize() error {
 	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
 	if c.Pool.MaxInFlightGlobal <= 0 {
 		c.Pool.MaxInFlightGlobal = 2
+	}
+	// 出站节奏：三个参数各自独立，0 一律表示"这一档不限制"，负值无语义 →
+	// fail fast（静默钳 0 会把保护悄悄关掉，与 server.read_timeout 同一纪律）。
+	if c.Pacing.MinIntervalMS < 0 {
+		return fmt.Errorf("pacing.min_interval_ms: 负值无语义（0 = 不限制）")
+	}
+	if c.Pacing.JitterMS < 0 {
+		return fmt.Errorf("pacing.jitter_ms: 负值无语义（0 = 不加抖动）")
+	}
+	if c.Pacing.PerMinute < 0 {
+		return fmt.Errorf("pacing.per_minute: 负值无语义（0 = 不限制）")
+	}
+	if c.Pacing.Enabled {
+		c.PacingCfg = pace.Config{
+			MinInterval: time.Duration(c.Pacing.MinIntervalMS) * time.Millisecond,
+			Jitter:      time.Duration(c.Pacing.JitterMS) * time.Millisecond,
+			PerMinute:   c.Pacing.PerMinute,
+		}
+	} else {
+		c.PacingCfg = pace.Config{} // 总开关关闭：三档参数一律不生效
 	}
 	if c.Pool.IdleWeightPerHour <= 0 {
 		c.Pool.IdleWeightPerHour = 0.5

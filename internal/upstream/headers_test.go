@@ -10,8 +10,9 @@ import (
 
 // TestChatHeadersAlwaysSendConversationTrio 回归 issue #190：国际端点收紧通道
 // 校验后，缺 X-Conversation-ID 的聊天请求会 400 / 11128（conversation id
-// missing）。即使调用方没给会话 ID（零值 ChatMeta），三元组也必须齐全，
-// 且兜底 ID 是 32 位 hex。
+// missing）。即使调用方没给会话 ID（零值 ChatMeta），三元组也必须齐全。
+// 形态允许两种：legacy 的 32 hex，或 desktop profile 的带连字符 UUID
+// （桌面端 37.x 用 randomUUID()，见 injectDesktopConversationHeaders）。
 func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 	c := &Client{}
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/v2/chat/completions", nil)
@@ -20,7 +21,7 @@ func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 	}
 	c.ChatHeaders(req, testAuth(), "", ChatMeta{})
 
-	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	idOK := regexp.MustCompile(`^([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
 	for _, h := range []string{
 		"X-Conversation-ID",
 		"X-Conversation-Request-ID",
@@ -30,8 +31,8 @@ func TestChatHeadersAlwaysSendConversationTrio(t *testing.T) {
 		if v == "" {
 			t.Fatalf("%s missing (通道校验会拒绝缺少会话三元组的请求)", h)
 		}
-		if !hex32.MatchString(v) {
-			t.Errorf("%s = %q, want 32 hex", h, v)
+		if !idOK.MatchString(v) {
+			t.Errorf("%s = %q, want 32 hex or UUID", h, v)
 		}
 	}
 

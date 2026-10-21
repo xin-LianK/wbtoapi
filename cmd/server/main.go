@@ -20,6 +20,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -159,8 +160,14 @@ func main() {
 	up.ClientVersion = cfg.Upstream.ClientVersion
 	up.CliVersion = cfg.Upstream.CliVersion
 	up.ClientName = cfg.Upstream.ClientName
+	// 出站头形态：缺省 desktop（本机 app.asar 实测的 37.x 真实形态）；
+	// "legacy" 回到停更前的 CodeBuddy IDE 5.x 形态，便于对照排查。
+	up.Profile = cfg.Upstream.Profile
+	up.IDEVersion = cfg.Upstream.IDEVersion
+	up.Product = cfg.Upstream.Product
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	up.DeviceTokenFile = cfg.Upstream.DeviceTokenFile
+	up.ChatDeviceToken = cfg.Upstream.ChatDeviceToken
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
@@ -285,6 +292,13 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// 出站节奏限制器（账号维度速率控制：在途租约管并发数，管不住速率）。
+	// 在 panel 之前构造：面板保存配置时要热改同一实例（节奏状态需延续，
+	// 重建实例会让所有账号的 nextAt 归零、瞬间放行一波突发）。
+	pacer := pace.New(cfg.PacingCfg)
+	log.Printf("[pace] 出站节奏：间隔 %dms + 抖动 %dms，单号每分钟上限 %d（0=不限）",
+		cfg.Pacing.MinIntervalMS, cfg.Pacing.JitterMS, cfg.Pacing.PerMinute)
+
 	// 积分历史：把每次真实查到的余额与上一次比对，变动即留痕（新账号首次只建
 	// 基线）。挂载在余额查询路径上（upstream 的余额观察者），签到 / 活跃上报 /
 	// 旅行 / 保活 / 面板手动刷新全覆盖——上游只在少数渠道落金额日志，比对余额
@@ -313,7 +327,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, pacer)
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
@@ -341,6 +355,7 @@ func main() {
 		RequestLog:   requestLog,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
+		Pacer:        pacer,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -459,7 +474,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, pacer *pace.Limiter) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -537,6 +552,10 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
+	// 出站节奏热生效：只换参数、不重建实例——重建会让所有账号的 nextAt 归零，
+	// 等于瞬间放行一波突发，恰好是这一层要防的事。pacer 为 nil（裸用/测试）时
+	// 是 nil receiver，SetConfig 内部静默跳过。
+	pacer.SetConfig(newCfg.PacingCfg)
 	_ = p.SetScheduling(newCfg.Pool.Strategy, newCfg.Pool.AccountOrder)
 	sch.SetExpiringSoonWindow(newCfg.ExpiringSoonDur)
 	sch.Reconfigure(

@@ -741,16 +741,33 @@ type Client struct {
 	// （仅当 client_name 非空）。
 	UserAgent string
 
-	// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` + X-IDE-Version）。
-	// 空 = 内置默认（对齐官方 5.5.4 分发包）。
+	// ClientVersion WorkBuddy 客户端版本段（同时驱动 UA 的 `WorkBuddy/<ver>` 与
+	// X-IDE-Version）。空 = 内置默认（对齐官方 5.8.3 分发包）。
 	ClientVersion string
 
-	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
+	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。官方取自服务端下发的
+	// platformVersion（非常量），空 = 内置默认兜底。
 	CliVersion string
 
-	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
+	// ClientName 用量归属头取值（legacy 形态的 X-IDE-Name/Type；desktop 形态恒为 WorkBuddy，
+	// 不受此字段影响）。空 = attributionClientName() 的默认 "WorkBuddy"。
 	ClientName string
+
+	// Profile 出站头形态。取值：
+	//   ""/"desktop" = WorkBuddy 桌面端 5.8.3 网关真实形态（2026-10-21 从
+	//                  C:\Program Files\WorkBuddy\resources\app.asar 提取，
+	//                  buildVlmGatewayHeaders + applyGatewayHeaders）；
+	//   "legacy"     = 停更前的旧形态（含 Origin/X-Machine-ID 等），保留回滚能力。
+	// 两者差异集中在 headers.go，切换不影响选号/体重写/流式链路。
+	Profile string
+
+	// IDEVersion X-IDE-Version 显式覆盖。空 = 跟随 ClientVersion（官方取 appVersion，
+	// 不是 "0.0.0"——"0.0.0" 只是 applyGatewayHeaders 兜底表的占位值）。
+	IDEVersion string
+
+	// Product X-Product 取值。空 = "SaaS"（桌面端 deploymentType 缺省；
+	// 不是产品名 "WorkBuddy"——那是最容易写错、也最容易被识别的字段）。
+	Product string
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
 	// 缺省 false（反代安全边界）；handler 在 chat 路径按请求把 clientIP 传入 ChatStream。
@@ -762,6 +779,16 @@ type Client struct {
 
 	// DeviceTokenFile 设备 token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
 	DeviceTokenFile string
+
+	// ChatDeviceToken 是否把 X-Device-Token 也注入 chat 请求。默认 false。
+	//
+	// 官方桌面端 chat 链路**不带**这个头：chat 的注入钩子 getRequestHeaders 接的是
+	// buildVlmGatewayHeaders，不含设备头；X-Device-Token 只出现在签到
+	// （getCheckinRequestHeaders）与 app-server 的 auth-state 接口。
+	// 原实现把它加进 chat 是为了补「设备指纹缺失」（防多号按 IP+UA 关联），
+	// 但那属于用「官方不发的头」换安全感，与编造 X-Machine-ID 同类。
+	// 需要 A/B 验证上游是否真的按设备绑定账号时，把这个开关打开。
+	ChatDeviceToken bool
 
 	ChatBaseCN    string
 	BillingBaseCN string

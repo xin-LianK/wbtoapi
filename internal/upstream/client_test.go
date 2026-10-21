@@ -306,7 +306,10 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "WorkBuddy" {
+	// X-Product 走 desktop profile 的 deploymentType 缺省值 "SaaS"。
+	// 旧断言是 "WorkBuddy"——那是把产品名当成 deploymentType 的误判，
+	// 官方客户端从不发该值（见 headers_desktop_test.go）。
+	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
 	if !bytes.Contains(gotBody, []byte(`"stream":true`)) {

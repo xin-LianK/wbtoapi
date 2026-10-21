@@ -20,6 +20,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -78,6 +79,10 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// Pacer 出站节奏限制器（账号维度，见 internal/pace）。nil = 不做节奏控制。
+	// 与 pool 的在途租约互补：租约管「同时几个在路上」，Pacer 管「每秒几个」。
+	Pacer *pace.Limiter
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -890,6 +895,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 刷新成功但落盘失败：下次启动会用旧 token，必须暴露
 				log.Printf("ERR: [server] chat refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
 			}
+		}
+
+		// 出站节奏（账号维度，见 internal/pace）：租约只管「同时在途几个」，
+		// 对速率完全不设防——3 个在途名额配 200ms 的短请求，一秒能打十几次，
+		// 而任何真实客户端都不会有这种分布。上游风控（IP 级 403、通道级
+		// 11128）看的正是这种节奏特征。放在 refresh 之后、发请求之前：
+		//   - refresh 是账号维护流量，频率天然低，不参与业务节奏；
+		//   - 等待失败只可能是客户端断开或超时，此时换号无意义（请求方已经
+		//     不要结果了），直接终止轮转。
+		// 注意 attemptStarted 刻意记在 Wait 之后：reqlog 的 TTFB 口径保持
+		// 「上游首字节」纯净，不被本地排队时长污染；代价是客户端感知延迟
+		// 会比日志里的 TTFB 多出这一段（默认档平均约 210ms）。
+		if err := h.cfg.Pacer.Wait(r.Context(), acct.UID); err != nil {
+			lastErr = err
+			fail(acct.UID)
+			break
 		}
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。

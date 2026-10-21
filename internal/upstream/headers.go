@@ -14,12 +14,17 @@ import (
 
 const (
 	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// 白名单头组的 X-IDE-Version）。对齐官方 WorkBuddy Desktop 分发包版本（5.5.4）。
+	// X-IDE-Version）。对齐官方 WorkBuddy Desktop 当前分发包版本（5.8.3，
+	// 2026-10-21 由 www.codebuddy.cn/v2/update?platform=workbuddy-win32-x64-user 取得，
+	// 与本机 app.asar 的 package.json version 一致）。
 	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.5.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。对齐官方内置 CLI（2.137.1）。
-	// config upstream.cli_version 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.137.1"
+	defaultClientVersion = "5.8.3"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。官方取值来自
+	// productManager 下发的 platformVersion（buildVlmGatewayHeaders 的 cliVersion）。
+	// 5.8.3 安装包内嵌的 CLI 为 @tencent-ai/codebuddy-code 2.161.0
+	// （resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs 内 customPackage.version）。
+	// config upstream.cli_version 可覆盖（空 = 内置默认），实测到新值优先改配置。
+	defaultCliVersion = "2.161.0"
 
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
@@ -143,7 +148,119 @@ func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
 }
 
+// desktopProfile 报告是否使用「WorkBuddy 桌面端 37.x」出站头形态。
+// 缺省（Profile 为空）即 desktop：这是从本机 app.asar 实测得到的当前真实形态。
+// 显式 "legacy" 回到停更前的 CodeBuddy IDE 5.x 形态（仅用于回滚对比）。
+func (c *Client) desktopProfile() bool {
+	if c == nil {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(c.Profile), "legacy")
+}
+
+// ideVersion X-IDE-Version 取值。
+//
+// 权威来源是 WorkBuddy 桌面端 buildVlmGatewayHeaders：
+//
+//	n["X-IDE-Version"] = appVersion?.trim() || "0.0.0"
+//
+// 即真实产品版本（如 5.8.3）。applyGatewayHeaders 里 YN 常量表的
+// ["X-IDE-Version","0.0.0"] 只是 `e.set(n, e.get(n) || r)` 的**兜底**——真实值先设好
+// 就不会落到 0.0.0。所以这里必须跟随 clientVersion，写成 0.0.0 反而是错的。
+func (c *Client) ideVersion() string {
+	if c != nil && strings.TrimSpace(c.IDEVersion) != "" {
+		return c.IDEVersion
+	}
+	return c.clientVersion()
+}
+
+// product X-Product 取值。桌面端取 deploymentType，缺省 "SaaS"。
+// 写成 "WorkBuddy" 是最常见也最致命的错误——客户端从不发这个值。
+func (c *Client) product() string {
+	if c != nil && strings.TrimSpace(c.Product) != "" {
+		return c.Product
+	}
+	return "SaaS"
+}
+
+// uuidDashed 把 32 位 hex 转成 UUID v4 文本形态（8-4-4-4-12）。
+//
+// 只插横线不够：官方所有 ID 都出自 crypto.randomUUID()，第 13 位恒为 "4"
+// （版本位）、第 17 位恒为 8/9/a/b（变体位）。裸 hex 加横线会产出
+// "…-cd98-4a67-…" 这种版本位乱跳的值，一条正则就能和官方区分开。
+func uuidDashed(h string) string {
+	if len(h) != 32 {
+		return h
+	}
+	b := []byte(h)
+	b[12] = '4'
+	// 变体位：保留低 2 bit 熵，高位固定为 10b（即 8/9/a/b）。
+	i := strings.IndexByte("0123456789abcdef", b[16])
+	if i < 0 {
+		i = 0
+	}
+	b[16] = "89ab"[i&0x3]
+	return string(b[0:8]) + "-" + string(b[8:12]) + "-" + string(b[12:16]) + "-" + string(b[16:20]) + "-" + string(b[20:32])
+}
+
+// applyDesktopChatHeaders 把 ChatHeaders 的结果修正为桌面端真实形态。
+// 只作用于 chat 路径：refresh/billing 走的是插件域，形态本就不同，不在此列。
+//
+// 依据（2026-10-21 从 WorkBuddy 5.8.3 app.asar 的 buildVlmGatewayHeaders /
+// applyGatewayHeaders / applyTraceHeaders 提取，并用本机安装的 CodeBuddy IDE 4.12.2
+// 的 genie 扩展交叉验证）：
+//   - Origin / Referer 被客户端显式 strip（qN 集合含 origin），不发；
+//   - Accept-Language 不在构造里，不发；
+//   - X-Machine-ID 在 chat 链路零出现（WorkBuddy 与 CodeBuddy IDE 均无；
+//     IDE 侧只有 feedback 接口的 X-Machine-Id），纯造头，删；
+//   - X-Session-ID 只在 IDE 的代码补全链路发（来自 sessionId），chat 不发，删；
+//   - Accept 固定 application/json（流式也如此，响应侧才是 text/event-stream）；
+//   - Accept-Encoding 显式 identity（禁用压缩）；
+//   - 额外发 acp-connection-id / X-Private-Data / X-Agent-Intent（见各注入点）。
+func (c *Client) applyDesktopChatHeaders(req *http.Request, a *auth.Auth) {
+	req.Header.Del("Origin")
+	req.Header.Del("Referer")
+	req.Header.Del("Accept-Language")
+	req.Header.Del("X-Machine-ID")
+	req.Header.Del("X-Session-ID")
+	// X-No-* 是插件域（旧实现）的「显式声明缺省」约定，官方桌面端 chat 从不发。
+	// 官方是「有值才设」，没有对应的 X-No-* 头（buildVlmGatewayHeaders 全是
+	// `e.userId?.trim() && (...)` 这种短路写法）。留着就是可识别特征。
+	req.Header.Del("X-No-User-Id")
+	req.Header.Del("X-No-Enterprise-Id")
+	req.Header.Del("X-No-Department-Info")
+	req.Header.Set("Accept-Encoding", "identity")
+	// 设备身份三件套（X-Device-Token / X-Custom-Channel-Id / X-Device-Id-List）
+	// 由 WorkbuddyAuthStateHeaderProvider 产出，但**只喂给 app-server 的
+	// auth-state 与签到接口**，不在 chat 链路里：
+	//   - chat 的注入钩子 getRequestHeaders 接的是 buildVlmGatewayHeaders，
+	//     不是这个 provider（main/server.js @3526839 可证）；
+	//   - X-Device-Token 在桌面端只出现在 getCheckinRequestHeaders()。
+	// 所以 chat 一个都不能带。给 chat 补这三个头，等于把「反代特征」从
+	// 少发变成多发——和旧实现造 X-Machine-ID 是同一类错误。
+	req.Header.Del("X-Custom-Channel-Id")
+	req.Header.Del("X-Device-Id-List")
+	// X-Device-Token 例外：可用 upstream.chat_device_token 显式打开，
+	// 用于验证「上游是否按设备绑定账号」。默认关闭 = 与官方一致。
+	if !c.ChatDeviceToken {
+		req.Header.Del("X-Device-Token")
+	}
+	// 官方 chat 请求头 Accept 恒为 application/json（applyGatewayHeaders 写死），
+	// 流式与否只影响 body 的 stream 字段与响应类型。发 event-stream 属可识别偏差。
+	req.Header.Set("Accept", "application/json")
+	// 企业号在 chat 域也发 X-Tenant-Id（旧实现只在 billing 域发）。
+	if a != nil && a.EnterpriseID != "" {
+		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
+	}
+	// ACP 连接标识：官方是每连接一个 randomUUID()（带连字符）。这里按账号稳定派生，
+	// 形态必须对齐（uuidDashed）——裸 36 hex 与官方 UUID 一眼可辨。
+	if a != nil && a.UID != "" {
+		req.Header.Set("acp-connection-id", uuidDashed(deriveAccountStableID(a.UID, "acp")[:32]))
+	}
+}
+
 // CommonHeaders 设置所有 API 共享的请求头。
+
 func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
 	// Accept 非流式默认 application/json（D6：去掉宽松的 text/plain, */*）。
@@ -238,6 +355,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	c.injectDeviceToken(req, a)
 	// 会话头族（对话/请求/消息/B3 链路），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
+	// 桌面端形态修正放在最后：以「覆盖/删除」的方式收敛，不改动 common 与选号链路。
+	if c.desktopProfile() {
+		c.applyDesktopChatHeaders(req, a)
+	}
 }
 
 // injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
@@ -267,6 +388,10 @@ func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
 //     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
 //     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
+	if c.desktopProfile() {
+		c.injectDesktopConversationHeaders(req, meta)
+		return
+	}
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
 		// 零值 meta（直接调 ChatHeaders 的调用方/测试）也要保证聚合主键必发：
@@ -298,6 +423,53 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	}
 	req.Header.Set("X-B3-TraceId", b3Trace)
 	req.Header.Set("X-B3-SpanId", messageID[:16])
+	req.Header.Set("X-B3-Sampled", "1")
+}
+
+// injectDesktopConversationHeaders 桌面端 37.x 的会话/链路头族。
+// 与 legacy 的差异：
+//   - 消息级 ID 用带连字符 UUID（客户端用 randomUUID()）
+//   - 不发 X-Root-Request-ID（网关路径没有这个头，多发即特征）
+//   - 补全 W3C traceparent + 单头 b3 + X-B3-ParentSpanId
+func (c *Client) injectDesktopConversationHeaders(req *http.Request, meta ChatMeta) {
+	convReqID := meta.ConversationRequestID
+	if convReqID == "" {
+		convReqID = uuidDashed(session.NewMessageID())
+	}
+	messageID := uuidDashed(session.NewMessageID())
+	// 官方 applyGatewayHeaders 是两次独立的 randomUUID()：
+	//   X-Conversation-Message-ID = randomUUID()
+	//   X-Request-ID              = randomUUID()
+	// 不能复用同一个值——「消息 ID 与请求 ID 恒等」是真实客户端不会出现的形态。
+	requestID := uuidDashed(session.NewMessageID())
+	conversationID := meta.ConversationID
+	if conversationID == "" {
+		conversationID = uuidDashed(session.NewMessageID())
+	}
+	// 链路 trace：官方 applyTraceHeaders **每次请求都重新 randomBytes(16)**，
+	// 与 conversationRequestId 无任何关系。早期实现拿 convReqID 当兜底，
+	// 结果 X-Trace-ID 恒等于 X-Conversation-Request-ID（仅去掉横线）——
+	// 两个本应独立的随机值永远相等，一条比对就能和真实客户端区分开。
+	traceID := strings.ReplaceAll(meta.TraceID, "-", "")
+	if len(traceID) != 32 || !validTraceID(traceID) {
+		traceID = strings.ReplaceAll(session.NewMessageID(), "-", "")
+	}
+	if len(traceID) != 32 || !validTraceID(traceID) {
+		traceID = strings.ReplaceAll(messageID, "-", "")
+	}
+	spanID := strings.ReplaceAll(session.NewMessageID(), "-", "")[:16]
+	parentID := strings.ReplaceAll(session.NewMessageID(), "-", "")[:16]
+
+	req.Header.Set("X-Conversation-ID", conversationID)
+	req.Header.Set("X-Conversation-Request-ID", convReqID)
+	req.Header.Set("X-Conversation-Message-ID", messageID)
+	req.Header.Set("X-Request-ID", requestID)
+	req.Header.Set("X-Trace-ID", traceID)
+	req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+	req.Header.Set("b3", traceID+"-"+spanID+"-1-"+parentID)
+	req.Header.Set("X-B3-TraceId", traceID)
+	req.Header.Set("X-B3-ParentSpanId", parentID)
+	req.Header.Set("X-B3-SpanId", spanID)
 	req.Header.Set("X-B3-Sampled", "1")
 }
 
@@ -334,6 +506,19 @@ func (c *Client) attributionClientName() string {
 // 不再出现 client/agentPurpose 为空的「网关特征」。显式 ClientName="SaaS" 还原旧行为
 // （仅 X-Product="SaaS"，不设 X-IDE-*）；配其他值则四头跟随该值。
 func (c *Client) injectAttribution(req *http.Request) {
+	// 桌面端 5.8.3：X-IDE-* 恒为 WorkBuddy，X-IDE-Version 取 appVersion（真实版本），
+	// X-Product 取 deploymentType（缺省 SaaS），并额外带 X-Private-Data / X-Agent-Intent。
+	// 这四个头官方**每个 chat 请求都发**，缺任何一个都比版本号写错更显眼。
+	if c.desktopProfile() {
+		req.Header.Set("X-Agent-Purpose", "conversation")
+		req.Header.Set("X-Agent-Intent", "craft")
+		req.Header.Set("X-IDE-Type", "WorkBuddy")
+		req.Header.Set("X-IDE-Name", "WorkBuddy")
+		req.Header.Set("X-IDE-Version", c.ideVersion())
+		req.Header.Set("X-Product", c.product())
+		req.Header.Set("X-Private-Data", "true")
+		return
+	}
 	name := c.attributionClientName()
 	if name == "SaaS" {
 		req.Header.Set("X-Product", "SaaS")

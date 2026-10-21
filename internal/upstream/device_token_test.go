@@ -14,7 +14,8 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// TestDeviceTokenInjected_WhenSet auth.Auth.DeviceToken 非空时 chat/billing 请求均注入。
+// TestDeviceTokenInjected_WhenSet 设备令牌确实会被注入到「官方也会发」的路径：
+// billing（签到）默认注入；chat 仅在显式打开 ChatDeviceToken 时注入。
 func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1", DeviceToken: "tok-from-auth"}
 	// 用 server 端验证而非 RoundTripper 捕获：更贴近真实注入路径。
@@ -22,9 +23,10 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 		name     string
 		apply    func(c *Client, req *http.Request)
 		wantPath string
+		chatDT   bool
 	}{
-		{"chat", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions"},
-		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report"},
+		{"chat_opt_in", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions", true},
+		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got string
@@ -35,10 +37,11 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := &Client{
-				HTTP:          srv.Client(),
-				ChatHTTP:      srv.Client(),
-				ChatBaseCN:    srv.URL,
-				BillingBaseCN: srv.URL,
+				HTTP:            srv.Client(),
+				ChatHTTP:        srv.Client(),
+				ChatBaseCN:      srv.URL,
+				BillingBaseCN:   srv.URL,
+				ChatDeviceToken: tc.chatDT,
 			}
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+tc.wantPath, nil)
 			tc.apply(c, req)
@@ -51,6 +54,28 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 				t.Errorf("X-Device-Token = %q want %q", got, "tok-from-auth")
 			}
 		})
+	}
+}
+
+// TestDeviceTokenNotOnChatByDefault 官方桌面端 chat 不带 X-Device-Token
+// （chat 的注入钩子是 buildVlmGatewayHeaders，不含设备头）。默认必须不发。
+func TestDeviceTokenNotOnChatByDefault(t *testing.T) {
+	a := &auth.Auth{AccessToken: "at", UID: "u1", DeviceToken: "tok-from-auth"}
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Device-Token")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"code":0}`))
+	}))
+	defer srv.Close()
+	c := &Client{HTTP: srv.Client(), ChatHTTP: srv.Client(), ChatBaseCN: srv.URL}
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
+	c.ChatHeaders(req, a, "", ChatMeta{})
+	if resp, err := c.HTTP.Do(req); err == nil {
+		resp.Body.Close()
+	}
+	if got != "" {
+		t.Errorf("X-Device-Token = %q，官方 chat 不发该头", got)
 	}
 }
 
@@ -123,8 +148,8 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 				DeviceToken:     tc.cfg,
 				DeviceTokenFile: fp,
 			}
-			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-			c.ChatHeaders(req, a, "", ChatMeta{})
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/report", nil)
+			c.BillingHeaders(req, a)
 			resp, err := c.HTTP.Do(req)
 			if err != nil {
 				t.Fatalf("do: %v", err)

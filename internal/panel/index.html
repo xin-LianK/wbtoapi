@@ -1053,6 +1053,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input name="breaker_threshold" type="number" min="1" placeholder="3"></label>
             </div>
             <div class="grid3">
+              <label class="fld"><span class="lb">出站最小间隔</span>
+                <input name="pace_min_interval_ms" type="number" min="0" placeholder="120">
+                <span class="hint">同账号两次出站的最小间隔（ms），0 = 不限制</span></label>
+              <label class="fld"><span class="lb">出站随机抖动</span>
+                <input name="pace_jitter_ms" type="number" min="0" placeholder="180">
+                <span class="hint">在间隔上叠加 [0,N) 毫秒随机量，打散等间距指纹</span></label>
+              <label class="fld"><span class="lb">单号每分钟上限</span>
+                <input name="pace_per_minute" type="number" min="0" placeholder="90">
+                <span class="hint">滑动 60s 窗口内的请求数，0 = 不限制</span></label>
+            </div>
+            <div class="switch"><span class="lb">出站节奏控制（租约管并发数，这一层管速率）</span>
+              <input type="checkbox" name="pace_enabled"></div>
+            <div class="grid3">
               <label class="fld"><span class="lb">软限流冷却基数</span>
                 <input name="soft_rate" placeholder="600s"></label>
               <label class="fld"><span class="lb">软冷却退避上限</span>
