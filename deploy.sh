@@ -9,6 +9,7 @@
 #   ./deploy.sh headers    打印实际出站 chat 请求头（dry-run，不连上游）
 #   ./deploy.sh shape      上游形态快照：解包提取 vs 仓库基线（有漂移退出码 1）
 #   ./deploy.sh watch      每日入口：客户端版本没变就跳过
+#   ./deploy.sh stats      请求指标简报：昨日失败率/403/429 及前日环比（恶化退出码 1）
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -108,6 +109,14 @@ case "$MODE" in
     # 每日入口：客户端版本没变就一行退出（毫秒级），变了才跑完整对比。
     [ -n "$PY" ] || die "未找到 python"
     "$PY" tools/upstream-shape.py --watch
+    ;;
+
+  stats)
+    # 请求指标简报：昨日 status / outcome 分布 + 前日环比（读 data/request-logs）。
+    # 只读本地 JSONL，不连上游。退出码 1 = 指标显著恶化。
+    [ -n "$PY" ] || die "未找到 python"
+    shift
+    "$PY" tools/req-stats.py "$@"
     ;;
 
   native)
