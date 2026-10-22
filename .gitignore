@@ -54,3 +54,6 @@ server.exe
 # python 字节码
 __pycache__/
 *.pyc
+
+# Capture output (TLS MITM dumps)
+/capture/
