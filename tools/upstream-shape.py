@@ -477,7 +477,13 @@ def extract_events(sources):
 
 
 def gateway_event_codes():
-    """扫本网关 Go 源码里上报的事件码（`"eventCode": "xxx"` 字面量）。"""
+    """扫本网关 Go 源码里上报的事件码。
+
+    两种写法都要收，只认 `"eventCode": "xxx"` 会漏报：
+      - 直接信封：`"eventCode": "chat_request_send"`
+      - 走形参：  ReportWebEvent(a, "web_element_click", ...)   ← 第一个参数是账号
+    漏一个的后果是差集看起来更"干净"，正好掩盖问题。
+    """
     codes = set()
     for p in glob.glob(os.path.join("internal", "**", "*.go"), recursive=True):
         if p.endswith("_test.go"):
@@ -487,6 +493,7 @@ def gateway_event_codes():
         except Exception:
             continue
         codes |= set(re.findall(r'"eventCode"\s*:\s*"([A-Za-z0-9_.:-]+)"', txt))
+        codes |= set(re.findall(r'Report\w*\([^,()]+,\s*"([a-z][a-z0-9_]{2,60})"', txt))
     return sorted(codes)
 
 
@@ -775,8 +782,8 @@ def diff_ours(official, ours):
 def report_events_ours(official):
     """网关上报的事件码 vs 客户端事件枚举。只提示，不影响退出码。
 
-    **不在枚举里不等于应该删**：实测（2026-10-22，5.8.3）网关在用的 15 个码里有
-    9 个已不在客户端枚举内，但上报仍然有效、照常点亮任务——那是服务端自己维护的
+    **不在枚举里不等于应该删**：实测（2026-10-22，5.8.3）静态可识别的 14 个码里
+    有 9 个已不在客户端枚举内，但上报仍然有效、照常点亮任务——那是服务端自己维护的
     判据名，客户端只是不再在前端发。真正的用法是：某个任务突然点不亮时，先看它
     依赖的码是否在这一行里，再决定是判据改名还是行为链没走对。
     """
@@ -785,11 +792,12 @@ def report_events_ours(official):
         return
     ours = gateway_event_codes()
     if not ours:
-        print("⚠️  没在 internal/ 下找到 \"eventCode\" 字面量，跳过事件对账")
+        print("⚠️  没在 internal/ 下找到事件码，跳过事件对账")
         return
     known = set(official["events"])
     missing = [c for c in ours if c not in known]
-    print(f"   事件码：网关发 {len(ours)} 个，命中客户端枚举 {len(ours) - len(missing)} 个")
+    print(f"   事件码：静态可识别 {len(ours)} 个（事件链里以变量传入的码扫不到，"
+          f"实际多于这个数），命中客户端枚举 {len(ours) - len(missing)} 个")
     if missing:
         print(f"   ⚠️  {len(missing)} 个不在客户端 {official.get('client_version', '')} 枚举内"
               f"（服务端判据名，通常应保留；点不亮时优先查这里）：")
