@@ -10,6 +10,7 @@
 #   ./deploy.sh shape      上游形态快照：解包提取 vs 仓库基线（有漂移退出码 1）
 #   ./deploy.sh watch      每日入口：客户端版本没变就跳过
 #   ./deploy.sh stats      请求指标简报：昨日失败率/403/429 及前日环比（恶化退出码 1）
+#   ./deploy.sh tasks      成长任务对照：列出上游任务码，标出还没做自动化实现的
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -117,6 +118,14 @@ case "$MODE" in
     [ -n "$PY" ] || die "未找到 python"
     shift
     "$PY" tools/req-stats.py "$@"
+    ;;
+
+  tasks)
+    # 上游成长任务对照：列出账号的真实任务码，标出还没有自动化实现的那几个。
+    # 需要先 ./login.sh 登录（读 ./auths）。只读上游列表，不改任何状态。
+    have go || die "未找到 go"
+    shift
+    go run ./cmd/tasks "$@"
     ;;
 
   native)

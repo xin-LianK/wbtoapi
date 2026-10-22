@@ -359,6 +359,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ./deploy.sh shape      # 上游形态快照：解包 vs 仓库基线（有漂移退出码 1）
 ./deploy.sh watch      # 每日入口：客户端版本没变就跳过
 ./deploy.sh stats      # 请求指标简报：昨日失败率/403/429 与前日环比（恶化退出码 1）
+./deploy.sh tasks      # 成长任务对照：列出上游任务码 + 标出还没做自动化实现的（需先 login.sh）
 ```
 
 要点：
@@ -990,7 +991,7 @@ http://127.0.0.1:7863/panel/
 | `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
 | `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
 | `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
-| `./deploy.sh` | 本地快速重建容器（编译 → 换二进制 → 重建，约 1 分钟）；`headers` 打印实际出站头，`shape` 做上游形态 diff，`watch` 是每日检查入口 |
+| `./deploy.sh` | 本地快速重建容器（编译 → 换二进制 → 重建，约 1 分钟）；`headers` 打印实际出站头，`shape` 做上游形态 diff，`watch` 是每日检查入口，`stats` 看请求指标，`tasks` 对照成长任务缺口 |
 | `python3 scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
 | `python3 scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（区分静默钳制与模型主动收尾），`--panel-out` 结果可直接进面板展示（见下节） |
 

@@ -215,6 +215,16 @@ var mpTaskCodes = map[string]bool{
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
 func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
 
+// AutoTaskCodes 返回已实现自动化的任务码，供诊断工具（cmd/tasks）对照上游下发列表。
+// 上游新增任务时不必改代码就能发现缺口：跑 cmd/tasks 看哪些码不在这个集合里。
+func AutoTaskCodes() []string {
+	out := make([]string, 0, len(autoActions))
+	for i := range autoActions {
+		out = append(out, autoActions[i].TaskCode)
+	}
+	return out
+}
+
 // claimTaskReward 按任务码口径领奖：mp 码走 chat 域 mp 端点，其余走 Web 端。
 // claim 幂等（重复领返回 already_claimed → 0 分 0 能）。
 func claimTaskReward(p *Panel, a *auth.Auth, code string) (credit, energy int64, err error) {
