@@ -13,18 +13,21 @@ func mustJWT(t *testing.T, payload string) string {
 }
 
 // TestIsEnterpriseSession 企业切换会话判定：JWT token_source=enterprise_switch
-// 视为企业上下文；无该声明 / 非 JWT / 空 token 一律否（老凭证零回归）；
-// enterpriseId 非空短路为真（与 IsEnterprise 同口径）。
+// **且 enterprise_id 非空**才视为企业上下文（个人号进出企业空间后会被打上该
+// 标记但 enterprise_id 为空，实测仍按个人口径计分，不能拦）；无该声明 / 非 JWT /
+// 空 token 一律否（老凭证零回归）；enterpriseId 非空短路为真（与 IsEnterprise 同口径）。
 func TestIsEnterpriseSession(t *testing.T) {
 	cases := []struct {
 		name  string
 		token string
 		want  bool
 	}{
-		{"enterprise_switch", mustJWT(t, `{"sub":"u1","token_source":"enterprise_switch"}`), true},
+		{"enterprise_switch+企业id", mustJWT(t, `{"sub":"u1","token_source":"enterprise_switch","enterprise_id":"e1"}`), true},
+		{"enterprise_switch但企业id为空（个人号误标）", mustJWT(t, `{"sub":"u1","token_source":"enterprise_switch","enterprise_id":""}`), false},
+		{"enterprise_switch无企业id声明", mustJWT(t, `{"sub":"u1","token_source":"enterprise_switch"}`), false},
 		{"无 token_source 声明", mustJWT(t, `{"sub":"u1","scope":"openid profile"}`), false},
-		{"其他 token_source", mustJWT(t, `{"sub":"u1","token_source":"password"}`), false},
-		{"带填充 base64url", "hdr." + base64.URLEncoding.EncodeToString([]byte(`{"token_source":"enterprise_switch"}`)) + ".sig", true},
+		{"其他 token_source", mustJWT(t, `{"sub":"u1","token_source":"password","enterprise_id":"e1"}`), false},
+		{"带填充 base64url", "hdr." + base64.URLEncoding.EncodeToString([]byte(`{"token_source":"enterprise_switch","enterprise_id":"e1"}`)) + ".sig", true},
 		{"payload 非 JSON", "hdr." + base64.RawURLEncoding.EncodeToString([]byte("not-json")) + ".sig", false},
 		{"非 JWT 形态", "opaque-token", false},
 		{"空 token", "", false},

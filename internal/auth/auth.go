@@ -212,8 +212,7 @@ func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) !=
 
 // IsEnterpriseSession 报告当前凭证是否处于「企业上下文」：
 // 账号本身是企业版（IsEnterprise），或 AccessToken 签发自**企业切换会话**
-// （JWT payload 带 token_source=enterprise_switch——浏览器在企业空间状态下
-// 完成 OAuth 授权时签发）。
+// （JWT payload 同时带 token_source=enterprise_switch 与非空 enterprise_id）。
 //
 // 为什么单独一站：企业切换会话与真企业版的上游表现**不同**（实测 2026-10-12，
 // 同一时刻与个人号 A/B 对照）——成长任务列表 / 额度查询 / 领养 Buddy 等**读端点
@@ -224,6 +223,14 @@ func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) !=
 // 的门控应使用本方法；签到与任务列表扫描不在此列（签到失败是显式报错，
 // 列表扫描实测可用）。额度查询 / 选号 / 保活照常（按 IsEnterprise 口径）。
 //
+// 判定收紧（2026-10-22 实测修正）：**只看 token_source 会误伤个人号**。个人账号
+// 在浏览器里进出过一次企业空间后，重新以个人身份授权拿到的 token 仍可能带
+// enterprise_switch，但 enterprise_id 为空——该形态实测完全按个人口径计分：
+// 签到返回「今天已签到」（而非企业号的 code 10001「企业账号不支持该操作」），
+// 成长任务 WorkBuddy_Valorant 的行为事件 5 秒内点亮 0/1 → 1/1 并成功领奖
+// +100 分 +5 能。故要求 token_source=enterprise_switch 且 JWT enterprise_id
+// 非空才算企业会话，避免把个人号整号拦死（单任务 422、队列与调度全跳过）。
+//
 // 每次现解码 JWT 而非 Parse 时缓存：RefreshToken 会整体换发 token，
 // 企业切换状态可能随重新授权翻转，缓存会读到过期形态。解码成本仅一次
 // base64 + 小 JSON（每调度轮每账号数次），可忽略。
@@ -231,31 +238,40 @@ func (a *Auth) IsEnterpriseSession() bool {
 	if a.IsEnterprise() {
 		return true
 	}
-	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
+	c := parseJWTClaims(a.AccessTokenValue())
+	return c.TokenSource == "enterprise_switch" && strings.TrimSpace(c.EnterpriseID) != ""
 }
 
-// jwtTokenSource 解出 JWT payload 中的 token_source 声明；非 JWT / 解码失败
-// 一律返回 ""（老 token 与非标准形态按无此声明处理，零回归）。先按无填充
-// base64url 解（JWT 标准），失败再试带填充形态（兼容非标准签发方）。
-func jwtTokenSource(token string) string {
+// jwtClaims JWT payload 中与账号上下文相关的声明子集。
+type jwtClaims struct {
+	TokenSource  string `json:"token_source"`
+	EnterpriseID string `json:"enterprise_id"`
+}
+
+// parseJWTClaims 解出 JWT payload 声明；非 JWT / 解码失败一律返回零值（老 token
+// 与非标准形态按无声明处理，零回归）。先按无填充 base64url 解（JWT 标准），
+// 失败再试带填充形态（兼容非标准签发方）。
+func parseJWTClaims(token string) jwtClaims {
 	parts := strings.Split(token, ".")
 	if len(parts) < 2 {
-		return ""
+		return jwtClaims{}
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		if raw, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
-			return ""
+			return jwtClaims{}
 		}
 	}
-	var payload struct {
-		TokenSource string `json:"token_source"`
+	var c jwtClaims
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return jwtClaims{}
 	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return ""
-	}
-	return payload.TokenSource
+	return c
 }
+
+// jwtTokenSource 解出 token_source 声明（parseJWTClaims 的窄封装，保留给
+// 仅关心标记来源的调用点）。
+func jwtTokenSource(token string) string { return parseJWTClaims(token).TokenSource }
 
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。

@@ -11,19 +11,30 @@ import (
 )
 
 // sessionTestScheduler 与 enterpriseTestScheduler 同构：switched=true 时账号的
-// AccessToken 为带 token_source=enterprise_switch 的 JWT（企业**切换会话**，
-// enterpriseId 为空——网关无法凭 enterpriseId 识别的形态）；false 为个人号对照组。
+// AccessToken 为带 token_source=enterprise_switch + 非空 enterprise_id 的 JWT
+// （真企业切换会话）；false 为个人号对照组。仅带标记、enterprise_id 为空的是
+// 个人号误标形态（见 TestEnterpriseSwitchFlagWithoutEnterpriseIDNotGated）。
 func sessionTestScheduler(t *testing.T, switched bool) (*Scheduler, *recorderUpstream) {
+	t.Helper()
+	token := "at"
+	if switched {
+		token = mustSessionJWT(t, `{"sub":"u1","token_source":"enterprise_switch","enterprise_id":"e1"}`)
+	}
+	return sessionTestSchedulerWithToken(t, token)
+}
+
+func mustSessionJWT(t *testing.T, payload string) string {
+	t.Helper()
+	return "hdr." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+}
+
+// sessionTestSchedulerWithToken 用显式 AccessToken 构造调度器（凭证形态判定用）。
+func sessionTestSchedulerWithToken(t *testing.T, token string) (*Scheduler, *recorderUpstream) {
 	t.Helper()
 	r := &recorderUpstream{}
 	srv := r.server()
 	t.Cleanup(srv.Close)
 
-	token := "at"
-	if switched {
-		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"u1","token_source":"enterprise_switch"}`))
-		token = "hdr." + payload + ".sig"
-	}
 	a := &auth.Auth{UID: "u1", AccessToken: token, RefreshToken: "rt", ExpiresAt: 9999999999}
 	p := pool.New("")
 	p.Add(a)
@@ -81,6 +92,24 @@ func TestEnterpriseSessionGateSkipsBehaviorTasks(t *testing.T) {
 				t.Errorf("个人号对照应发起 %s，实际请求=%v", c.endpoint, rPer.snapshot())
 			}
 		})
+	}
+}
+
+// TestEnterpriseSwitchFlagWithoutEnterpriseIDNotGated 个人号误标形态：
+// token_source=enterprise_switch 但 JWT enterprise_id 为空（个人账号在浏览器
+// 进出过一次企业空间后，重新以个人身份授权）。实测 2026-10-22 该形态完全按
+// 个人口径计分——签到返回「今天已签到」、成长任务 WorkBuddy_Valorant 行为事件
+// 5 秒内 0/1→1/1 并成功领奖，故不得整号门控（否则单任务 422、队列与调度全跳过）。
+func TestEnterpriseSwitchFlagWithoutEnterpriseIDNotGated(t *testing.T) {
+	restoreClock := nowForNightWindow
+	nowForNightWindow = func() time.Time { return time.Date(2026, 10, 22, 23, 30, 0, 0, time.Local) }
+	t.Cleanup(func() { nowForNightWindow = restoreClock })
+
+	s, r := sessionTestSchedulerWithToken(t,
+		mustSessionJWT(t, `{"sub":"u1","token_source":"enterprise_switch","enterprise_id":""}`))
+	s.RunActivityNow()
+	if !r.has("/v2/report") {
+		t.Errorf("误标个人号应照常发起活跃上报，实际请求=%v", r.snapshot())
 	}
 }
 
