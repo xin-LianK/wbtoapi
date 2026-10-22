@@ -129,6 +129,11 @@ var autoActions = []autoAction{
 		run:      runExpertLighthouse,
 	},
 	{
+		TaskCode: "WorkBuddy_Valorant",
+		Desc:     "召唤「无畏契约拼豆专家」+ 真实对话（活动任务，截止 11-15，与轻量云专家同构）",
+		run:      runExpertValorant,
+	},
+	{
 		TaskCode: "black_cat",
 		Desc:     "夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示稍后再试）",
 		Attempt:  true,
@@ -970,45 +975,72 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 // chat 链的 agent_task_created 需带 has_expert:true + expert_id（我们默认 false），
 // expert_actual_use 的 mode 为 "LOCAL"（非 craft）。id 固定为轻量云专家
 // ex_2cvvUZQhDyeJ；requestId 必须是真实 chat 的服务端 id。紫川/人杰2 实测点亮。
-func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
-	const lhID = "ex_2cvvUZQhDyeJ"
-	lh := upstream.MarketExpert{
-		ExpertID: lhID, ExpertType: "agent",
-		DisplayNameZH: "腾讯轻量云专家", ProfessionZH: "腾讯轻量云专家", Version: "1.0.2",
-	}
-	// 市场列表若命中真实条目则用其信息（version 等以服务端为准）。
-	if experts, err := p.cfg.Upstream.MarketExpertList(a, "agent"); err == nil {
-		for _, e := range experts {
-			if e.ExpertID == lhID {
-				lh = e
-				break
-			}
-		}
-	}
-	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(lh)...); err != nil {
+// runExpertExperience 专家体验类任务的公共链路（Expert_lighthouse /
+// WorkBuddy_Valorant 共用）：召唤链 → 带 X-Expert-Id 的真实对话拿服务端
+// requestId → agent_task_created 补专家字段 → expert_actual_use(mode=LOCAL)
+// 一次上报。上游判据要求 expert_id 在市场上真实存在、requestId 来自真实 chat
+// （自造 UUID 不计数）。
+func runExpertExperience(p *Panel, a *auth.Auth, exp upstream.MarketExpert, label string) (string, error) {
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(exp)...); err != nil {
 		return "", fmt.Errorf("召唤链: %w", err)
 	}
-	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, lhID)
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, exp.ExpertID)
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	events := upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model")
+	suffix := req
+	if len(suffix) > 8 {
+		suffix = suffix[len(suffix)-8:]
+	}
+	events := upstream.DesktopChatSequence(conv, req, "msg-"+suffix, "fast-model", "fast-model")
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
 			ev["has_expert"] = true
-			ev["expert_id"] = lh.ExpertID
-			ev["expert_name"] = lh.DisplayNameZH
+			ev["expert_id"] = exp.ExpertID
+			ev["expert_name"] = exp.DisplayNameZH
 			ev["expert_industry_id"] = ""
 		}
 	}
-	events = append(events, upstream.DesktopExpertActualUseLocal(lh, conv, req))
-	// 对齐真实样本细节：轻量云专家 actual_use 的 type 为空、cost=0。
+	events = append(events, upstream.DesktopExpertActualUseLocal(exp, conv, req))
+	// 对齐真实样本细节：专家体验类 actual_use 的 type 为空、cost=0。
 	events[len(events)-1]["type"] = ""
 	events[len(events)-1]["cost"] = 0
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 		return "", fmt.Errorf("使用事件: %w", err)
 	}
-	return "已上报轻量云专家召唤+使用链（真实对话 requestId）", nil
+	return "已上报" + label + "召唤+使用链（真实对话 requestId）", nil
+}
+
+// resolveMarketExpert 在市场列表里查专家真实条目（version/名称以服务端为准）；
+// 查不到回落到兜底信息——市场列表只按推荐序取前 20 条，靠后的专家查不到。
+func (p *Panel) resolveMarketExpert(a *auth.Auth, fallback upstream.MarketExpert) upstream.MarketExpert {
+	if experts, err := p.cfg.Upstream.MarketExpertList(a, "agent"); err == nil {
+		for _, e := range experts {
+			if e.ExpertID == fallback.ExpertID {
+				return e
+			}
+		}
+	}
+	return fallback
+}
+
+func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
+	lh := p.resolveMarketExpert(a, upstream.MarketExpert{
+		ExpertID: "ex_2cvvUZQhDyeJ", ExpertType: "agent",
+		DisplayNameZH: "腾讯轻量云专家", ProfessionZH: "腾讯轻量云专家", Version: "1.0.2",
+	})
+	return runExpertExperience(p, a, lh, "轻量云专家")
+}
+
+// runExpertValorant 完成 WorkBuddy_Valorant（体验「无畏契约拼豆专家」）。
+// 判据（任务描述原文）：专家页搜索并召唤该专家、完成一次对话，活动截止 11-15。
+// 与 Expert_lighthouse 完全同构，专家 id 取自专家市场实测 ex_xQHHD1u5Jkua。
+func runExpertValorant(p *Panel, a *auth.Auth) (string, error) {
+	v := p.resolveMarketExpert(a, upstream.MarketExpert{
+		ExpertID: "ex_xQHHD1u5Jkua", ExpertType: "agent",
+		DisplayNameZH: "无畏契约拼豆专家", ProfessionZH: "无畏契约拼豆专家", Version: "1.0.0",
+	})
+	return runExpertExperience(p, a, v, "无畏契约拼豆专家")
 }
 
 // runAppearance 完成 Hp_Appearance（换主题）。
