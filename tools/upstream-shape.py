@@ -6,6 +6,10 @@
     `YN` 常量兜底表），给出所有可能发出的头；
   - 抓包只有实际走到的分支和真实取值，但能给出**请求体键集合**与真实头名大小写。
 
+除头与端点外，静态提取还收一份**事件码枚举**（`Events` 枚举块）：成长任务的判据
+全在事件名上，而事件名不在头里、也不在端点里，属于独立一层。它一变，对应任务就
+点不亮，所以必须纳入版本 diff（schema 2 起）。
+
 两者写进同一个 shape 结构，因此 diff 逻辑只有一份。
 
 用法:
@@ -39,7 +43,9 @@ import struct
 import subprocess
 import sys
 
-SCHEMA = 1
+# schema 2：新增 events（事件码枚举）。schema 1 的快照没有 events，
+# 对比时按「无基线」跳过事件层，不误报成上百条新增。
+SCHEMA = 2
 SNAPSHOT_DIR = os.path.join("snapshots", "upstream-shape")
 
 DEFAULT_ASAR_CANDIDATES = [
@@ -55,6 +61,19 @@ ANCHORS = [
     ("applyTraceHeaders", "function applyTraceHeaders"),
     ("YN", "var YN="),
 ]
+
+# 事件码枚举所在的成员，按顺序尝试。
+#
+# 注意：枚举**不在** main/server.js 里。server.js 只引用它（`r.Nt.ChatRequestSend`
+# 里的 r 就是首行 require 的 ./dev-env-override.js），实体定义在那个文件。名字带
+# dev 只是打包遗留，它被 server.js 无条件 require，属于必加载模块，因此可以当
+# 权威来源。server.js 放第一位是为了万一官方哪天把枚举内联回来也能自动适配。
+EVENT_SOURCE_MEMBERS = ["main/server.js", "main/dev-env-override.js"]
+
+# 事件枚举块内用来确认「找对了块」的哨兵成员：存在才能确定块边界没变。
+EVENT_SENTINEL = "t.ChatRequestSend=`chat_request_send`"
+EVENT_ENUM_START = "Events=function(t){return t."
+EVENT_ENUM_END = "}({})"
 
 # 不在上面三个函数里、但最终一定发出去的头（VlmUpstream.send 在 fetch 前补）。
 # 入站头还会被透传一层（qN 黑名单剔除 origin/authorization/accept-encoding 等），
@@ -106,13 +125,21 @@ def read_asar_members(path, wanted):
 
 
 def load_static_source(args):
-    """返回 (version, server_js, meta)。支持 asar 直读与已解包目录两条路。"""
+    """返回 (version, sources, meta)。sources 是 {asar 成员名: 文本}。
+
+    回多个成员是因为事件枚举不在 server.js 里，而在它 require 的共享模块里
+    （见 EVENT_SOURCE_MEMBERS）。调用方按需取用，缺哪个就是哪个不存在。
+    """
     if args.src:
         d = args.src
         js_path = os.path.join(d, "main", "server.js")
         if not os.path.exists(js_path):
             raise SystemExit(f"{d} 下没有 main/server.js，--src 要指向已解包目录")
-        server_js = io.open(js_path, encoding="utf-8", errors="replace").read()
+        sources = {}
+        for member in EVENT_SOURCE_MEMBERS:
+            p = os.path.join(d, member.replace("/", os.sep))
+            if os.path.exists(p):
+                sources[member] = io.open(p, encoding="utf-8", errors="replace").read()
         version, meta = "", {}
         pkg = os.path.join(d, "package.json")
         if os.path.exists(pkg):
@@ -122,7 +149,7 @@ def load_static_source(args):
                 meta["package_name"] = pj.get("name", "")
             except Exception:
                 pass
-        return version, server_js, meta
+        return version, sources, meta
 
     asar = args.asar
     if not asar:
@@ -135,9 +162,11 @@ def load_static_source(args):
             "找不到 WorkBuddy 的 app.asar。用 --asar 指定，或用 --src 指向已解包目录。"
         )
 
-    mem = read_asar_members(asar, {"main/server.js", "package.json"})
+    wanted = set(EVENT_SOURCE_MEMBERS) | {"package.json"}
+    mem = read_asar_members(asar, wanted)
     if "main/server.js" not in mem:
         raise SystemExit(f"{asar} 里没有 main/server.js，客户端结构可能已变")
+    sources = {k: v for k, v in mem.items() if k != "package.json"}
 
     version = ""
     try:
@@ -157,7 +186,7 @@ def load_static_source(args):
         f.seek(max(0, os.path.getsize(asar) - 1024 * 1024))
         h.update(f.read(1024 * 1024))
     meta["asar_fingerprint"] = h.hexdigest()[:16]
-    return version, mem["main/server.js"], meta
+    return version, sources, meta
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +443,55 @@ def extract_endpoints(src):
     return sorted(eps)
 
 
-def extract_static(version, server_js, meta):
+def extract_events(sources):
+    """抽取事件码枚举，返回 ({事件码: 成员名}, 来源成员)。
+
+    客户端把它编成 TS 枚举的 IIFE：
+        Events=function(t){return t.UserAuthAction=`user_auth_action`,...}({})
+    块内是纯字面量，所以按哨兵成员定位、再回溯到块头、截到 `}({})` 是可靠的。
+    **不能用全文正则**——整包还有别的枚举（认证类型、插件状态）同样是
+    ``t.X=`value` `` 形态，全文扫会把它们混进来，做出「多出来 20 个事件」的假结论。
+
+    以事件码为键而不是成员名：判据是码，跨版本「成员名不变、码变了」抓不到，
+    但「旧码消失 + 新码出现」照样能抓到，不会漏。
+    """
+    for member in EVENT_SOURCE_MEMBERS:
+        src = sources.get(member)
+        if not src:
+            continue
+        i = src.find(EVENT_SENTINEL)
+        if i < 0:
+            continue
+        start = src.rfind(EVENT_ENUM_START, 0, i)
+        if start < 0:
+            continue
+        end = src.find(EVENT_ENUM_END, i)
+        if end < 0:
+            continue
+        events = {}
+        for m in re.finditer(r"t\.([A-Za-z0-9_$]+)=`([a-z0-9_]{1,60})`", src[start:end]):
+            events[m.group(2)] = m.group(1)
+        if events:
+            return events, member
+    return None, None
+
+
+def gateway_event_codes():
+    """扫本网关 Go 源码里上报的事件码（`"eventCode": "xxx"` 字面量）。"""
+    codes = set()
+    for p in glob.glob(os.path.join("internal", "**", "*.go"), recursive=True):
+        if p.endswith("_test.go"):
+            continue
+        try:
+            txt = io.open(p, encoding="utf-8", errors="replace").read()
+        except Exception:
+            continue
+        codes |= set(re.findall(r'"eventCode"\s*:\s*"([A-Za-z0-9_.:-]+)"', txt))
+    return sorted(codes)
+
+
+def extract_static(version, sources, meta):
+    server_js = sources.get("main/server.js", "")
     structure, missing = {}, []
     for label, marker in ANCHORS:
         structure[label] = marker in server_js
@@ -446,6 +523,20 @@ def extract_static(version, server_js, meta):
     for name, item in SUPPLEMENT.items():
         headers.setdefault(name, item)
 
+    events, events_from = extract_events(sources)
+    structure["Events"] = bool(events)
+    if not events:
+        # 一个都没抽到，说明枚举块形态变了（哨兵成员改名 / 打包方式变化）。
+        # 静默出空 events 会让漂移检测永远报「无变化」，比报错更糟。
+        raise SystemExit(
+            "事件枚举抽不出来，客户端枚举结构可能已变：\n"
+            f"  已尝试成员：{', '.join(EVENT_SOURCE_MEMBERS)}\n"
+            f"  期望在块内找到 `{EVENT_SENTINEL}`，实际未命中\n"
+            "→ 检查 EVENT_SOURCE_MEMBERS / EVENT_SENTINEL / EVENT_ENUM_START / EVENT_ENUM_END。"
+        )
+    if events_from:
+        meta["events_from"] = events_from
+
     return {
         "schema": SCHEMA,
         "source": "static",
@@ -454,6 +545,7 @@ def extract_static(version, server_js, meta):
         "structure": structure,
         "endpoints": extract_endpoints(server_js),
         "headers": dict(sorted(headers.items(), key=lambda kv: kv[0].lower())),
+        "events": dict(sorted(events.items())),
     }
 
 
@@ -555,9 +647,31 @@ def diff_static(old, new):
     for ep in sorted(set(old.get("endpoints") or []) - set(new.get("endpoints") or [])):
         changes.append(("端点消失", ep, "在客户端代码里出现", "—"))
 
+    changes.extend(diff_events(old, new))
+
     for label, ok in (new.get("structure") or {}).items():
         if not ok:
             changes.append(("结构缺失", label, "存在", "找不到"))
+    return changes
+
+
+def diff_events(old, new):
+    """事件码枚举的版本漂移。
+
+    「事件消失」是最需要盯的一类：客户端不再发某个码，往往意味着服务端判据
+    改从别处推断或直接下线。我们若还在发，任务就会静默点不亮（上报 200 但不计分）。
+    """
+    oe = old.get("events") or {}
+    ne = new.get("events") or {}
+    if not ne:
+        return [("事件枚举缺失", "Events", f"{len(oe)} 个" if oe else "—", "解析不到")]
+    if not oe:
+        return []  # schema 1 基线没有事件层，跳过（main 会提示重建基线）
+    changes = []
+    for code in sorted(set(ne) - set(oe)):
+        changes.append(("事件新增", code, "—", ne[code]))
+    for code in sorted(set(oe) - set(ne)):
+        changes.append(("事件消失", code, oe[code], "—"))
     return changes
 
 
@@ -658,6 +772,31 @@ def diff_ours(official, ours):
     return changes, sorted(conditional)
 
 
+def report_events_ours(official):
+    """网关上报的事件码 vs 客户端事件枚举。只提示，不影响退出码。
+
+    **不在枚举里不等于应该删**：实测（2026-10-22，5.8.3）网关在用的 15 个码里有
+    9 个已不在客户端枚举内，但上报仍然有效、照常点亮任务——那是服务端自己维护的
+    判据名，客户端只是不再在前端发。真正的用法是：某个任务突然点不亮时，先看它
+    依赖的码是否在这一行里，再决定是判据改名还是行为链没走对。
+    """
+    if not official.get("events"):
+        print("⚠️  基线快照没有事件层（schema 1），跳过事件对账；重新 --save 建基线")
+        return
+    ours = gateway_event_codes()
+    if not ours:
+        print("⚠️  没在 internal/ 下找到 \"eventCode\" 字面量，跳过事件对账")
+        return
+    known = set(official["events"])
+    missing = [c for c in ours if c not in known]
+    print(f"   事件码：网关发 {len(ours)} 个，命中客户端枚举 {len(ours) - len(missing)} 个")
+    if missing:
+        print(f"   ⚠️  {len(missing)} 个不在客户端 {official.get('client_version', '')} 枚举内"
+              f"（服务端判据名，通常应保留；点不亮时优先查这里）：")
+        for c in missing:
+            print(f"      · {c}")
+
+
 # ---------------------------------------------------------------------------
 # 快照读写
 # ---------------------------------------------------------------------------
@@ -728,7 +867,7 @@ def report(changes, title, detail_ok):
 
 
 def selftest(shape):
-    """自检：手工制造 7 种漂移，确认每一种都能被抓到。
+    """自检：手工制造各类漂移，确认每一种都能被抓到。
 
     一个抓不出漂移的检测器比没有更糟——它会给你「一致」的假结论。
     """
@@ -773,6 +912,13 @@ def selftest(shape):
 
     add("端点新增", lambda s: s["endpoints"].append("/v2/chat/completions-v3"), {"端点新增"})
 
+    if shape.get("events"):
+        first = sorted(shape["events"])[0]
+        add("事件码消失", lambda s: s["events"].pop(first), {"事件消失"})
+        add("事件码新增", lambda s: s["events"].__setitem__("brand_new_event", "BrandNew"),
+            {"事件新增"})
+        add("事件层整块丢失", lambda s: s["events"].clear(), {"事件枚举缺失"})
+
     # 我们的出站头对账也要能报错：把 32 位 hex 改成 16 位必须被抓
     ours_ok, _ = run_headers_dump()
     if ours_ok:
@@ -807,7 +953,7 @@ def main():
     ap.add_argument("--src", metavar="DIR", help="已解包目录（含 main/server.js），跳过解包")
     ap.add_argument("--baseline", metavar="PATH", help="指定对比基线 JSON（默认取最新快照）")
     ap.add_argument("--list", action="store_true", help="列出已有快照")
-    ap.add_argument("--selftest", action="store_true", help="自检：制造 7 类漂移确认都能抓到")
+    ap.add_argument("--selftest", action="store_true", help="自检：制造各类漂移确认都能抓到")
     ap.add_argument("--watch", action="store_true",
                     help="每日入口：版本没变就一行退出（0），变了才跑完整对比")
     args = ap.parse_args()
@@ -841,12 +987,13 @@ def main():
                       f"{len(shape['requests'])} 条请求")
 
     # ---- 静态提取模式 ----
-    version, server_js, meta = load_static_source(args)
-    shape = extract_static(version, server_js, meta)
+    version, sources, meta = load_static_source(args)
+    shape = extract_static(version, sources, meta)
 
     if args.watch:
         base = latest_static()
-        if base and base.get("client_version") == version:
+        # schema 升级后旧基线缺事件层，同版本也不能跳过，否则事件层永远建不起来。
+        if base and base.get("client_version") == version and "events" in base:
             # 版本没变：同版本的静态提取结果必然逐字节相同，直接跳过全部重活。
             print(f"客户端 {version} 未变（基线 {os.path.basename(save_path_of(base))}），跳过")
             return 0
@@ -865,12 +1012,16 @@ def main():
     base = json.load(io.open(args.baseline, encoding="utf-8")) if args.baseline else latest_static()
     if base is None:
         print(f"客户端 {version or '未知版本'}：{len(shape['headers'])} 个头、"
-              f"{len(shape['endpoints'])} 个端点。")
+              f"{len(shape['endpoints'])} 个端点、{len(shape.get('events') or {})} 个事件码。")
         print("还没有基线快照，本次只输出不对比。加 --save 建基线。")
     else:
+        if "events" not in base:
+            print("ℹ️  基线是 schema 1（没有事件层），本次跳过事件对比。"
+                  "加 --save 覆盖基线后，事件码漂移才会被检测。")
         title = f"静态形态 {base.get('client_version')} → {version or '未知'}"
         rc |= report(diff_static(base, shape), title,
                      f"{len(shape['headers'])} 个头、{len(shape['endpoints'])} 个端点、"
+                     f"{len(shape.get('events') or {})} 个事件码、"
                      f"结构锚点 {sum(1 for v in shape['structure'].values() if v)}/{len(shape['structure'])}")
 
     if args.ours:
@@ -882,6 +1033,7 @@ def main():
             ch, cond = diff_ours(shape, ours)
             rc |= report(ch, f"本网关出站头 vs 官方 {version or ''}",
                          f"已比 {len(ours)} 个头；条件头 {len(cond)} 个按账号形态跳过")
+        report_events_ours(shape)
     return rc
 
 
