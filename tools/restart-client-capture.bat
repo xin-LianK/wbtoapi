@@ -49,8 +49,13 @@ if not exist "%ADDON%" (
 
 if not exist "%HERE%\capture" mkdir "%HERE%\capture"
 
-echo [*] Checking proxy on 127.0.0.1:%PORT% ...
-netstat -ano | findstr /r /c:"127.0.0.1:%PORT%.*LISTENING" >nul
+REM Detection note: mitmproxy binds 0.0.0.0:8888 (plus [::]:8888), NOT 127.0.0.1.
+REM Matching "127.0.0.1:8888.*LISTENING" never hits and the script bails out
+REM before closing the app -- which looks exactly like "the bat did nothing".
+REM So: filter LISTENING rows, then match the local port with a non-digit guard
+REM so :88880 or a remote port :8888 on a TIME_WAIT row can't false-positive.
+echo [*] Checking proxy on port %PORT% ...
+netstat -ano | findstr /c:"LISTENING" | findstr /r /c:":%PORT%[^0-9]" >nul
 if errorlevel 1 goto start_proxy
 echo     already running
 goto kill_app
@@ -64,19 +69,43 @@ if not exist "%MITMDUMP%" (
 )
 echo [*] Starting proxy in its own window ...
 start "mitmproxy-%PORT%" /min "%MITMDUMP%" -p %PORT% -q -s "%ADDON%"
-timeout /t 5 /nobreak >nul
-netstat -ano | findstr /r /c:"127.0.0.1:%PORT%.*LISTENING" >nul
+REM mitmproxy cold-starts slowly on Windows (python + addon import): 6s is not
+REM always enough, and a single-shot check turns a slow start into "failed".
+timeout /t 6 /nobreak >nul
+netstat -ano | findstr /c:"LISTENING" | findstr /r /c:":%PORT%[^0-9]" >nul
+if not errorlevel 1 goto proxy_ready
+timeout /t 6 /nobreak >nul
+netstat -ano | findstr /c:"LISTENING" | findstr /r /c:":%PORT%[^0-9]" >nul
 if errorlevel 1 (
-  echo [x] Proxy failed to start. Check the mitmproxy window for errors.
+  echo [x] Proxy failed to start on port %PORT% after 12s.
+  echo     Check the minimized mitmproxy window for a traceback.
+  echo     Current listeners on that port:
+  netstat -ano | findstr /c:":%PORT%"
   pause
   exit /b 2
 )
+:proxy_ready
 echo     proxy up
 
 :kill_app
 echo [*] Closing WorkBuddy ...
 taskkill /F /IM WorkBuddy.exe >nul 2>&1
-timeout /t 3 /nobreak >nul
+REM Verify it actually died. taskkill is silent on "access denied" (elevated app),
+REM and the Electron helper processes (crashpad, gpu) take a moment to unwind --
+REM checking once after a fixed sleep would either false-fail or false-pass.
+timeout /t 4 /nobreak >nul
+tasklist /FI "IMAGENAME eq WorkBuddy.exe" 2>nul | findstr /i "WorkBuddy.exe" >nul
+if errorlevel 1 goto app_closed
+timeout /t 4 /nobreak >nul
+tasklist /FI "IMAGENAME eq WorkBuddy.exe" 2>nul | findstr /i "WorkBuddy.exe" >nul
+if errorlevel 1 goto app_closed
+echo [x] WorkBuddy is still running - taskkill was denied.
+echo     Right-click this file - Run as administrator, then try again.
+pause
+exit /b 2
+
+:app_closed
+echo     closed
 
 set "NODE_EXTRA_CA_CERTS=%CA%"
 set "HTTPS_PROXY=http://127.0.0.1:%PORT%"
@@ -86,5 +115,8 @@ set "NO_PROXY=127.0.0.1,localhost,::1"
 echo [*] Starting WorkBuddy with capture env ...
 start "" "%EXE%"
 
-echo [ok] Started. Send one message in the app, then check capture\upstream-*.jsonl
-timeout /t 2 /nobreak >nul
+echo [ok] Started with capture env. Dumps go to capture\upstream-*.jsonl
+echo.
+echo     Keep the minimized "mitmproxy-%PORT%" window open while capturing --
+echo     closing it stops the proxy and nothing more gets recorded.
+timeout /t 3 /nobreak >nul
