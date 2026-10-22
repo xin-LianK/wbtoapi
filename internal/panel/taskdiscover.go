@@ -171,15 +171,19 @@ type TaskDiscoverStats struct {
 	Errors   int `json:"errors"`   // 拉取失败次数（不中断）
 }
 
-// RunTaskDiscoverOnce 对所有账号做一轮任务发现（只读列表，不 accept/不跑动作）。
+// observedTask 一条观察结果。Source 只用于面板展示是哪个口径下发的。
+type observedTask struct {
+	Task   upstream.Task
+	Source string // default | miniprogram
+}
+
+// RunTaskDiscoverOnce 主动拉一遍两个口径再记录。**只留给手动触发**：
+// 常规发现走补领清扫链路（清扫本来每 15 分钟就要拉这两份列表，直接喂给
+// ObserveTasks 即零额外请求），这条自拉路径只用于「我想立刻看一眼」。
 // 不加 per-account 锁：列表是纯读接口，没必要和正在执行的动作互斥。
 func (p *Panel) RunTaskDiscoverOnce() TaskDiscoverStats {
 	var st TaskDiscoverStats
-
-	// 账号间去重：同一个码只留一条，取观察到的最大进度（各账号进度不同）。
-	seen := map[string]upstream.Task{}
-	src := map[string]string{}
-	var order []string
+	var obs []observedTask
 
 	for _, ps := range p.cfg.Pool.List() {
 		if ps.Disabled {
@@ -191,43 +195,62 @@ func (p *Panel) RunTaskDiscoverOnce() TaskDiscoverStats {
 		}
 		st.Accounts++
 
-		tasks, err := p.cfg.Upstream.ListTasks(a)
-		if err != nil {
+		if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
 			st.Errors++
-			continue
-		}
-		merge := func(t upstream.Task, source string) {
-			if t.TaskCode == "" {
-				return
+		} else {
+			for _, t := range tasks {
+				obs = append(obs, observedTask{Task: t, Source: "default"})
 			}
-			old, ok := seen[t.TaskCode]
-			if !ok {
-				order = append(order, t.TaskCode)
-				src[t.TaskCode] = source
-				seen[t.TaskCode] = t
-				return
-			}
-			if t.Current > old.Current {
-				old.Current = t.Current
-			}
-			if t.Target > 0 {
-				old.Target = t.Target
-			}
-			if old.Title == "" {
-				old.Title = t.Title
-			}
-			seen[t.TaskCode] = old
-		}
-		for _, t := range tasks {
-			merge(t, "default")
 		}
 		// 小程序口径是默认口径的超集（含 mp 专属任务），失败静默：活动结束或
 		// 账号无 mp 任务都是常态，不该算发现失败。
 		if mpTasks, mErr := p.cfg.Upstream.ListTasksMP(a); mErr == nil {
 			for _, t := range mpTasks {
-				merge(t, "miniprogram")
+				obs = append(obs, observedTask{Task: t, Source: "miniprogram"})
 			}
 		}
+	}
+
+	res := ObserveTasks(obs)
+	res.Accounts, res.Errors = st.Accounts, st.Errors
+	return res
+}
+
+// ObserveTasks 把一批观察结果写进发现记录：跨账号/跨口径合并 → 分类 → 落盘。
+// 纯内存 + 写文件，**不发任何上游请求**，因此可以安全地挂在清扫流程上。
+func ObserveTasks(obs []observedTask) TaskDiscoverStats {
+	var st TaskDiscoverStats
+
+	// 账号间去重：同一个码只留一条，取观察到的最大进度（各账号进度不同）。
+	seen := map[string]upstream.Task{}
+	src := map[string]string{}
+	var order []string
+
+	for _, o := range obs {
+		t := o.Task
+		if t.TaskCode == "" {
+			continue
+		}
+		old, ok := seen[t.TaskCode]
+		if !ok {
+			order = append(order, t.TaskCode)
+			src[t.TaskCode] = o.Source
+			seen[t.TaskCode] = t
+			continue
+		}
+		if t.Current > old.Current {
+			old.Current = t.Current
+		}
+		if t.Target > 0 {
+			old.Target = t.Target
+		}
+		if old.Title == "" {
+			old.Title = t.Title
+		}
+		seen[t.TaskCode] = old
+	}
+	if len(order) == 0 {
+		return st
 	}
 
 	now := time.Now()
@@ -331,6 +354,17 @@ func DiscoveredTaskList() []DiscoveredTask {
 		return out[i].LastSeen.After(out[j].LastSeen)
 	})
 	return out
+}
+
+// tasksDiscover 手动触发一轮主动发现（自己拉两个口径）。常规发现由补领清扫
+// 顺带完成（零额外请求）；这个接口留给「清扫关掉了」或「想立刻看一眼」的场景。
+func (p *Panel) tasksDiscover(w http.ResponseWriter, r *http.Request) {
+	st := p.RunTaskDiscoverOnce()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"stats": st,
+		"tasks": DiscoveredTaskList(),
+	})
 }
 
 // discoveredTasks 面板接口：本进程观察到的全部上游任务码及其本地覆盖情况。

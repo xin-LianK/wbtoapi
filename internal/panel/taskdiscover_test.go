@@ -188,6 +188,33 @@ func TestDiscoverFollowsDailyReset(t *testing.T) {
 	}
 }
 
+// TestSweepFeedsDiscover 清扫顺带完成发现：一轮清扫后 discover 表里应出现该账号的
+// 任务码，且**不产生任何额外列表请求**（发现复用的是清扫已经拉到的数据）。
+func TestSweepFeedsDiscover(t *testing.T) {
+	resetDiscover(t)
+	b := &sweepBackend{listFn: func(bool) []map[string]any {
+		return []map[string]any{sweepTask("template_9", 5, 0, "accepted", nil)}
+	}}
+	p := newSweepPanel(t, b, &auth.Auth{UID: "u1", AccessToken: "at"})
+
+	before := b.reqs.Load()
+	p.RunTaskSweepOnce()
+
+	disc.RLock()
+	d := disc.tasks["template_9"]
+	disc.RUnlock()
+	if d == nil {
+		t.Fatal("清扫应顺带把拉到的列表喂给发现")
+	}
+	if !d.Auto || d.Family != "template" {
+		t.Errorf("template_9 = %+v，应为族 template 自动跑", d)
+	}
+	// 清扫本身固定 2 次列表（默认 + mp）；发现若自拉就必然多出来。
+	if got := b.reqs.Load() - before; got != 2 {
+		t.Errorf("requests = %d, want 2（发现不该产生额外列表请求）", got)
+	}
+}
+
 // TestRunTaskDiscoverOnce 发现流程：新码记录、已实现/族自动跑/待人工实现三分类。
 func TestRunTaskDiscoverOnce(t *testing.T) {
 	resetDiscover(t)

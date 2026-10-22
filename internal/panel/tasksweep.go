@@ -46,6 +46,7 @@ func (p *Panel) RunTaskSweepOnce() TaskSweepStats {
 	var st TaskSweepStats
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var obs []observedTask // 全部账号拉到的任务，供任务发现复用（零额外上游请求）
 
 	for _, ps := range p.cfg.Pool.List() {
 		if ps.Disabled {
@@ -68,9 +69,13 @@ func (p *Panel) RunTaskSweepOnce() TaskSweepStats {
 			st.Credits += r.credit
 			st.Energy += r.energy
 			st.Errors += r.errors
+			obs = append(obs, r.observed...)
 		}(a, ps.UID)
 	}
 	wg.Wait()
+
+	// 任务发现复用本轮已拉到的列表：不额外发任何请求。
+	ObserveTasks(obs)
 
 	if st.Claims() > 0 || st.Errors > 0 || st.Accepted > 0 {
 		log.Printf("panel: 任务补领清扫：%d 个账号（跳过 %d）· 接受 %d · 领奖 %d · +%d 分 +%d 能 · 出错 %d",
@@ -86,6 +91,7 @@ func (s TaskSweepStats) Claims() int { return s.Claimed }
 type sweepResult struct {
 	accounts, skipped, accepted, claimed, errors int
 	credit, energy                               int64
+	observed                                     []observedTask // 本轮拉到的任务，供任务发现复用
 }
 
 // sweepAccount 单账号一轮清扫。命中账号锁（正在跑任务动作）时整账号跳过：
@@ -177,6 +183,15 @@ func (p *Panel) sweepAccount(a *auth.Auth, uid string) (res sweepResult) {
 		res.credit += c
 		res.energy += e
 		res.claimed++
+	}
+	// 顺手把这一轮拉到的列表交给任务发现：清扫本来每 15 分钟就要拉默认 + mp
+	// 两个口径，复用同一份数据意味着「发现新任务」不再是额外的上游请求。
+	for _, t := range tasks {
+		source := "default"
+		if isMPTaskCode(t.TaskCode) || mpOnly[t.TaskCode] {
+			source = "miniprogram"
+		}
+		res.observed = append(res.observed, observedTask{Task: t, Source: source})
 	}
 	return res
 }
