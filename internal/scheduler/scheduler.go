@@ -66,6 +66,11 @@ type Config struct {
 	// 的任务奖励领掉，不跑任何行为链路）。与 GrowthHook 同款延迟挂载；nil 时
 	// ticker 到点跳过。见 issue #174：成长队列与「一键完成」都不负责这条补领链路。
 	TaskSweepHook func()
+
+	// TaskDiscoverHook 任务发现回调（panel.RunTaskDiscoverOnce：拉两个口径的任务
+	// 列表，把「上游有、本地没实现」的新码记进 data/task-discover.json 并打日志）。
+	// 只读列表、无上游副作用，因此间隔可以比清扫稀疏得多。nil 时到点跳过。
+	TaskDiscoverHook func()
 }
 
 // Scheduler 调度器。
@@ -791,6 +796,51 @@ func (s *Scheduler) RunTaskSweepNow() {
 func (s *Scheduler) SetTaskSweepHook(fn func()) {
 	s.schedMu.Lock()
 	s.cfg.TaskSweepHook = fn
+	s.schedMu.Unlock()
+}
+
+// StartTaskDiscover 后台周期性任务发现（独立 ticker goroutine，ctx 取消即停）。
+//
+// 与 StartTaskSweep 的差异是有意的：发现只读任务列表、没有任何上游副作用，间隔
+// 以小时计，因此不需要 arm/disarm + rearm 那套热改机制——改间隔重启即生效，省掉
+// 一个 channel 和一整套 SetTaskDiscoverInterval。
+func (s *Scheduler) StartTaskDiscover(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		log.Printf("scheduler: 任务发现每 %s", interval)
+		// 启动即跑一轮：部署/重启后立刻知道有没有新任务，不必空等满一个间隔。
+		// 只读任务列表，不 accept、不跑动作，抢不到执行链路。
+		s.schedMu.Lock()
+		hook := s.cfg.TaskDiscoverHook
+		s.schedMu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				s.schedMu.Lock()
+				hook := s.cfg.TaskDiscoverHook
+				s.schedMu.Unlock()
+				if hook != nil {
+					hook()
+				}
+				timer.Reset(interval)
+			}
+		}
+	}()
+}
+
+// SetTaskDiscoverHook 挂载/替换任务发现回调（panel 构造晚于 scheduler，事后接线）。
+func (s *Scheduler) SetTaskDiscoverHook(fn func()) {
+	s.schedMu.Lock()
+	s.cfg.TaskDiscoverHook = fn
 	s.schedMu.Unlock()
 }
 

@@ -33,7 +33,15 @@ func main() {
 	for _, c := range panel.AutoTaskCodes() {
 		supported[c] = true
 	}
-	fmt.Printf("已实现自动化的任务码：%d 个\n\n", len(supported))
+	families := panel.AutoTaskFamilies()
+	fmt.Printf("已实现自动化的任务码：%d 个\n", len(supported))
+	fmt.Printf("事件链族（族内新码不用改代码、直接自动跑）：%d 个\n", len(families))
+	if names := sortedFamilyNames(families); len(names) > 0 {
+		for _, n := range names {
+			fmt.Printf("   %-11s %s\n", n, strings.Join(families[n], " / "))
+		}
+	}
+	fmt.Println()
 
 	files, err := filepath.Glob(filepath.Join(dir, "workbuddy-*.json"))
 	if err != nil || len(files) == 0 {
@@ -44,7 +52,8 @@ func main() {
 
 	up := upstream.New()
 	// 跨账号汇总：同一个新任务在一个账号上看到就够了
-	missing := map[string]string{} // code -> 标题
+	missing := map[string]string{}       // code -> 标题（需人工实现）
+	byFamily := map[string][]string{}    // 族名 -> 码（自动跑，无需改代码）
 	total := 0
 
 	for _, f := range files {
@@ -83,7 +92,14 @@ func main() {
 		for _, t := range tasks {
 			total++
 			mark := "✅"
-			if !supported[t.TaskCode] {
+			switch {
+			case supported[t.TaskCode]:
+				// 逐码白名单：已是精确实现
+			case panel.AutoTaskFamilyOf(t.TaskCode) != "":
+				mark = "🔁"
+				fam := panel.AutoTaskFamilyOf(t.TaskCode)
+				byFamily[fam] = append(byFamily[fam], t.TaskCode)
+			default:
 				mark = "❌"
 				if _, ok := missing[t.TaskCode]; !ok {
 					missing[t.TaskCode] = t.Title
@@ -96,8 +112,16 @@ func main() {
 		fmt.Println()
 	}
 
+	if len(byFamily) > 0 {
+		names := sortedFamilyNames(byFamily)
+		fmt.Printf("🔁 %d 个族共有任务走族自动跑（无需改代码）：\n", len(names))
+		for _, n := range names {
+			fmt.Printf("   %-11s %s\n", n, strings.Join(dedupe(byFamily[n]), ", "))
+		}
+		fmt.Println()
+	}
 	if len(missing) == 0 {
-		fmt.Printf("✅ 全部 %d 个任务都有自动化实现。\n", total)
+		fmt.Printf("✅ 全部 %d 个任务都有覆盖（精确实现或事件链族）。\n", total)
 		return
 	}
 	codes := make([]string, 0, len(missing))
@@ -111,6 +135,32 @@ func main() {
 	}
 	fmt.Println("\n要加的话：在 internal/panel/autotask.go 的 autoActions 里补一条（TaskCode + run 函数），")
 	fmt.Println("判据靠解包客户端或抓一次真实操作样本；跑完用本工具复查是否还有缺口。")
+	fmt.Println("若该码属于已有事件链族（判据只是「事件到没到」），把它加进 eventChainActions 的")
+	fmt.Println("familyPrefix 即可，族内后续所有新码都不再需要改代码。")
+}
+
+// sortedFamilyNames 族名升序（输出稳定）。
+func sortedFamilyNames(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dedupe 去重且保持首次出现顺序（多账号会重复计入同一码）。
+func dedupe(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := in[:0]
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func taskState(t upstream.Task) string {

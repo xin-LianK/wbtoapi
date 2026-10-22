@@ -118,6 +118,15 @@ type Config struct {
 		// 只做 accept/claim 两条幂等请求，不跑任何行为链路；分钟级开销可忽略。
 		TaskSweepEnabled bool `json:"task_sweep_enabled"` // 缺省 true；false = 关闭
 		TaskSweepMinutes int  `json:"task_sweep_minutes"` // 缺省 15；<=0 回落 15
+
+		// 任务发现：周期拉两个口径（默认 + 小程序）的任务列表，把「上游有、本地没
+		// 实现」的新码记进 data/task-discover.json 并打日志——此前这件事只能人工跑
+		// ./deploy.sh tasks 做差集，上游上新任务后分不涨却无人知晓。
+		// TaskDiscoverAutoRun 打开时，命中事件链族前缀的码不用改代码就能进队列跑；
+		// 关闭则完全退回逐码白名单（行为与改动前一致）。只读列表，无上游副作用。
+		TaskDiscoverEnabled bool `json:"task_discover_enabled"` // 缺省 true；false = 关闭
+		TaskDiscoverMinutes int  `json:"task_discover_minutes"` // 缺省 60；<=0 回落 60
+		TaskDiscoverAutoRun bool `json:"task_discover_autorun"` // 缺省 true；false = 只发现不跑
 	} `json:"schedule"`
 
 	Global struct {
@@ -290,6 +299,7 @@ type Config struct {
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
+	TaskDiscoverInterval   time.Duration `json:"-"` // 0 = 不启动（task_discover_enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
@@ -335,6 +345,9 @@ func Default() *Config {
 	c.Schedule.BalanceRefreshMinutes = 5
 	c.Schedule.TaskSweepEnabled = true
 	c.Schedule.TaskSweepMinutes = 15
+	c.Schedule.TaskDiscoverEnabled = true
+	c.Schedule.TaskDiscoverMinutes = 60
+	c.Schedule.TaskDiscoverAutoRun = true
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -739,6 +752,13 @@ func (c *Config) normalize() error {
 			c.Schedule.TaskSweepMinutes = 15
 		}
 		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
+	}
+	// 任务发现：启用时 minutes<=0 回落默认 60；关闭时 interval 保持 0（不启动）。
+	if c.Schedule.TaskDiscoverEnabled {
+		if c.Schedule.TaskDiscoverMinutes <= 0 {
+			c.Schedule.TaskDiscoverMinutes = 60
+		}
+		c.TaskDiscoverInterval = time.Duration(c.Schedule.TaskDiscoverMinutes) * time.Minute
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err

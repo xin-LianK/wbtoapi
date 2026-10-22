@@ -254,6 +254,16 @@ func main() {
 	case cfg.TaskSweepInterval > 0:
 		log.Printf("任务补领清扫：每 %s（补领已达标未领的成长任务奖励）", cfg.TaskSweepInterval)
 	}
+	switch {
+	case !cfg.Schedule.TaskDiscoverEnabled:
+		log.Printf("任务发现已禁用（schedule.task_discover_enabled=false）")
+	case cfg.TaskDiscoverInterval > 0:
+		if cfg.Schedule.TaskDiscoverAutoRun {
+			log.Printf("任务发现：每 %s（新任务自动记录；事件链族内新码自动进队列执行）", cfg.TaskDiscoverInterval)
+		} else {
+			log.Printf("任务发现：每 %s（只记录不执行；schedule.task_discover_autorun=false）", cfg.TaskDiscoverInterval)
+		}
+	}
 	if cfg.Schedule.IncludeDisabledInTasks {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
@@ -338,6 +348,11 @@ func main() {
 	// 清扫回调返回统计汇总（测试/日志可观测），调度器 hook 只要求 func()：
 	// 这里收掉返回值——汇总已由 panel 侧内部日志输出。
 	sch.SetTaskSweepHook(func() { pn.RunTaskSweepOnce() })
+	// 任务发现：把「上游有、本地没实现」的任务码记进 data/task-discover.json 并打
+	// 日志，替代此前人工跑 ./deploy.sh tasks 做差集的做法。autoRun 一并初始化——
+	// 它决定 autoActionFor 是否回落到事件链族（false 则完全退回逐码白名单）。
+	panel.InitTaskDiscover(stateSibling(cfg.StateFile, "task-discover.json"), cfg.Schedule.TaskDiscoverAutoRun)
+	sch.SetTaskDiscoverHook(func() { pn.RunTaskDiscoverOnce() })
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -371,6 +386,7 @@ func main() {
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
+	sch.StartTaskDiscover(ctx, cfg.TaskDiscoverInterval)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
@@ -567,6 +583,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
+	// 自动跑开关立即生效（发现间隔本身要重启，见 scheduler.StartTaskDiscover 注释）。
+	panel.SetTaskDiscoverAutoRun(newCfg.Schedule.TaskDiscoverAutoRun)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	return restartRequiredFields(newCfg), nil

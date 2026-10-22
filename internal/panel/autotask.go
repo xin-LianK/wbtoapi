@@ -39,10 +39,24 @@ import (
 
 // autoAction 一个可自动化的任务动作。
 type autoAction struct {
-	TaskCode string // 目标任务 code
+	TaskCode string // 目标任务 code（族模板条目留空，由匹配到的实际码填充）
 	Desc     string // 展示用说明
 	Attempt  bool   // true = 尝试型（上游未证实可脚本化，跑了可能不点亮）
-	run      func(p *Panel, a *auth.Auth) (string, error)
+	Family   string // 族名（仅族模板条目，用于面板展示与日志）
+	// familyPrefix 非空表示这是**族模板**而非精确码条目：按前缀匹配任意新下发的码。
+	// 仅限「判据只是事件到没到、runner 不读 TaskCode」的那一类任务（见 eventChainActions）。
+	familyPrefix []string
+	run          func(p *Panel, a *auth.Auth) (string, error)
+}
+
+// matches 族模板是否覆盖该码（精确码条目恒 false）。
+func (a *autoAction) matches(code string) bool {
+	for _, p := range a.familyPrefix {
+		if strings.HasPrefix(code, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // autoActions 已实现的任务动作表（顺序即执行顺序：先解锁依赖项）。
@@ -181,11 +195,82 @@ var autoActions = []autoAction{
 	},
 }
 
+// eventChainActions 事件链族模板：TaskCode 留空，按 familyPrefix 匹配任意新下发的码。
+//
+// 为什么需要这一层：autoActions 是逐码白名单，上游每上一个新任务就得改一次代码，
+// 而「发现新任务」之前完全靠人工跑 ./deploy.sh tasks 做差集。但其中一类任务压根
+// 不关心自己叫什么——runTemplateUse / runLibraryRead 这些 runner 内部只用随机 conv
+// id 拼事件，**不读 TaskCode**；执行链 runQueueItems 又会先统一批量 accept。所以
+// 族内新码不需要新代码，命中前缀即可直接用现有 runner 跑。
+//
+// 有意**不收录**的族（必须逐码实现，自动跑会白跑或打错接口）：
+//   - Model_chat_*：runner 内部硬编码 model，复用会拿旧模型上报 → 服务端校验不过
+//   - Expert_*：需真实专家 id + 召唤链，参数错等于对着错误专家发请求
+//   - Sequential_*：链式依赖（前序未完 accept 返回 prerequisite not met）
+//   - Hp_Appearance：需客户端真在主题下活跃，纯 API set 不计分
+//
+// 累计型任务的次数语义靠重跑解决：growthPending 每轮都把未达标任务重新入队，
+// 固定上报 N 组事件的任务多跑几轮自然累加到达标。
+var eventChainActions = []autoAction{
+	{Family: "template", familyPrefix: []string{"template_", "Template_"},
+		Desc: "上报「使用模板创建任务」事件组", run: runTemplateUse},
+	{Family: "playbook", familyPrefix: []string{"playbook_", "Playbook_"},
+		Desc: "上报「灵感案例做同款发送 Prompt」事件组", run: runPlaybookPrompt},
+	{Family: "canvas", familyPrefix: []string{"create_canvas", "canvas_"},
+		Desc: "上报「设计创意画布创建」事件组", run: runCreateCanvas},
+	{Family: "library", familyPrefix: []string{"Library_", "library_"},
+		Desc: "上报「读资料库」事件", run: runLibraryRead},
+	{Family: "automation", familyPrefix: []string{"automation_"},
+		Desc: "上报「定时任务创建」事件", run: runAutomationCreate},
+	{Family: "buddy_app", familyPrefix: []string{"Buddy_App"},
+		Desc: "上报「进入 Buddy 应用」事件链", run: runBuddyApp},
+	{Family: "richmeow", familyPrefix: []string{"RichMeow_"},
+		Desc: "上报桌面指纹对话事件链", run: runRichMeow},
+}
+
+// familyOf 返回码命中的事件链族名；未命中返回 ""（= 需要人工实现）。
+func familyOf(code string) string {
+	for i := range eventChainActions {
+		if eventChainActions[i].matches(code) {
+			return eventChainActions[i].Family
+		}
+	}
+	return ""
+}
+
+// AutoTaskFamilyOf 诊断工具/面板用：码命中的事件链族名，空串表示无族规则。
+func AutoTaskFamilyOf(code string) string { return familyOf(code) }
+
+// AutoTaskFamilies 族名 → 前缀列表（供 cmd/tasks 与面板说明「哪些新码不用改代码」）。
+func AutoTaskFamilies() map[string][]string {
+	out := make(map[string][]string, len(eventChainActions))
+	for i := range eventChainActions {
+		out[eventChainActions[i].Family] = append([]string(nil), eventChainActions[i].familyPrefix...)
+	}
+	return out
+}
+
 // autoActionFor 查任务对应的动作；无则返回 nil（不可自动化）。
+//
+// 三级查找：精确白名单 → 事件链族模板（受自动跑开关约束）→ nil。
+// 族这一级是「新任务不用改代码」的落点：命中的码拿一个副本、TaskCode 填成实际码，
+// 于是 growthPending 视其为待办、队列会 accept 并调 runner（见 eventChainActions）。
 func autoActionFor(code string) *autoAction {
+	code = strings.TrimSpace(code)
 	for i := range autoActions {
-		if autoActions[i].TaskCode == strings.TrimSpace(code) {
+		if autoActions[i].TaskCode == code {
 			return &autoActions[i]
+		}
+	}
+	// 族回落受两个开关约束：自动跑必须开启，且该码没被判为「跑了也不动」。
+	if !discoverAutoRun.Load() || discoverExhausted(code) {
+		return nil
+	}
+	for i := range eventChainActions {
+		if eventChainActions[i].matches(code) {
+			cp := eventChainActions[i]
+			cp.TaskCode = code // 副本填实际码：日志/面板按真实码展示
+			return &cp
 		}
 	}
 	return nil
