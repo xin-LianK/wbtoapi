@@ -49,6 +49,11 @@ if not exist "%ADDON%" (
 
 if not exist "%HERE%\capture" mkdir "%HERE%\capture"
 
+REM Milestone log. The window closes/pauses on failure and the reason scrolls
+REM away; writing it here lets the trace be read afterwards without a retype.
+set "RUNLOG=%HERE%\capture\bat-run.log"
+>"%RUNLOG%" echo [%DATE% %TIME%] start pid-owner=%USERNAME%
+
 REM Detection note: mitmproxy binds 0.0.0.0:8888 (plus [::]:8888), NOT 127.0.0.1.
 REM Matching "127.0.0.1:8888.*LISTENING" never hits and the script bails out
 REM before closing the app -- which looks exactly like "the bat did nothing".
@@ -58,6 +63,7 @@ echo [*] Checking proxy on port %PORT% ...
 netstat -ano | findstr /c:"LISTENING" | findstr /r /c:":%PORT%[^0-9]" >nul
 if errorlevel 1 goto start_proxy
 echo     already running
+>>"%RUNLOG%" echo proxy: already listening on %PORT%
 goto kill_app
 
 :start_proxy
@@ -86,9 +92,11 @@ if errorlevel 1 (
 )
 :proxy_ready
 echo     proxy up
+>>"%RUNLOG%" echo proxy: up on %PORT%
 
 :kill_app
 echo [*] Closing WorkBuddy ...
+>>"%RUNLOG%" echo app: taskkill requested
 taskkill /F /IM WorkBuddy.exe >nul 2>&1
 REM Verify it actually died. taskkill is silent on "access denied" (elevated app),
 REM and the Electron helper processes (crashpad, gpu) take a moment to unwind --
@@ -100,23 +108,59 @@ timeout /t 4 /nobreak >nul
 tasklist /FI "IMAGENAME eq WorkBuddy.exe" 2>nul | findstr /i "WorkBuddy.exe" >nul
 if errorlevel 1 goto app_closed
 echo [x] WorkBuddy is still running - taskkill was denied.
+>>"%RUNLOG%" echo app: TASKKILL DENIED - still running
 echo     Right-click this file - Run as administrator, then try again.
 pause
 exit /b 2
 
 :app_closed
 echo     closed
+>>"%RUNLOG%" echo app: closed
 
 set "NODE_EXTRA_CA_CERTS=%CA%"
 set "HTTPS_PROXY=http://127.0.0.1:%PORT%"
 set "HTTP_PROXY=http://127.0.0.1:%PORT%"
 set "NO_PROXY=127.0.0.1,localhost,::1"
 
+REM NODE_OPTIONS is the ONLY way to catch chat traffic. The ACP transport uses
+REM the global fetch (Node's bundled undici) and undici ignores the proxy env
+REM vars -- so with the vars above alone you capture /v3/config and telemetry
+REM but never a single copilot.tencent.com chat request. The --require shim
+REM swaps undici's global dispatcher for EnvHttpProxyAgent. NODE_USE_ENV_PROXY
+REM would be simpler but landed in Node v24 and this build is Node 22.21.1.
+set "NODE_OPTIONS=--require=%~dp0undici-env-proxy.js"
+
+REM Wipe the shim log so the check below can tell "loaded" from "stale line".
+set "SHIMLOG=%HERE%\capture\undici-patch.log"
+del "%SHIMLOG%" >nul 2>&1
+
 echo [*] Starting WorkBuddy with capture env ...
+>>"%RUNLOG%" echo app: launching with NODE_OPTIONS=%NODE_OPTIONS%
 start "" "%EXE%"
 
-echo [ok] Started with capture env. Dumps go to capture\upstream-*.jsonl
+REM Self-check: the shim writes one line as soon as --require runs. If the log
+REM stays empty, NODE_OPTIONS did not reach the Electron main process and the
+REM chat capture would silently record nothing again. 15s covers cold boot.
+echo [*] Waiting for the shim to load ...
+timeout /t 15 /nobreak >nul
+if exist "%SHIMLOG%" (
+  findstr /c:"dispatcher replaced" "%SHIMLOG%" >nul
+  if errorlevel 1 (
+    echo [!] Shim loaded but the dispatcher was NOT swapped.
+    >>"%RUNLOG%" echo shim: LOADED but no dispatch swap
+    echo     Open a chat once, then check: type capture\undici-patch.log
+  ) else (
+    echo     shim ok - fetch now follows HTTPS_PROXY
+    >>"%RUNLOG%" echo shim: OK
+  )
+) else (
+  echo [!] Shim did NOT load: NODE_OPTIONS was ignored.
+  >>"%RUNLOG%" echo shim: NOT LOADED - NODE_OPTIONS ignored
+  echo     chat requests will bypass the proxy. Send this window's output back.
+)
+
 echo.
+echo [ok] Dumps go to capture\upstream-live.jsonl
 echo     Keep the minimized "mitmproxy-%PORT%" window open while capturing --
 echo     closing it stops the proxy and nothing more gets recorded.
 timeout /t 3 /nobreak >nul
