@@ -63,3 +63,6 @@ __pycache__/
 
 # Electron crashpad noise: the capture launcher starts the app with cwd=tools/
 /tools/debug.log
+
+# release: docker save 的镜像包（百 MB 级，不进版本库）
+/release/
