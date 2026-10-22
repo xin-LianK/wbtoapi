@@ -42,10 +42,14 @@ body {
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 /* ── 壳层：左侧导航 + 主区 ─────────────────────────────────────────── */
-.shell { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; }
+/* 两栏都锁在视口高度：内容不足一屏时由 min-height 撑满（右区不再半截短），
+   超出一屏时整页滚动、左导航 sticky 跟随，视觉上始终满高。
+   用 dvh 兜移动端地址栏——100vh 在移动浏览器上比可视区高，底部会被裁掉。 */
+.shell { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; min-height: 100dvh; }
 .nav {
   background: var(--surface); border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
+  display: flex; flex-direction: column; position: sticky; top: 0;
+  height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
 }
 .brand { padding: 20px 18px 16px; border-bottom: 1px solid var(--line-soft); }
 .brand .name { font-weight: 650; letter-spacing: -.01em; font-size: 15px; }
@@ -135,7 +139,10 @@ body {
 .pulse.bad { background: var(--bad); }
 .pulse.warn { background: var(--warn); }
 
-.main { min-width: 0; display: flex; flex-direction: column; }
+.main {
+  min-width: 0; display: flex; flex-direction: column;
+  min-height: 100vh; min-height: 100dvh;
+}
 .topbar {
   display: flex; align-items: center; gap: 14px; padding: 14px 24px;
   border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 20;
@@ -144,7 +151,9 @@ body {
 .topbar .sep { color: var(--ink-3); }
 .topbar .meta { color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
 .topbar .grow { flex: 1; }
-.view { padding: 22px 24px 60px; max-width: 1560px; margin: 0 auto; width: 100%; }
+/* flex:1 让当前视图吃掉 topbar 以下的全部高度，内容再少也顶满，不会露出半截底色。
+   左右 24px / 上下 22px 是既有安全距离，保持不动。 */
+.view { flex: 1 1 auto; padding: 22px 24px; max-width: 1560px; margin: 0 auto; width: 100%; }
 .view[hidden] { display: none; }
 
 /* ── 控件 ─────────────────────────────────────────────────────────── */
@@ -389,7 +398,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .tst.ok { border-left-color: var(--ok); } .tst.err { border-left-color: var(--bad); }
 
 @media (max-width: 760px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: 1fr; min-height: 100vh; min-height: 100dvh; }
   .nav { position: static; height: auto; flex-direction: row; align-items: center; overflow-x: auto; }
   .nav ul { display: flex; padding: 8px; } .nav .sig { border: none; }
   .stat { border-right: none; border-bottom: 1px solid var(--line-soft); }
