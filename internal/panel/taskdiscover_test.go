@@ -153,6 +153,41 @@ func TestGrowthPendingAcceptsFamilyCode(t *testing.T) {
 	}
 }
 
+// TestDiscoverFollowsDailyReset 上游重置进度（每日任务）时：current 必须跟随上游回落，
+// 停滞计数不能把「重置」当成「无进展」，且要重新恢复自动跑。
+// 卡住历史最大值的写法会让 met 恒为 true，该码从此再也不跑。
+func TestDiscoverFollowsDailyReset(t *testing.T) {
+	resetDiscover(t)
+	cur := 5
+	b := &sweepBackend{listFn: func(bool) []map[string]any {
+		return []map[string]any{sweepTask("template_9", 5, int64(cur), "accepted", nil)}
+	}}
+	p := newSweepPanel(t, b, &auth.Auth{UID: "u1", AccessToken: "at"})
+
+	p.RunTaskDiscoverOnce() // 5/5 达标
+	disc.RLock()
+	d := disc.tasks["template_9"]
+	disc.RUnlock()
+	if d.Auto {
+		t.Error("达标未领时不该自动跑（交给清扫）")
+	}
+
+	cur = 0 // 上游重置（次日）
+	p.RunTaskDiscoverOnce()
+	disc.RLock()
+	d = disc.tasks["template_9"]
+	disc.RUnlock()
+	if d.Current != 0 {
+		t.Errorf("current = %d, want 0（必须跟随上游重置）", d.Current)
+	}
+	if d.Stuck != 0 {
+		t.Errorf("stuck = %d, want 0（重置不等于无进展）", d.Stuck)
+	}
+	if !d.Auto {
+		t.Errorf("重置后应恢复自动跑，note=%q", d.Note)
+	}
+}
+
 // TestRunTaskDiscoverOnce 发现流程：新码记录、已实现/族自动跑/待人工实现三分类。
 func TestRunTaskDiscoverOnce(t *testing.T) {
 	resetDiscover(t)

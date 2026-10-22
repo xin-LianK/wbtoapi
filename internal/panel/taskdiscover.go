@@ -242,14 +242,18 @@ func (p *Panel) RunTaskDiscoverOnce() TaskDiscoverStats {
 			st.New++
 		}
 
-		// 进度停滞计数：进度涨了就清零，没涨且不是首次见到就 +1。
+		// 进度跟随上游（**直接赋值，不取历史最大值**）：上游若把任务做成每日重置，
+		// current 会从 N 掉回 0，卡住旧值会让 met 恒为 true、该码永远不再自动跑。
+		//
+		// 停滞计数只看「没涨」，且必须把「回落」与「不动」分开：
+		//   涨 / 首见 → 清零；回落 → 清零（上游重置，不是无进展）；不动且未达标 → +1。
+		// 把回落算成无进展的话，每日重置任务会每天被计一次停滞，三天后被误判 exhausted。
 		prev := d.Current
-		if t.Current > prev {
-			d.Current = t.Current
-		}
-		if t.Current > prev || isNew {
+		d.Current = t.Current
+		switch {
+		case t.Current != prev || isNew:
 			d.Stuck = 0
-		} else if d.Target == 0 || d.Current < d.Target {
+		case d.Target == 0 || d.Current < d.Target:
 			d.Stuck++
 		}
 
