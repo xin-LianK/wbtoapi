@@ -59,20 +59,38 @@ ANCHORS = [
     ("buildVlmGatewayHeaders", "function buildVlmGatewayHeaders"),
     ("applyGatewayHeaders", "function applyGatewayHeaders"),
     ("applyTraceHeaders", "function applyTraceHeaders"),
-    ("YN", "var YN="),
 ]
+
+# 常量兜底表 `var XX=[[`Name`,`value`],...]`：变量名是压缩产物，5.8.3 叫 YN、
+# 5.9.2 叫 VF，**不能写死**，否则每次发版都误报「客户端结构已变」。
+# 认表内容而不是认名字：表里必然有 X-IDE-Type 这类兜底头。
+# 标签仍沿用 "YN"，是为了和已存档的旧基线保持可比的 structure 键。
+CONST_TABLE_LABEL = "YN"
+CONST_TABLE_NEEDLE = "X-IDE-Type"
+CONST_TABLE_RE = re.compile(r"var ([A-Za-z_$][\w$]*)=\[\[")
+
+
+def find_const_table_var(src):
+    """返回常量兜底表的变量名（找不到返回 None）。"""
+    for m in CONST_TABLE_RE.finditer(src):
+        if CONST_TABLE_NEEDLE in src[m.end():m.end() + 800]:
+            return m.group(1)
+    return None
 
 # 事件码枚举所在的成员，按顺序尝试。
 #
-# 注意：枚举**不在** main/server.js 里。server.js 只引用它（`r.Nt.ChatRequestSend`
-# 里的 r 就是首行 require 的 ./dev-env-override.js），实体定义在那个文件。名字带
-# dev 只是打包遗留，它被 server.js 无条件 require，属于必加载模块，因此可以当
-# 权威来源。server.js 放第一位是为了万一官方哪天把枚举内联回来也能自动适配。
-EVENT_SOURCE_MEMBERS = ["main/server.js", "main/dev-env-override.js"]
+# 5.8.3 时枚举实体在 main/dev-env-override.js（server.js 只 require 它），
+# 5.9.2 起搬到了 main/common3.js，而且块头的 `Events=` 名字没了——变成匿名导出的
+# IIFE。所以这里不认成员名、也不认块头名字：先找哨兵成员，再往前回溯 IIFE 头。
+EVENT_SOURCE_MEMBERS = ["main/common3.js", "main/server.js", "main/dev-env-override.js"]
 
 # 事件枚举块内用来确认「找对了块」的哨兵成员：存在才能确定块边界没变。
-EVENT_SENTINEL = "t.ChatRequestSend=`chat_request_send`"
-EVENT_ENUM_START = "Events=function(t){return t."
+# 参数名（压缩后的 t / e / n）不写死，只锚成员名与码。
+EVENT_SENTINEL = "ChatRequestSend=`chat_request_send`"
+# IIFE 头：`X=function(p){return p.`
+EVENT_ENUM_HEAD_RE = re.compile(r"=function\((\w)\)\{return \1\.")
+# 哨兵往前回溯多远找块头（枚举块本体 5~10KB，留足余量）
+EVENT_ENUM_HEAD_LOOKBACK = 20000
 EVENT_ENUM_END = "}({})"
 
 # 不在上面三个函数里、但最终一定发出去的头（VlmUpstream.send 在 fetch 前补）。
@@ -378,7 +396,8 @@ def enclosing_condition(body, pos):
     if i < 0:
         return "always"
     before = body[max(0, i - 60):i]
-    m = re.search(r"e\.(\w+)\?\.trim\(\)&&\s*$", before)
+    # 条件后可能紧跟 `(`（5.9.2 改成 `e.userId?.trim()&&(t["X-User-Id"]=...)`）
+    m = re.search(r"e\.(\w+)\?\.trim\(\)&&\s*\(?\s*$", before)
     if m:
         return f"if {m.group(1)}"
     # 其它条件形态（如 `x > 0 && (`）保留原文尾巴，便于人工判断
@@ -398,12 +417,17 @@ def classify_expr_ctx(expr, params):
 
 
 def parse_build_headers(body):
+    """`t["X-User-Id"]=...` 形式的对象赋值。
+
+    5.8.3 是 `.set(...)` 之外的另一种写法：`n[`X-User-Id`]=...`（模板字符串键）；
+    5.9.2 改成双引号 + 换了个变量名。所以变量名、引号类型都不能写死。
+    """
     out = {}
     aliases = local_aliases(body)
     params = func_params(body)
-    for m in re.finditer(r"n\[`([^`]+)`\]=", body):
+    for m in re.finditer(r"[A-Za-z_$][\w$]*\[\s*[`\"']([^`\"']+)[`\"']\s*\]\s*=", body):
         name = m.group(1)
-        eq = body.find("=", m.end() - 1)
+        eq = m.end() - 1
         expr = resolve_alias(scan_value(body, eq + 1), aliases, params)
         out[name] = {
             "from": "buildVlmGatewayHeaders",
@@ -417,7 +441,8 @@ def parse_set_calls(body, fn):
     out = {}
     aliases = local_aliases(body)
     params = func_params(body)
-    for m in re.finditer(r"\.set\(`([^`]+)`,", body):
+    # 键的引号类型不写死：5.8.3 用模板串 `X`，5.9.2 用 "X"
+    for m in re.finditer(r"\.set\(\s*[`\"']([^`\"']+)[`\"']\s*,", body):
         name = m.group(1)
         expr = resolve_alias(scan_value(body, m.end()), aliases, params)
         out[name] = {"from": fn, "when": "always", "value": classify_expr_ctx(expr, params)}
@@ -425,13 +450,17 @@ def parse_set_calls(body, fn):
 
 
 def parse_const_table(src):
-    """`var YN=[[`Name`,`value`],...]`：常量兜底表，只在头未设置时生效。"""
-    i = src.find("var YN=")
-    if i < 0:
+    """`var XX=[[`Name`,`value`],...]`：常量兜底表，只在头未设置时生效。
+
+    变量名由 find_const_table_var 嗅探（YN → VF …），表里也可能换引号类型。
+    """
+    var = find_const_table_var(src)
+    if not var:
         return {}
+    i = src.find("var " + var + "=")
     seg = src[i:i + 800]
     out = {}
-    for m in re.finditer(r"\[\s*`([^`]+)`\s*,\s*`([^`]*)`\s*\]", seg):
+    for m in re.finditer(r"\[\s*[`\"']([^`\"']+)[`\"']\s*,\s*[`\"']([^`\"']*)[`\"']\s*\]", seg):
         out[m.group(1)] = {"from": "YN(default)", "when": "if unset", "value": {"kind": "const", "detail": m.group(2)}}
     return out
 
@@ -446,11 +475,13 @@ def extract_endpoints(src):
 def extract_events(sources):
     """抽取事件码枚举，返回 ({事件码: 成员名}, 来源成员)。
 
-    客户端把它编成 TS 枚举的 IIFE：
-        Events=function(t){return t.UserAuthAction=`user_auth_action`,...}({})
-    块内是纯字面量，所以按哨兵成员定位、再回溯到块头、截到 `}({})` 是可靠的。
+    客户端把它编成 TS 枚举的 IIFE，块头名与参数名都是压缩产物：
+        5.8.3: Events=function(t){return t.UserAuthAction=`user_auth_action`,...}({})
+        5.9.2: y=function(e){return e.UserAuthAction=`user_auth_action`,...}({})
+    所以定位方式是：找哨兵成员 → 往前回溯 `=function(p){return p.` 取参数名 →
+    往后截到 `}({})`。块内是纯字面量，这一步可靠。
     **不能用全文正则**——整包还有别的枚举（认证类型、插件状态）同样是
-    ``t.X=`value` `` 形态，全文扫会把它们混进来，做出「多出来 20 个事件」的假结论。
+    ``p.X=`value` `` 形态，全文扫会把它们混进来，做出「多出来 20 个事件」的假结论。
 
     以事件码为键而不是成员名：判据是码，跨版本「成员名不变、码变了」抓不到，
     但「旧码消失 + 新码出现」照样能抓到，不会漏。
@@ -462,14 +493,18 @@ def extract_events(sources):
         i = src.find(EVENT_SENTINEL)
         if i < 0:
             continue
-        start = src.rfind(EVENT_ENUM_START, 0, i)
-        if start < 0:
+        head = None
+        for m in EVENT_ENUM_HEAD_RE.finditer(src, max(0, i - EVENT_ENUM_HEAD_LOOKBACK), i):
+            head = m
+        if head is None:
             continue
         end = src.find(EVENT_ENUM_END, i)
         if end < 0:
             continue
+        param = head.group(1)
+        block = src[head.start():end + len(EVENT_ENUM_END)]
         events = {}
-        for m in re.finditer(r"t\.([A-Za-z0-9_$]+)=`([a-z0-9_]{1,60})`", src[start:end]):
+        for m in re.finditer(r"\b" + re.escape(param) + r"\.([A-Za-z0-9_$]+)=`([a-z0-9_]{1,60})`", block):
             events[m.group(2)] = m.group(1)
         if events:
             return events, member
@@ -504,6 +539,11 @@ def extract_static(version, sources, meta):
         structure[label] = marker in server_js
         if marker not in server_js:
             missing.append(label)
+    # 常量兜底表的变量名是压缩产物（YN / VF / …），按表内容嗅探，不写死名字
+    table_var = find_const_table_var(server_js)
+    structure[CONST_TABLE_LABEL] = bool(table_var)
+    if not table_var:
+        missing.append(f"{CONST_TABLE_LABEL}(常量兜底表，找 {CONST_TABLE_NEEDLE})")
     if missing:
         raise SystemExit(
             "客户端结构已变，以下锚点找不到：" + ", ".join(missing) +
@@ -512,7 +552,7 @@ def extract_static(version, sources, meta):
 
     build_body = slice_between(server_js, "function buildVlmGatewayHeaders", ["function applyGatewayHeaders"])
     gw_body = slice_between(server_js, "function applyGatewayHeaders",
-                            ["function applyTraceHeaders", "var YN="])
+                            ["function applyTraceHeaders", f"var {table_var}="])
     tr_body = slice_between(server_js, "function applyTraceHeaders", ["function requireAccessToken"])
 
     headers = {}
@@ -539,7 +579,7 @@ def extract_static(version, sources, meta):
             "事件枚举抽不出来，客户端枚举结构可能已变：\n"
             f"  已尝试成员：{', '.join(EVENT_SOURCE_MEMBERS)}\n"
             f"  期望在块内找到 `{EVENT_SENTINEL}`，实际未命中\n"
-            "→ 检查 EVENT_SOURCE_MEMBERS / EVENT_SENTINEL / EVENT_ENUM_START / EVENT_ENUM_END。"
+            "→ 检查 EVENT_SOURCE_MEMBERS / EVENT_SENTINEL / EVENT_ENUM_HEAD_RE / EVENT_ENUM_END。"
         )
     if events_from:
         meta["events_from"] = events_from

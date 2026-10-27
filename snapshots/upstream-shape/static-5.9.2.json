@@ -1,0 +1,477 @@
+{
+  "schema": 2,
+  "source": "static",
+  "client_version": "5.9.2",
+  "meta": {
+    "asar_path": "C:\\Program Files\\WorkBuddy\\resources\\app.asar",
+    "asar_size": 181999413,
+    "asar_mtime": 1792831874,
+    "asar_fingerprint": "55bc44e747df76b4",
+    "events_from": "main/common3.js"
+  },
+  "structure": {
+    "buildVlmGatewayHeaders": true,
+    "applyGatewayHeaders": true,
+    "applyTraceHeaders": true,
+    "YN": true,
+    "Events": true
+  },
+  "endpoints": [
+    "/api/memory/clear_profile",
+    "/api/memory/global/dream",
+    "/api/memory/global/route",
+    "/api/memory/global/settings",
+    "/api/memory/global/summary",
+    "/api/memory/profile",
+    "/api/memory/search",
+    "/api/memory/update_profile",
+    "/api/v1/artifact-recommend/v1/post-session/suggestions",
+    "/api/v1/artifact-recommend/v1/query-consistency",
+    "/api/v1/artifact-recommend/v1/recommendations",
+    "/api/v1/client/resources/complete",
+    "/api/v1/client/resources/presign",
+    "/api/v1/copilot/account/buddyone/apps",
+    "/api/v1/copilot/account/buddyone/status",
+    "/api/v1/open-platform/charge-user/entitlement/check",
+    "/api/v1/plugins",
+    "/api/v1/plugins/reload",
+    "/api/v2/open-platform",
+    "/api/v2/open-platform/skills",
+    "/api/v2/open-platform/skills/search",
+    "/api/v2/open-platform/tags",
+    "/api/v6/open/agent/manage/apply_upload",
+    "/api/v6/open/agent/manage/complete_upload",
+    "/api/v6/open/agent/manage/create_file",
+    "/api/v6/open/agent/manage/delete_file",
+    "/api/v6/open/agent/manage/list_file",
+    "/api/v6/open/agent/manage/query_file_info",
+    "/api/v6/open/agent/manage/query_task",
+    "/api/v6/open/agent/manage/rename_file_title",
+    "/api/v6/open/agent/manage/search_file",
+    "/api/v6/open/tdrive/capacity",
+    "/api/v6/open/tdrive/dir/create",
+    "/api/v6/open/tdrive/dir/info",
+    "/api/v6/open/tdrive/dir/list",
+    "/api/v6/open/tdrive/dir/move",
+    "/api/v6/open/tdrive/dir/rename",
+    "/api/v6/open/tdrive/dir/trash",
+    "/api/v6/open/tdrive/download",
+    "/api/v6/open/tdrive/drive/app-list",
+    "/api/v6/open/tdrive/drive/subapp-list",
+    "/api/v6/open/tdrive/file/move",
+    "/api/v6/open/tdrive/file/preview-url",
+    "/api/v6/open/tdrive/history/clear",
+    "/api/v6/open/tdrive/history/config/get",
+    "/api/v6/open/tdrive/history/config/set",
+    "/api/v6/open/tdrive/history/delete",
+    "/api/v6/open/tdrive/history/list",
+    "/api/v6/open/tdrive/history/set_latest",
+    "/api/v6/open/tdrive/search/content",
+    "/api/v6/open/tdrive/search/file",
+    "/api/v6/open/tdrive/search/rag-doc",
+    "/api/v6/open/tdrive/search/rag-image",
+    "/api/v6/open/tdrive/shared-folder/create",
+    "/api/v6/open/tdrive/trans_ownership",
+    "/api/v6/open/tdrive/upload/apply",
+    "/api/v6/open/tdrive/upload/cancel",
+    "/api/v6/open/tdrive/upload/complete",
+    "/api/v6/open/tdrive/upload/renew",
+    "/openapi/drive/v2/util/temp-scene",
+    "/openapi/v2/skill-token",
+    "/v1/query-consistency",
+    "/v1/traces",
+    "/v2/activity/banner",
+    "/v2/api-keys",
+    "/v2/as/connector",
+    "/v2/as/connector/agentmail/bind",
+    "/v2/as/connector/agentmail/deactivate",
+    "/v2/as/connector/agentmail/me",
+    "/v2/as/connector/agentmail/reactivate",
+    "/v2/as/connector/agentmail/sms/send",
+    "/v2/as/connector/agentmail/url/admin",
+    "/v2/as/connector/agentmail/url/realname",
+    "/v2/as/connector/oauth/buddyone-connect",
+    "/v2/as/conversations/",
+    "/v2/as/custom-model-domain/check",
+    "/v2/as/inspiration/code/decode",
+    "/v2/as/inspiration/code/encode",
+    "/v2/as/netdisk/upload",
+    "/v2/as/scheduler/tasks",
+    "/v2/backgroundagent/localProxy/upload",
+    "/v2/chat/completions",
+    "/v2/enterprises",
+    "/v2/enterprises/personal/models",
+    "/v2/enterprises/{enterpriseId}/claw/control",
+    "/v2/feature-flag/api",
+    "/v2/msg-center/message",
+    "/v2/operation-platform/market",
+    "/v2/operation-platform/market/unified-asset/query",
+    "/v2/user-asset/custom-skills",
+    "/v2/user-asset/skill",
+    "/v2/user/cloudagent/agents",
+    "/v2/user/cloudagent/agents/granted",
+    "/v2/user/cloudagent/agents/pin",
+    "/v2/user/cloudagent/agents/unpin",
+    "/v2/user/cloudagent/default-assistant",
+    "/v2/user/cloudagent/entitlement",
+    "/v2/user/cloudagent/instances",
+    "/v2/user/cloudagent/orchestrator",
+    "/v2/user/cloudagent/quota",
+    "/v2/user/cloudagent/tasks"
+  ],
+  "headers": {
+    "Accept": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "application/json"
+      }
+    },
+    "Accept-Encoding": {
+      "from": "VlmUpstream.send",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "identity"
+      }
+    },
+    "acp-connection-id": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "param",
+        "detail": "n.acpConnectionId"
+      }
+    },
+    "Authorization": {
+      "from": "VlmUpstream.send",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "Bearer <accessToken>"
+      }
+    },
+    "b3": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "`${t}-${n}-1-${r}`"
+      }
+    },
+    "Content-Type": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "application/json"
+      }
+    },
+    "traceparent": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "`00-${t}-${n}-01`"
+      }
+    },
+    "User-Agent": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "template",
+        "detail": "[`WorkBuddy/${n}`,`WorkBuddy/${n}`,...r?[`CLI/${r}`]:[]].join(` `)"
+      }
+    },
+    "X-Agent-Intent": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "craft"
+      }
+    },
+    "X-Agent-Purpose": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "conversation"
+      }
+    },
+    "X-B3-ParentSpanId": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 16
+      }
+    },
+    "X-B3-Sampled": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "1"
+      }
+    },
+    "X-B3-SpanId": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 16
+      }
+    },
+    "X-B3-TraceId": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 32
+      }
+    },
+    "x-codebuddy-request": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "1"
+      }
+    },
+    "X-Conversation-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "param",
+        "detail": "t"
+      }
+    },
+    "X-Conversation-Message-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "uuid",
+        "detail": 36
+      }
+    },
+    "X-Conversation-Request-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "param",
+        "detail": "n.conversationRequestId"
+      }
+    },
+    "X-Domain": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if domain",
+      "value": {
+        "kind": "input"
+      }
+    },
+    "X-Enterprise-Id": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if enterpriseId",
+      "value": {
+        "kind": "input"
+      }
+    },
+    "X-IDE-Name": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "WorkBuddy"
+      }
+    },
+    "X-IDE-Type": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "WorkBuddy"
+      }
+    },
+    "X-IDE-Version": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "input",
+        "default": "0.0.0"
+      }
+    },
+    "X-Private-Data": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "true"
+      }
+    },
+    "X-Product": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "input",
+        "default": "SaaS"
+      }
+    },
+    "X-Request-ID": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "uuid",
+        "detail": 36
+      }
+    },
+    "x-requested-with": {
+      "from": "applyGatewayHeaders",
+      "when": "always",
+      "value": {
+        "kind": "const",
+        "detail": "XMLHttpRequest"
+      }
+    },
+    "X-Tenant-Id": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if enterpriseId",
+      "value": {
+        "kind": "input"
+      }
+    },
+    "X-Trace-ID": {
+      "from": "applyTraceHeaders",
+      "when": "always",
+      "value": {
+        "kind": "hex",
+        "detail": 32
+      }
+    },
+    "X-User-Id": {
+      "from": "buildVlmGatewayHeaders",
+      "when": "if userId",
+      "value": {
+        "kind": "input"
+      }
+    }
+  },
+  "events": {
+    "activity_notify": "ActivityNotify",
+    "agent_artifact_download_clicked": "AgentArtifactDownloadClicked",
+    "agent_artifact_top_menu_clicked": "AgentArtifactTopMenuClicked",
+    "agent_connector_auth_initiated": "AgentConnectorAuthInitiated",
+    "agent_editor_opened": "AgentEditorOpened",
+    "agent_group_new_task_button_clicked": "AgentGroupNewTaskButtonClicked",
+    "agent_new_task_button_clicked": "AgentNewTaskButtonClicked",
+    "agent_task_archive_clicked": "AgentTaskArchiveClicked",
+    "agent_task_archived": "AgentTaskArchived",
+    "agent_task_completed": "AgentTaskCompleted",
+    "agent_task_created": "AgentTaskCreated",
+    "agent_task_created_with_template": "AgentTaskCreatedWithTemplate",
+    "agent_task_delete_clicked": "AgentTaskDeleteClicked",
+    "agent_task_deleted": "AgentTaskDeleted",
+    "agent_task_failed": "AgentTaskFailed",
+    "agent_task_filter_applied": "AgentTaskFilterApplied",
+    "agent_task_mode_switched": "AgentTaskModeSwitched",
+    "agent_task_title_edited": "AgentTaskTitleEdited",
+    "agent_template_clicked": "AgentTemplateClicked",
+    "agent_upload_file_clicked": "AgentUploadFileClicked",
+    "app_update": "AppUpdate",
+    "automated_task_action": "AutomatedTaskAction",
+    "automated_task_create_suc": "AutomatedTaskCreateSuc",
+    "automated_task_delete": "AutomatedTaskDelete",
+    "automated_task_execute": "AutomatedTaskExecute",
+    "chat_click_event": "ChatClick",
+    "chat_file_action": "ChatFileAction",
+    "chat_max_token_reached": "ChatMaxTokenReached",
+    "chat_message_response": "ChatMessageResponse",
+    "chat_message_send": "ChatMessageSend",
+    "chat_message_status": "ChatMessageStatus",
+    "chat_prompt_friction_analysis": "ChatPromptFrictionAnalysis",
+    "chat_request_response": "ChatRequestResponse",
+    "chat_request_send": "ChatRequestSend",
+    "chat_response_complete": "ChatResponseComplete",
+    "chat_tool_action": "ChatToolAction",
+    "chat_user_action": "ChatUserAction",
+    "checkpoint_create": "CheckPointCreate",
+    "checkpoint_restore": "CheckPointRestore",
+    "checkpoint_revert": "CheckPointRevert",
+    "claw_channel_connection": "ClawChannelConnection",
+    "claw_config_action": "ClawConfigAction",
+    "claw_lockscreen_first_inbound_after_wake": "ClawLockScreenFirstInboundAfterWake",
+    "claw_lockscreen_resume_detected": "ClawLockScreenResumeDetected",
+    "claw_lockscreen_resume_reconnect_done": "ClawLockScreenResumeReconnectDone",
+    "claw_lockscreen_transport_distribution": "ClawLockScreenTransportDistribution",
+    "claw_message_downstream": "ClawMessageDownstream",
+    "claw_message_upstream": "ClawMessageUpstream",
+    "code_change_event": "CodeChangeEvent",
+    "code_edit": "CodeEdit",
+    "commit_generate": "CommitGenerate",
+    "commit_generate_cancel": "CommitGenerateCancel",
+    "commit_observed": "CommitObserved",
+    "completion_action": "CompletionAction",
+    "completion_post_accept": "CompletionPostAccept",
+    "completion_response": "CompletionResponse",
+    "completion_trigger": "CompletionTrigger",
+    "connector_invoke": "ConnectorInvoke",
+    "craft": "Craft",
+    "craft_button_op": "CraftButtonClick",
+    "craft_edit_file": "CraftEditFile",
+    "craft_file_apply_status": "CraftFileApplyStatus",
+    "craft_file_op": "FileReceivingRejection",
+    "craft_limit_call": "CraftLimitCall",
+    "craft_request": "CraftRequestEvent",
+    "craft_terminal_execution": "CraftTerminalExecution",
+    "custom_model_usage": "CustomModelUsage",
+    "document_change": "DocumentChange",
+    "file_op": "CompletionModelFileOperation",
+    "ide_browser_preview_modify": "IdeBrowserPreviewModify",
+    "ide_browser_size_change": "IdeBrowserSizeChange",
+    "ide_command_create": "IdeCommandCreate",
+    "ide_component_add_chat": "IdeComponentAddChat",
+    "ide_component_click": "IdeComponentClick",
+    "ide_component_send": "IdeComponentSend",
+    "ide_figma_send": "IdeFigmaSend",
+    "ide_integration_completion": "IdeIntegrationCompletion",
+    "ide_intergration_auth_click": "IdeIntergrationAuthClick",
+    "ide_intergration_auth_result": "IdeIntergrationAuthResult",
+    "ide_intergration_click": "IdeIntergrationClick",
+    "ide_lifecycle": "IdeLifecycle",
+    "ide_picture_click": "IdePictureClick",
+    "ide_picture_upload": "IdePictureUpload",
+    "ide_plan_action": "IdePlanAction",
+    "ide_sandbox_create_link": "IdeSandboxCreateLink",
+    "loop_auto_continue": "LoopAutoContinue",
+    "loop_continue": "LoopContinue",
+    "loop_detected": "LoopDetected",
+    "loop_suspected": "LoopSuspected",
+    "mcp_action": "McpServerAction",
+    "mcp_get_prompt": "McpGetPrompt",
+    "mcp_select_prompt": "McpSelectPrompt",
+    "mcp_settings_change": "McpSettingsChange",
+    "mcp_tool_call": "McpToolCall",
+    "page_button_click": "PageClick",
+    "page_load": "PageLoad",
+    "page_show": "PageExposure",
+    "plugin_action": "PluginAction",
+    "plugin_capability_call": "PluginCapabilityCall",
+    "plugin_compose_gate": "PluginComposeGate",
+    "plugin_marketplace_action": "PluginMarketplaceAction",
+    "plugin_marketplace_page_show": "PluginMarketplacePageShow",
+    "plugin_status": "PluginStatus",
+    "rules_create": "RulesCreate",
+    "skill_action": "SkillAction",
+    "skill_create": "SkillCreate",
+    "skill_info": "SkillInfo",
+    "task_notify_click": "TaskNotifyClick",
+    "task_notify_send": "TaskNotifySend",
+    "user_auth_action": "UserAuthAction",
+    "user_task_failed_credit_refund": "UserTaskFailedCreditRefund",
+    "vote_like_dislike": "VoteLikeDislike",
+    "web_element_click": "WebElementClick",
+    "web_element_show": "WebElementShow",
+    "workspace_file_change": "WorkspaceFileChange"
+  }
+}
