@@ -893,3 +893,37 @@ func TestOpsDefaultsOn(t *testing.T) {
 			c.Notify.Enabled, c.Backup.Enabled, c.Update.Enabled)
 	}
 }
+
+// TestNotifyDefaultFormatBark format 键缺席缺省 bark（个人自用口径，
+// 2026-10-28 用户指定）；显式写了别的合法格式不被覆盖，非法回落 generic。
+func TestNotifyDefaultFormatBark(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+
+	os.WriteFile(fp, []byte(`{}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Notify.Format != "bark" {
+		t.Errorf("format 缺省应为 bark，got %q", c.Notify.Format)
+	}
+
+	os.WriteFile(fp, []byte(`{"notify":{"format":"wecom"}}`), 0o600)
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Notify.Format != "wecom" {
+		t.Errorf("显式 wecom 不应被覆盖，got %q", c.Notify.Format)
+	}
+
+	os.WriteFile(fp, []byte(`{"notify":{"format":"nope"}}`), 0o600)
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Notify.Format != "generic" {
+		t.Errorf("非法 format 应回落 generic，got %q", c.Notify.Format)
+	}
+}

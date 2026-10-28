@@ -350,8 +350,9 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', playground: '测试台', config: '配置', logs: '运行日志', system: '系统' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', playground: '测试台', config: '配置', logs: '运行日志' };
 function go(v) {
+  if (!TITLES[v]) v = 'accounts';   // 未知视图（含历史书签里的 #system）兜底回首页
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
@@ -362,7 +363,6 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'playground') initPlayground();
-  if (v === 'system') loadSystem();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
   // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
@@ -2009,7 +2009,7 @@ $('btnScanAll').onclick = async () => {
   b.disabled = true; b.textContent = '扫描中…';
   try {
     const d = await api('tasks/scan_all', { method: 'POST' });
-    renderQueue(groupItems(d), null, '没有待办任务 🎉', '全部账号的成长任务与开学季活动都已完成，明日再来。');
+    renderQueue(groupItems(d), null, '待办 0 项', '扫描正常：账号的任务均已完成、被上游锁定（Sequential 族每日零点解锁一环），或不支持自动化——这些都不进待办。列表不是实时刷新的，想看最新进度点「扫描待办」。');
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '扫描待办'; }
 };
@@ -2027,11 +2027,15 @@ $('btnRunQueue').onclick = async () => {
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '执行全部待办'; }
 };
-// 扫描结果 → 分组条目（无执行状态）
+// 扫描结果 → 分组条目（无执行状态）。growth_error 必须落成可见行：
+// 扫描失败和「没有待办」在 UI 上长得一样的话，失败会被当成空白白噪音。
 function groupItems(d) {
   const groups = [];
   for (const a of (d.accounts || [])) {
     const rows = [];
+    if (a.growth_error) {
+      rows.push({ kind: 'growth', code: '扫描失败', prog: '', status: 'error', message: a.growth_error });
+    }
     for (const t of (a.growth || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
       rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
@@ -3727,185 +3731,3 @@ if ($('pgInput')) {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); pgSend(); }
   });
 }
-
-/* ══ 系统页：告警通知 / 备份 / 版本更新 ══════════════════════════════════
-   三块互不依赖，各自 try 各自报错：备份目录没权限不该把更新卡片也一起变成空白。 */
-let sysNotifyOn = false;
-
-async function loadSystem() {
-  loadSystemNotify();
-  loadSystemBackup();
-  loadSystemUpdate();
-}
-
-async function loadSystemNotify() {
-  const st = $('sysNotifyState'), fmt = $('sysNotifyFormat'), hint = $('sysNotifyHint'), btn = $('btnNotifyTest');
-  if (!st) return;
-  try {
-    const d = await api('notify/status');
-    sysNotifyOn = !!d.enabled;
-    // 三态：工作中 / 开着但缺 url（enabled 现在缺省 true，这是最常见态）/ 显式关闭。
-    if (d.enabled) {
-      st.textContent = '已启用';
-      hint.textContent = 'config.json → notify';
-      hint.title = '';
-    } else if (d.configured) {
-      st.textContent = '待配置';
-      hint.textContent = '缺 notify.url';
-      hint.title = '在 config.json 里配 notify.url（+ format）后告警才会真正发出';
-    } else {
-      st.textContent = '未启用';
-      hint.textContent = 'notify.enabled';
-      hint.title = '在 config.json 里设 notify.enabled = true 并填 url';
-    }
-    fmt.textContent = d.format || '—';
-    if (btn) { btn.disabled = !d.enabled; btn.title = d.enabled ? '' : (d.configured ? '先配置 notify.url' : '先启用告警通道'); }
-  } catch (e) {
-    st.textContent = '读取失败';
-    hint.textContent = e.message || String(e);
-  }
-}
-
-async function loadSystemBackup() {
-  const note = $('sysBackupNote'), dir = $('sysBackupDir'), list = $('sysBackupList'), btn = $('btnBackupNow');
-  if (!list) return;
-  try {
-    const d = await api('backups');
-    if (!d.enabled) {
-      dir.textContent = '未启用';
-      note.textContent = 'config.json → backup';
-      list.innerHTML = '<div class="sys-empty">备份未启用：在 config.json 里设 backup.enabled = true</div>';
-      if (btn) { btn.disabled = true; btn.title = '先启用备份'; }
-      return;
-    }
-    if (btn) { btn.disabled = false; btn.title = ''; }
-    dir.textContent = d.dir || '—';
-    const items = d.items || [];
-    note.textContent = items.length ? items.length + ' 份' : '还没有备份';
-    list.innerHTML = items.length
-      ? items.map(it =>
-          '<div class="sys-file">' +
-          '<span class="nm" title="' + esc(it.name) + '">' + esc(it.name) + '</span>' +
-          '<span class="sz">' + fmtBytes(it.size) + '</span>' +
-          '<span class="mt" title="' + esc(fmtLocalDateTime(new Date(it.mod_time).getTime())) + '">' +
-            esc(ago(it.mod_time)) + '</span></div>').join('')
-      : '<div class="sys-empty">还没有备份</div>';
-  } catch (e) {
-    note.textContent = '读取失败';
-    list.innerHTML = '<div class="sys-empty">' + esc(e.message) + '</div>';
-  }
-}
-
-/* 更新提示落在两处：系统页的对比卡 + 侧栏「系统」上的角标。
-   角标由 start() 用快照接口静默拉一次（只读，不打网络），所以不点进系统页也看得见。
-   失败原因单独占一行（#sysUpdResult）：塞进 .sys-line 会把下面「发布时间」顶开半张卡。 */
-function applyUpdateInfo(info, keepResult) {
-  if (!info) return;
-  const st = $('sysUpdState');
-  $('sysUpdCurrent').textContent = info.current || '-';
-  $('sysUpdLatest').textContent = info.latest || '-';
-  if (info.err) st.textContent = '检查失败';
-  else if (!info.latest) st.textContent = '还没检查过';
-  else if (info.has_update) st.textContent = '有新版本可用';
-  else st.textContent = '已是最新';
-  const res = $('sysUpdResult');
-  if (res && !keepResult) {
-    if (info.err) { res.className = 'sys-result err'; res.textContent = '检查失败：' + info.err; }
-    else { res.className = 'sys-result'; res.textContent = ''; }
-  }
-  $('sysUpdTime').textContent = info.published_at && !String(info.published_at).startsWith('0001-')
-    ? fmtLocalDateTime(new Date(info.published_at).getTime()) : '—';
-  const open = $('btnUpdOpen');
-  if (open) {
-    open.hidden = !info.url;
-    if (info.url) open.onclick = () => window.open(info.url, '_blank', 'noopener');
-  }
-  setUpdateBadge(info);
-}
-
-function setUpdateBadge(info) {
-  const b = $('navUpd');
-  if (!b) return;
-  const has = !!(info && info.has_update);
-  b.hidden = !has;
-  if (has) { b.textContent = '新版本'; b.title = '有新版本 ' + (info.latest || '') + '，点进「系统」查看'; }
-}
-
-async function refreshUpdateBadge() {
-  try {
-    const d = await api('update');
-    if (d && d.enabled) setUpdateBadge(d.info);
-  } catch (e) { /* 角标是锦上添花：拉不到就不显示，不打扰 */ }
-}
-
-async function loadSystemUpdate() {
-  const st = $('sysUpdState');
-  try {
-    const d = await api('update');
-    if (!d.enabled) {
-      if (st) st.textContent = '未启用';
-      return;
-    }
-    applyUpdateInfo(d.info);
-  } catch (e) {
-    if (st) st.textContent = '读取失败：' + (e.message || e);
-  }
-}
-
-if ($('btnNotifyTest')) $('btnNotifyTest').onclick = async () => {
-  const out = $('sysNotifyResult'), btn = $('btnNotifyTest');
-  btn.disabled = true;
-  out.className = 'sys-result';
-  out.textContent = '发送中…';
-  try {
-    const d = await api('notify/test', { method: 'POST', body: JSON.stringify({ level: 'info' }) });
-    out.className = 'sys-result ok';
-    out.textContent = '已投递（通道：' + (d.format || '?') + '）。到手机上确认真的收到了——这里只能说请求成功。';
-  } catch (e) {
-    out.className = 'sys-result err';
-    out.textContent = '投递失败：' + (e.message || e);
-  } finally {
-    btn.disabled = !sysNotifyOn;
-  }
-};
-
-if ($('btnBackupNow')) $('btnBackupNow').onclick = async () => {
-  const out = $('sysBackupResult'), btn = $('btnBackupNow');
-  btn.disabled = true;
-  out.className = 'sys-result';
-  out.textContent = '打包中…';
-  try {
-    const d = await api('backups', { method: 'POST' });
-    const it = d.item || {};
-    out.className = 'sys-result ok';
-    out.textContent = '已生成 ' + (it.name || '备份') + (it.size ? '（' + fmtBytes(it.size) + '）' : '');
-    loadSystemBackup();
-  } catch (e) {
-    out.className = 'sys-result err';
-    out.textContent = '备份失败：' + (e.message || e);
-  } finally {
-    btn.disabled = false;
-  }
-};
-
-if ($('btnUpdateCheck')) $('btnUpdateCheck').onclick = async () => {
-  const out = $('sysUpdResult'), btn = $('btnUpdateCheck');
-  btn.disabled = true;
-  out.className = 'sys-result';
-  out.textContent = '检查中…';
-  try {
-    const d = await api('update/check', { method: 'POST' });
-    const info = d.info || {};
-    applyUpdateInfo(info, true);
-    out.className = 'sys-result' + (info.err ? ' err' : ' ok');
-    out.textContent = info.err ? ('检查失败：' + info.err)
-      : (info.has_update ? ('发现新版本 ' + info.latest + '，去「打开发布页」看变更说明') : '已是最新版本');
-  } catch (e) {
-    out.className = 'sys-result err';
-    out.textContent = '检查失败：' + (e.message || e);
-  } finally {
-    btn.disabled = false;
-  }
-};
-
-refreshUpdateBadge();

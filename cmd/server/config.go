@@ -812,11 +812,14 @@ func (c *Config) normalize() error {
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
-	// 通知通道：格式非法回落 generic，不 fail fast——通知是旁路能力，
-	// 不能因为它写错一个词就拒绝启动整个网关。
+	// 通知通道：缺省 bark（个人自用最顺手：iOS 免服务器，url 只填
+	// https://api.day.app/<device_key>）；显式写了非法格式仍回落 generic——
+	// 通知是旁路能力，不能因为写错一个词就拒绝启动整个网关。
 	switch strings.ToLower(strings.TrimSpace(c.Notify.Format)) {
 	case notify.FormatWeCom, notify.FormatBark, notify.FormatTelegram:
 		c.Notify.Format = strings.ToLower(strings.TrimSpace(c.Notify.Format))
+	case "":
+		c.Notify.Format = notify.FormatBark
 	default:
 		c.Notify.Format = notify.FormatGeneric
 	}
