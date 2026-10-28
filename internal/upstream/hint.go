@@ -48,9 +48,9 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrImageInvalid:
 		return "image request was rejected by upstream; check image_url format and image data"
 	case ErrWafBlock:
-		// 账号级 WAF 403 与 IP 级 fail-fast 同 hint：两者对客户端的动作一致
-		// （等待窗口过去再试，换号/立刻重试无意义）。
-		return "upstream WAF blocked the gateway; retry after the block window"
+		// 账号级 WAF 403 / 边缘网关 HTML 401 与 IP 级 fail-fast 同 hint：对客户端的
+		// 动作一致（等待窗口过去再试，换号/立刻重试无意义）。
+		return "upstream edge gateway blocked the request (WAF 403 or openresty/APISIX 401 page); check egress IP or retry after the block window"
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:

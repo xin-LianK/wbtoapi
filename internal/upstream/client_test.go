@@ -137,6 +137,15 @@ func TestClassify(t *testing.T) {
 		// 非 403 的无信封错误体不进 WAF 分类（WAF 判定绑定 403 形态）。
 		{400, `bad request`, ErrClient},
 		{429, ``, ErrSoftRate},
+		// 边缘网关 401 HTML 页（issue #243 实测：openresty 的
+		// 「401 Authorization Required」页，业务层根本没收到请求）→ ErrWafBlock：
+		// 软冷却 + 抖动，不永久禁用，避免同一号被反复选中连环失败。
+		{401, `<html><head><title>401 Authorization Required</title></head><body><center><h1>401 Authorization Required</h1></center></body></html>`, ErrWafBlock},
+		{401, `<!DOCTYPE html><html><body>401</body></html>`, ErrWafBlock},
+		// 401 空体 / 纯文本不是「边缘 HTML 页」→ 保持既有兜底，不劫持。
+		{401, ``, ErrClient},
+		{401, `unauthorized`, ErrClient},
+		{401, `{"code":1,"msg":"unauthorized"}`, ErrClient},
 	}
 	for _, c := range cases {
 		if got := Classify(c.status, c.body); got != c.want {

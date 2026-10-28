@@ -193,7 +193,7 @@ const end = src.indexOf('function rateLimitRowsHtml');
 if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
 const ctx = { Date, Number, String, Math };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
@@ -221,6 +221,91 @@ process.stdout.write(JSON.stringify({
 	const want = `{"rate":"网关 2026-09-28 15:00 起重试（剩余 1时00分） · 上游称 2026-09-28 16:00 恢复","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// TestAppJSRenderAccountsRateLimited 整份 app.js + 严格模式下渲染带模型限流的
+// 账号行（issue #241 的生产形态：rate_limited_models 非空）。
+//
+// 旧测试把 rateLimitMeta 切片出来在 sloppy 模式跑，未声明的 detail 会静默建全局，
+// 测试假绿；线上 'use strict' 直接 ReferenceError → 账号池整表空白、模型锁池与
+// 到期卡片跟随消失。这里跑完整文件（含首行 'use strict'）并真正调用 renderAccounts。
+func TestAppJSRenderAccountsRateLimited(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render smoke skipped")
+	}
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; },
+  apply() { return inert; },
+  construct() { return inert; },
+  has() { return true; },
+});
+const accBody = { innerHTML: '', addEventListener() {} };
+const sandbox = new Proxy({
+  location: { hash: '#accounts' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: {
+    querySelectorAll: () => [], querySelector: () => inert,
+    getElementById: (id) => (id === 'accBody' ? accBody : inert),
+    addEventListener() {}, documentElement: inert, head: inert, body: inert,
+    createElement: () => inert, cookie: '',
+  },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  MutationObserver: class { constructor() {} observe() {} disconnect() {} takeRecords() { return []; } },
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set,
+  RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent,
+  decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+try {
+  vm.runInContext(src, sandbox, { filename: 'app.js' });
+  const now = Date.now();
+  sandbox.renderAccounts([{
+    uid: 'u-1', nickname: 'n1', credits: 10, credits_total: 100,
+    rate_limited_models: [
+      { model: 'glm-5.3', kind: 'rate_limit',
+        reset_at: new Date(now + 7200000).toISOString(),
+        until: new Date(now + 3600000).toISOString() },
+      { model: 'hy3', kind: 'model_unavailable', until: new Date(now + 3600000).toISOString() },
+    ],
+  }]);
+  if (!accBody.innerHTML.includes('glm-5.3') || !accBody.innerHTML.includes('hy3')) {
+    console.log('RENDER MISSING:', accBody.innerHTML.slice(0, 300));
+    process.exit(2);
+  }
+  console.log('RENDER OK');
+  process.exit(0);
+} catch (e) {
+  console.log('RENDER FAIL:', (e && e.stack ? e.stack : e).toString().split('\n').slice(0, 6).join('\n'));
+  process.exit(1);
+}
+`
+	hf, err := os.CreateTemp(t.TempDir(), "render-accounts-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+	cmd := exec.Command(node, hf.Name(), "app.js")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("严格模式渲染账号池崩溃（issue #241 回归）: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("RENDER OK")) {
+		t.Fatalf("账号池渲染未产出限流行:\n%s", out)
 	}
 }
 

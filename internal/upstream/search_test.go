@@ -230,7 +230,9 @@ func TestSearchHTTPErrorClassified(t *testing.T) {
 		body   string
 		want   ErrKind
 	}{
-		{http.StatusUnauthorized, `<html>401 Authorization Required</html>`, ErrClient},
+		// 边缘网关 401 HTML 页（openresty/APISIX，issue #243 实测形态）：
+		// 归 ErrWafBlock（软冷却+抖动，不永久禁用），不再落 ErrClient 只换号不罚。
+		{http.StatusUnauthorized, `<html>401 Authorization Required</html>`, ErrWafBlock},
 		{http.StatusTooManyRequests, `{"code":429,"msg":"rate limit exceeded, will reset in 60s"}`, ErrSoftRate},
 		{http.StatusInternalServerError, `{"code":500,"msg":"internal error"}`, ErrServer},
 	}

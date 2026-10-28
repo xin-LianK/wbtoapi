@@ -264,6 +264,10 @@ function rateLimitMeta(row, now) {
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  // detail 必须显式声明：app.js 首行是 'use strict'，漏了 let 会抛
+  // ReferenceError（issue #241）。该异常发生在 renderAccounts 的 map 回调里，
+  // 会让整表 innerHTML 一次都写不进去——表现为「统计正常、表格空白、控制台干净」。
+  let detail;
   if (until && resetAt && until < resetAt) {
     // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
     // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
@@ -526,14 +530,32 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
+    // 三块渲染互相隔离：任一视图抛错只影响自己。此前同处一个 try 块，
+    // 账号池一崩（见 rateLimitMeta 的 detail 声明）就带着模型锁池、到期卡片
+    // 一起空白（issue #241/#250）。
+    renderSafe('账号池', () => renderAccounts(d.accounts || []));
+    renderSafe('模型锁池', () => renderModelLocks(d.model_locks));
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
     // 「检查」之后卡片永远停在那一刻的旧数据。
     const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
-    if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
-  } catch (e) { if (!quiet) toast(e.message, 'err'); }
+    if ($('expBox') && !liveFresh) renderSafe('积分到期', () => renderExpirySnapshot(d));
+  } catch (e) {
+    // 渲染类异常（ReferenceError/TypeError）即使 quiet 轮询也要留痕：
+    // 旧实现只在非 quiet 时 toast，轮询把 ReferenceError 静默吞掉，
+    // 线上表现为「控制台干净」的假象（issue #241 根因之一）。
+    if (e instanceof ReferenceError || e instanceof TypeError) console.error('[panel] 渲染异常', e);
+    else if (!quiet) toast(e.message, 'err');
+  }
+}
+
+// renderSafe 单块渲染隔离：抛错只打日志，不连累同一轮的其他视图区块。
+function renderSafe(name, fn) {
+  try {
+    fn();
+  } catch (e) {
+    console.error('[panel] ' + name + ' 渲染异常', e);
+  }
 }
 
 $('accBody').addEventListener('click', async ev => {

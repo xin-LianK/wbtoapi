@@ -415,6 +415,37 @@ curl -s http://localhost:7863/v1/search/messages \
        "messages":[{"role":"user","content":"Perform a web search for the query: OpenAI 最新模型"}]}'
 ```
 
+### 客户端接入（Claude Code / 模型名前缀）
+
+网关只暴露 **OpenAI 兼容** `POST /v1/chat/completions`，**不实现** Anthropic 的 `/v1/messages`（`/v1/search/messages` 是联网搜索端点，不是对话转发）。Claude Code 需要中间层做协议翻译，例如 claude-code-router：
+
+```json
+{
+  "Providers": [
+    {
+      "name": "wb2api",
+      "api_base_url": "http://127.0.0.1:7863/v1/chat/completions",
+      "api_key": "<网关 api_key>",
+      "models": ["cn:glm-5.3"]
+    }
+  ]
+}
+```
+
+**模型名必须带域前缀**：`GET /v1/models` 返回的是 `cn:xxx` / `global:xxx`，调用时原样带上。裸名按国内域解析；池里只有国际版账号时，裸名会返回 `no_healthy_account`——看起来像「没有可用账号」，实际是少了前缀。两域都有账号时裸名也能跑通，症状会变成「时好时坏」。
+
+常见报错对照：
+
+| 现象 | 原因与处置 |
+|---|---|
+| `no_healthy_account` | 模型名缺域前缀，或该域确实没有可用账号；先看 `GET /status` |
+| `11158` | 账号在该模型上被限制（global 号跑 CN 模型常见）→ 换号或换前缀 |
+| `11102` | 该后端没有此模型 → 换模型/换域 |
+| 400 + 审核文案 | 内容策略拦截；`prompt.mode=custom/append` 下网关会降级重试 |
+| 401 + openresty/APISIX HTML 页 | 边缘网关拦截（出口 IP 或凭证），不是账号业务错误；等封禁窗口或换出口 |
+
+Windows：`.bat` 用 CRLF；网关工作目录必须是仓库根（`auths/`、`data/` 是相对路径）。
+
 ## 配置说明
 
 **`config.example.json` 是配置项最完整的参考**：每个字段、默认值与结构都能在其中找到，示例值一律是 `test_key` 之类占位符，**不含任何真实密钥**。下表为字段含义速查。

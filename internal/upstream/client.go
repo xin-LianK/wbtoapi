@@ -404,12 +404,33 @@ func hasBusinessEnvelope(body string) bool {
 	return strings.Contains(body, `"code":`) || strings.Contains(body, `"msg":`)
 }
 
-// IsWafBlocked 报告 403 响应是否为 WAF 拦截形态：HTTP 403 且 body 无业务信封
-// （无 `"code":`/`"msg":` JSON 字段——HTML 拦截页、空体、纯文本均命中）。
-// 带业务信封的 403（11140 request illegal / 11128 等）仍走既有分类链。
-// 403 含 accountFault 文案的维持现状（ErrAccountFault），由 Classify 的规则序保证。
+// looksLikeEdgeHTMLPage 判定边缘网关直接回的 HTML 页（openresty / APISIX 的
+// 「401 Authorization Required」页等）。这类响应的特征：整段以 '<' 开头且是
+// html/doctype 文档，业务层根本没收到请求。
+func looksLikeEdgeHTMLPage(body string) bool {
+	s := strings.TrimSpace(body)
+	if s == "" || s[0] != '<' {
+		return false
+	}
+	ls := strings.ToLower(s)
+	return strings.Contains(ls, "<html") || strings.Contains(ls, "<!doctype")
+}
+
+// IsWafBlocked 报告响应是否为「边缘代理拦截」形态：
+//   - HTTP 403 且 body 无业务信封（无 `"code":`/`"msg":` JSON 字段——HTML 拦截页、
+//     空体、纯文本均命中）：APISIX WAF 拦截；
+//   - HTTP 401 且 body 是 HTML 页：边缘网关鉴权拦截（openresty/APISIX 直接回页，
+//     业务层未参与，issue #243 实测形态）。
+//
+// 两者都不是账号的业务故障：按 ErrWafBlock 处置（软冷却 + 抖动退避，不永久禁用），
+// 避免像 ErrClient 那样「只换号不罚」导致同一号被反复选中、连环失败。
+// 带业务信封的 403 / 带 12153 的 401 已被 Classify 的上层规则捕获，走不到本层。
 func IsWafBlocked(status int, body string) bool {
-	return status == http.StatusForbidden && !hasBusinessEnvelope(body)
+	if hasBusinessEnvelope(body) {
+		return false
+	}
+	return status == http.StatusForbidden ||
+		(status == http.StatusUnauthorized && looksLikeEdgeHTMLPage(body))
 }
 
 // retryAfterHeaderCandidates 冷却时长优先解析的响应头候选序列：

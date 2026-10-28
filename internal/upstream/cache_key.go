@@ -24,9 +24,13 @@ import (
 //  3. 都没有 → 用入站 conversationID 参数（来自 X-Conversation-ID 头解析）
 //
 // 安全约束——按账号隔离：
-//   - 生成键格式 `wb2a-<uid8>-<convHex>`
-//   - uid8 是账号 UID 前 8 字符，跨账号绝不相同 → 跨账号缓存键绝不碰撞
+//   - 生成键为 36 字符 UUID v4 形态（8-4-4-4-12），与官方 randomUUID 同形态
+//   - uid 只作为哈希输入参与，**不以明文出现**；跨账号哈希段绝不相同 →
+//     跨账号缓存键绝不碰撞
 //   - 跨账号复用同一 cache key 会让上游命中错账号的前缀缓存、泄露对方对话，故 uid 是硬隔离因子
+//
+// 历史形态 `wb2a-<uid8>-<convHex>` 已废弃：既一眼可辨项目缩写（官方同位置恒为
+// UUID），又把账号 UID 前 8 位明文写进请求体（issue #239 / PR #248）。
 //
 // 入参 uid 为账号 UID（空则用 "-"，但仍会注入键；调用方应保证传真实 UID）。
 // 入参 conversationID 为网关解析出的会话标识（body 里没有 conversation_id 时用它做哈希源）。
@@ -60,22 +64,14 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	return out
 }
 
-// buildCacheKey 生成 `wb2a-<uid8>-<convHex>` 格式的稳定 cache key。
+// buildCacheKey 生成 UUID v4 形态（36 字符）的稳定 cache key。
 //
-// uid8 提供账号隔离段；convHex = sha256(uid + conversationID)[:16] 的 hex 提供会话段
-// （同账号同会话稳定、不同会话不同）。会话源为空时 convHex 仍由 uid 单独哈希，
-// 保证跨账号绝不碰撞但同一空会话不复用（空会话 = 新会话语义）。
+// uid 与 conversation 一起进 sha256（跨账号绝不碰撞），但只有哈希结果出站：
+// 同 (uid, conversation) 恒同值 → 前缀缓存复用语义不变；异账号/异会话互不相同。
+// 版本位/变体位由 uuidDashed 校正，与官方 randomUUID 产物在形态上不可区分。
 func buildCacheKey(uid, conversation string) string {
-	uid8 := uid
-	if len(uid8) > 8 {
-		uid8 = uid8[:8]
-	}
-	if uid8 == "" {
-		uid8 = "-"
-	}
 	sum := sha256.Sum256([]byte(uid + "|" + conversation))
-	convHex := hex.EncodeToString(sum[:16])
-	return "wb2a-" + uid8 + "-" + convHex
+	return uuidDashed(hex.EncodeToString(sum[:16]))
 }
 
 // strField 从 map 取 string 字段，非 string 或空串返回 ""。
