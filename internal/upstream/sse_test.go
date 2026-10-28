@@ -714,8 +714,12 @@ func TestStreamEmptyFramesCase(t *testing.T) {
 						continue
 					}
 					if json.Unmarshal([]byte(payload), &e) == nil {
-						if em, ok := e["error"].(map[string]any); ok && em["message"] == "empty upstream stream" && em["type"] == "upstream_error" {
-							found = true
+						// message 必须带重试关键词（retry），否则 OpenAI 兼容客户端
+						// 会把这次空流判成不可重试的终态错误。
+						if em, ok := e["error"].(map[string]any); ok && em["type"] == "upstream_error" {
+							if msg, _ := em["message"].(string); strings.Contains(msg, "empty stream") && strings.Contains(msg, "retry") {
+								found = true
+							}
 						}
 					}
 				}

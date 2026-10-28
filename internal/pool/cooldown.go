@@ -290,12 +290,21 @@ func clearRoutingModelCooldownsLocked(e *entry) {
 }
 
 // modelBlock TTL 常量（11102 负缓存退避）：
-// 首次命中 6h；半开到期后允许放行重试，再次命中 TTL = base × 2^min(hits-1, shift)；
-// 封顶 24h（最多一天再试一次）。该模型请求成功即由 BlockModelClear 清除。
+// 首次命中 30m（只够覆盖一次模型目录轮换/上游抖动，而不是半天弃用）；
+// 半开到期后允许放行重试，再次命中 TTL = base × 2^min(hits-1, shift)：
+// 30m → 1h → 2h → 4h → 6h；封顶 6h（该账号该模型一天最多躲两次）。
+// 距上次负缓存到期超过 modelBlockForget 的再次命中视为全新事件，Hits 归零重算，
+// 避免「一周里偶发几次」把 TTL 永久顶在上限。该模型请求成功即由 BlockModelClear 清除。
+//
+// 为什么首冷从 6h 降到 30m：6h 的假设是「11102 一定是确定性答复」，但上游模型
+// 目录会轮换、后端实例会切版本，一次误判就把健康账号×该模型锁掉半天；实测池子
+// 小的时候（3 个号）几乎等于该模型整体下线。宁可多试一次。
 const (
-	modelBlockBaseTTL = 6 * time.Hour
+	modelBlockBaseTTL = 30 * time.Minute
 	modelBlockShift   = 4
-	modelBlockMaxTTL  = 24 * time.Hour
+	modelBlockMaxTTL  = 6 * time.Hour
+	// modelBlockForget 计数遗忘窗口：距上一条负缓存到期超过该时长，Hits 重新从 1 起算。
+	modelBlockForget = 7 * 24 * time.Hour
 )
 
 // BlockModelBackoff 11102「该后端无此模型」的 (账号, 模型) 负缓存入口
@@ -320,7 +329,14 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 	now := time.Now()
 	hits := 0
 	if e.modelCooldowns != nil {
-		hits = e.modelCooldowns[model].Hits
+		prev := e.modelCooldowns[model]
+		// 计数遗忘：上一条负缓存早已过期（超过 modelBlockForget）说明这是一次
+		// 全新的独立事件，重新从首次 TTL 起算；否则延续既有 Hits 做退避升级。
+		if !prev.Until.IsZero() && now.Sub(prev.Until) > modelBlockForget {
+			hits = 0
+		} else {
+			hits = prev.Hits
+		}
 	}
 	hits++
 	ttl := modelBlockBaseTTL

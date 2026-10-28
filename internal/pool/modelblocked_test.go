@@ -210,3 +210,65 @@ func TestModelBlockedPausedDoesNotMaskBlock(t *testing.T) {
 		t.Errorf("Count=%d want 1（暂停号不计入）", st.Count)
 	}
 }
+
+// TestModelBlockBackoffPolicy 钉住 11102 负缓存的退避曲线：
+// 首次 30m（不是 6h——一次误判不该把健康号锁半天）→ 翻倍 → 封顶 6h；
+// 距上次到期超过遗忘窗口的再次命中，Hits 归零重新起算，避免偶发事件永久顶格。
+func TestModelBlockBackoffPolicy(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+
+	until := func() time.Time {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.byUID["u1"].modelCooldowns["m"].Until
+	}
+	hits := func() int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.byUID["u1"].modelCooldowns["m"].Hits
+	}
+	block := func() {
+		p.BlockModelBackoff("u1", "m", "11102 model [m] service info not found")
+	}
+
+	// 首次：~30m
+	block()
+	if d := time.Until(until()); d < 25*time.Minute || d > 35*time.Minute {
+		t.Fatalf("首次 TTL=%v want ~30m", d)
+	}
+	// 第二次：~1h
+	block()
+	if d := time.Until(until()); d < 55*time.Minute || d > 65*time.Minute {
+		t.Fatalf("第二次 TTL=%v want ~1h", d)
+	}
+	// 第三次：~2h
+	block()
+	if d := time.Until(until()); d < 115*time.Minute || d > 125*time.Minute {
+		t.Fatalf("第三次 TTL=%v want ~2h", d)
+	}
+	// 继续命中：封顶 6h，不随 Hits 无限增长
+	for i := 0; i < 6; i++ {
+		block()
+	}
+	if d := time.Until(until()); d > 6*time.Hour+time.Minute {
+		t.Fatalf("封顶失败 TTL=%v want <=6h", d)
+	}
+	if hits() < 5 {
+		t.Fatalf("Hits=%d 应持续累加", hits())
+	}
+
+	// 遗忘窗口：把上一条负缓存挪到 30 天前，再命中应视为全新事件（Hits=1、TTL~30m）
+	p.mu.Lock()
+	mc := p.byUID["u1"].modelCooldowns["m"]
+	mc.Until = time.Now().Add(-30 * 24 * time.Hour)
+	p.byUID["u1"].modelCooldowns["m"] = mc
+	p.mu.Unlock()
+	block()
+	if h := hits(); h != 1 {
+		t.Fatalf("遗忘窗口后 Hits=%d want 1", h)
+	}
+	if d := time.Until(until()); d < 25*time.Minute || d > 35*time.Minute {
+		t.Fatalf("遗忘窗口后 TTL=%v want ~30m", d)
+	}
+}

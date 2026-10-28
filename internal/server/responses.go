@@ -31,6 +31,25 @@ type responsesRequest struct {
 	Reasoning       *struct {
 		Effort string `json:"effort"`
 	} `json:"reasoning"`
+	// Text 承载结构化输出约束（text.format）。此前该字段缺失，json.Unmarshal 静默
+	// 丢弃 → 客户端要的 JSON Schema 约束根本到不了上游，模型自由发挥，Codex 一类
+	// 依赖严格 JSON 的审批/工具链必然失败（上游 issue #258 同款）。
+	Text *responsesText `json:"text"`
+}
+
+// responsesText Responses 的 text 配置，本网关只关心 format。
+type responsesText struct {
+	Format *responsesTextFormat `json:"format"`
+}
+
+// responsesTextFormat 结构化输出声明。json_schema 的 name/schema/strict 在 Responses
+// 里是**扁平**的，chat 侧要收进 json_schema 对象内，转换见 responsesResponseFormat。
+type responsesTextFormat struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema"`
+	Strict      *bool           `json:"strict"`
 }
 
 // responsesTool Responses 的工具声明是扁平结构（name 在顶层）。
@@ -129,6 +148,11 @@ func responsesInputToChat(raw json.RawMessage) []any {
 	out := make([]any, 0, len(items))
 	// pendingCalls 收集连续 function_call，直到遇到非调用 item 才落成一条 assistant 消息。
 	var pendingCalls []any
+	// openCallIDs 记录「已声明但还没收到 output」的调用 id（FIFO）。用于给缺 call_id
+	// 的 function_call_output 回填：上游 chat 侧 role:tool 必须带非空 tool_call_id，
+	// 空串会被判参数错误（11101）整条打回。有些客户端（含 Codex 的部分版本）
+	// 只在 output 里省了 call_id，但前面的 function_call 是带 id 的，按顺序配对即可。
+	var openCallIDs []string
 	flushCalls := func() {
 		if len(pendingCalls) == 0 {
 			return
@@ -156,6 +180,7 @@ func responsesInputToChat(raw json.RawMessage) []any {
 				"type":     "function",
 				"function": map[string]any{"name": it.Name, "arguments": args},
 			})
+			openCallIDs = append(openCallIDs, id)
 			continue
 		case "function_call_output":
 			flushCalls()
@@ -168,9 +193,22 @@ func responsesInputToChat(raw json.RawMessage) []any {
 					outText = string(it.Output)
 				}
 			}
+			callID := it.CallID
+			if callID != "" {
+				openCallIDs = removeCallID(openCallIDs, callID)
+			} else if len(openCallIDs) > 0 {
+				// 缺 call_id：按声明顺序取最早那个未消费的调用，配对后出队。
+				callID = openCallIDs[0]
+				openCallIDs = openCallIDs[1:]
+			}
+			if callID == "" {
+				// 真·孤儿（既没带 id，前面也没有未配对的 function_call）：丢弃。
+				// 编一个 id 只会让上游认为「调用不存在」，同样是 400；留空更糟。
+				continue
+			}
 			out = append(out, map[string]any{
 				"role":         "tool",
-				"tool_call_id": it.CallID,
+				"tool_call_id": callID,
 				"content":      outText,
 			})
 			continue
@@ -188,6 +226,17 @@ func responsesInputToChat(raw json.RawMessage) []any {
 	}
 	flushCalls()
 	return out
+}
+
+// removeCallID 从待配对队列里摘掉已消费的调用 id（保持其余顺序）。找不到是无害的：
+// 说明该 output 是自带 id 的补充/重复消息，队列本来就没有它。
+func removeCallID(ids []string, id string) []string {
+	for i, v := range ids {
+		if v == id {
+			return append(ids[:i], ids[i+1:]...)
+		}
+	}
+	return ids
 }
 
 // responsesToolChoice Responses 的 tool_choice → chat 形态。
@@ -264,7 +313,49 @@ func responsesToChat(req *responsesRequest) map[string]any {
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		out["reasoning_effort"] = req.Reasoning.Effort
 	}
+	// text.format → response_format：不映射就等于客户端的结构化输出要求被静默吞掉。
+	// 只在能构成合法 chat 形态时才发——畸形/不认识的 format 宁可不发，避免上游按
+	// 参数错误（11101）直接 400，把「没约束」升级成「请求失败」。
+	if rf := responsesResponseFormat(req.Text); rf != nil {
+		out["response_format"] = rf
+	}
 	return out
+}
+
+// responsesResponseFormat 把 Responses 的 text.format 转成 chat 的 response_format。
+//
+// 形态差异（Responses 扁平 / chat 嵌套）：
+//
+//	{type:"json_schema", name, schema, strict}  →  {type:"json_schema", json_schema:{name, schema, strict}}
+//	{type:"json_object"}                        →  {type:"json_object"}
+//	{type:"text"} / 缺 schema / 空              →  nil（不约束）
+func responsesResponseFormat(t *responsesText) map[string]any {
+	if t == nil || t.Format == nil {
+		return nil
+	}
+	f := t.Format
+	switch f.Type {
+	case "json_object":
+		return map[string]any{"type": "json_object"}
+	case "json_schema":
+		if len(f.Schema) == 0 || string(f.Schema) == "null" {
+			return nil
+		}
+		name := f.Name
+		if name == "" {
+			// chat 侧 json_schema.name 必填；官方 SDK 缺省时也自填，这里同口径兜底。
+			name = "response"
+		}
+		js := map[string]any{"name": name, "schema": f.Schema}
+		if f.Description != "" {
+			js["description"] = f.Description
+		}
+		if f.Strict != nil {
+			js["strict"] = *f.Strict
+		}
+		return map[string]any{"type": "json_schema", "json_schema": js}
+	}
+	return nil
 }
 
 // responsesToolItem 流式期间累积的单个工具调用。

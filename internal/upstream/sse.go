@@ -508,8 +508,10 @@ func WithErrorFrameObserver(fn func(payload string)) StreamOption {
 
 // StreamHint 同 Stream，但上游 error 帧透出前把 hintFn(payload) 的返回值写入
 // error.gateway_hint。hintFn 为 nil 或返回空串 → 原样透传（零改写）。
-// 空流兜底 error 帧（"empty upstream stream"）不带 hint（网关本地故障形态
-// 未覆盖，不编造）。
+// 空流兜底 error 帧（"empty upstream stream … retry"）不带 hint（网关本地故障形态
+// 未覆盖，不编造）。文案里显式带 transient / retry：OpenAI 兼容客户端（Codex、
+// Continue 等）按 message 关键词判定可重试性，原来只写 "empty upstream stream"
+// 会被判成不可重试，一次上游空流就变成终态失败（上游 issue #277 同款）。
 // opts：旁路观测开关（见 WithErrorFrameObserver），不改变任何透传字节。
 func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, opts ...StreamOption) error {
 	var o streamOptions
@@ -688,7 +690,7 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		// 上游错误帧透传（error-passthrough）：带 error 键的帧**原样写出**，不走
 		// normalizeFrame 白名单——白名单会剥掉 error 字段，客户端就看不到上游
 		// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
-		// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
+		// 计入有效帧（避免误判空流补写兜底 error 帧）。
 		if _, hasErr := obj["error"]; hasErr {
 			// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
 			if o.onErrorFrame != nil {
@@ -768,8 +770,9 @@ readLoop:
 	// 再补 [DONE] 保证客户端能正常收尾，并返回非 nil error 供调用方记录。
 	// 网关本地空流兜底帧走 hintFn=nil 的直写路径：该形态未覆盖（不编造 hint），
 	// 且 writeRaw 的 hintFn 闭包在空流路径下可能携带上一帧的上下文造成误配。
+	// message 必须包含 transient / retry 之类的重试关键词（见上方 StreamHint 注释）。
 	if validFrames == 0 {
-		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
+		_ = writeRaw(`{"error":{"message":"upstream returned an empty stream (transient upstream error, please retry)","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
