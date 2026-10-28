@@ -122,6 +122,13 @@ set "HTTPS_PROXY=http://127.0.0.1:%PORT%"
 set "HTTP_PROXY=http://127.0.0.1:%PORT%"
 set "NO_PROXY=127.0.0.1,localhost,::1"
 
+REM Verified 2026-10-28: this build's bundled Node (22.21.1) DOES ship the
+REM NODE_USE_ENV_PROXY switch -- grep the exe for "EnvHttpProxyAgent" (8 hits).
+REM Setting this makes global fetch honor HTTPS_PROXY without any require shim,
+REM so chat (undici fetch) traffic reaches the proxy. Keep the shim below as a
+REM fallback for older builds; it is a no-op when NODE_OPTIONS is ignored.
+set "NODE_USE_ENV_PROXY=1"
+
 REM NODE_OPTIONS is the ONLY way to catch chat traffic. The ACP transport uses
 REM the global fetch (Node's bundled undici) and undici ignores the proxy env
 REM vars -- so with the vars above alone you capture /v3/config and telemetry
