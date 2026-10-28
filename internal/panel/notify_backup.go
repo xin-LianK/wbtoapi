@@ -11,14 +11,20 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 )
 
-// notifyStatus 返回告警通道是否启用与当前格式（前端据此决定是否显示测试按钮）。
+// notifyStatus 返回告警通道状态（前端据此决定是否显示测试按钮与提示语）。
+// enabled=真正能发（notifier 就位）；configured=配置层开着。两者组合出三态：
+// 工作中 / 待配置 url / 显式关闭。
 func (p *Panel) notifyStatus(w http.ResponseWriter, r *http.Request) {
 	enabled := p.cfg.Notify != nil
 	format := ""
 	if enabled {
 		format = p.cfg.Notify.Format()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": enabled, "format": format})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":    enabled,
+		"configured": enabled || p.cfg.NotifyConfigured,
+		"format":     format,
+	})
 }
 
 // notifyTest 同步投递一条测试消息，把通道真实错误回给前端。

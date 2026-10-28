@@ -70,8 +70,8 @@
     "alias": {}
   },
   "notify": {
-    "_comment": "出站告警。enabled=false 时完全关闭。format: generic(裸 JSON POST) / wecom(企业微信群机器人) / bark(iOS) / telegram。URL 为 webhook 地址；telegram 用 token+chat_id。只为失败告警（签到异常、账号被禁用），全成功不打扰。",
-    "enabled": false,
+    "_comment": "出站告警，缺省 enabled=true，但配好 url 前是静默的（不会发任何请求）。format: generic(裸 JSON POST) / wecom(企业微信群机器人) / bark(iOS) / telegram。URL 为 webhook 地址；telegram 用 token+chat_id。只为失败告警（签到异常、账号被禁用），全成功不打扰。",
+    "enabled": true,
     "url": "",
     "format": "generic",
     "token": "",
@@ -79,14 +79,14 @@
     "min_interval_minutes": 10
   },
   "backup": {
-    "_comment": "本地备份：auths/*.json + data/*.json + config.json 打成 tar.gz。dir 空 = <state_file 目录>/backups。interval_hours<=0 时不自动备份（仍可在面板手动触发）。",
+    "_comment": "本地备份（缺省开启）：auths/*.json + data/*.json + config.json 打成 tar.gz。dir 空 = <state_file 目录>/backups。interval_hours<=0 时不自动备份（仍可在面板手动触发）。",
     "enabled": true,
     "dir": "",
     "interval_hours": 24,
     "keep": 7
   },
   "update": {
-    "_comment": "版本更新提示（只提示不自动升级）。repo 为 GitHub 仓库 owner/name。",
+    "_comment": "版本更新提示（缺省开启，只提示不自动升级）。repo 为 GitHub 仓库 owner/name。",
     "enabled": true,
     "repo": "xin-LianK/wbtoapi",
     "check_hours": 12

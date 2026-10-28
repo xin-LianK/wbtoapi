@@ -393,6 +393,14 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	// 运营三件套缺省开启：三者都不需要额外基础设施——通知在配好 url 前静默
+	// （notify.New 对空 url 返回 nil），备份落在 state 目录旁，更新检查只是
+	// 每 12h 一次只读的 GitHub 查询。缺省关的代价是真实存在的：签到失败
+	// 没人知道、data 目录误删没有备份。仍可显式 false 关闭。
+	c.Notify.Enabled = true
+	c.Backup.Enabled = true
+	c.Backup.IntervalHours = 24
+	c.Update.Enabled = true
 	c.Schedule.TaskSweepEnabled = true
 	c.Schedule.TaskSweepMinutes = 15
 	c.Schedule.TaskDiscoverAutoRun = true

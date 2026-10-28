@@ -3744,13 +3744,22 @@ async function loadSystemNotify() {
   try {
     const d = await api('notify/status');
     sysNotifyOn = !!d.enabled;
-    st.textContent = d.enabled ? '已启用' : '未启用';
+    // 三态：工作中 / 开着但缺 url（enabled 现在缺省 true，这是最常见态）/ 显式关闭。
+    if (d.enabled) {
+      st.textContent = '已启用';
+      hint.textContent = 'config.json → notify';
+      hint.title = '';
+    } else if (d.configured) {
+      st.textContent = '待配置';
+      hint.textContent = '缺 notify.url';
+      hint.title = '在 config.json 里配 notify.url（+ format）后告警才会真正发出';
+    } else {
+      st.textContent = '未启用';
+      hint.textContent = 'notify.enabled';
+      hint.title = '在 config.json 里设 notify.enabled = true 并填 url';
+    }
     fmt.textContent = d.format || '—';
-    // 只放键名：整句「在 config.json 里设 notify.enabled = true」在半宽卡里会折成两行，
-    // 把「通道」那一行顶开。完整说明挂 title。
-    hint.textContent = d.enabled ? 'config.json → notify' : 'notify.enabled';
-    hint.title = d.enabled ? '' : '在 config.json 里设 notify.enabled = true 并填 url';
-    if (btn) { btn.disabled = !d.enabled; btn.title = d.enabled ? '' : '先启用告警通道'; }
+    if (btn) { btn.disabled = !d.enabled; btn.title = d.enabled ? '' : (d.configured ? '先配置 notify.url' : '先启用告警通道'); }
   } catch (e) {
     st.textContent = '读取失败';
     hint.textContent = e.message || String(e);

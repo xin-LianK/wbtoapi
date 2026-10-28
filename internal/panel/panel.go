@@ -77,6 +77,12 @@ type Config struct {
 	// 真正的业务告警由 scheduler / server 在各自失败点触发。
 	Notify *notify.Notifier
 
+	// NotifyConfigured 配置层是否打开告警（notify.enabled）。与 Notify != nil
+	// 组合区分三种状态：都 true = 工作中；configured 但 nil = 缺 url；
+	// 都 false = 显式关闭。缺省 enabled=true 之后这个区分是必须的，
+	// 否则面板会对着一个发不出消息的通道显示「已启用」。
+	NotifyConfigured bool
+
 	// Backup 本地备份器（nil = 未启用）。
 	Backup *backup.Manager
 

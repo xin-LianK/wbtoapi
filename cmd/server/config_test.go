@@ -859,3 +859,37 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+// TestOpsDefaultsOn 运营三件套（notify/backup/update）缺省开启：
+// 自用场景漏配 ≠ 想关——通知在配 url 前静默、备份落 state 目录旁、
+// 更新只是只读查询，默认关只会让人漏掉签到失败的告警（2026-10-28 用户反馈）。
+// 键缺席 → true；显式 false → 关（与 schedule 开关同一套「Default 先置位」手法）。
+func TestOpsDefaultsOn(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Notify.Enabled {
+		t.Error("notify.enabled 缺省应为 true（配 url 前静默）")
+	}
+	if !c.Backup.Enabled || c.Backup.IntervalHours != 24 {
+		t.Errorf("backup 缺省应 enabled+24h，got %+v", c.Backup)
+	}
+	if !c.Update.Enabled {
+		t.Error("update.enabled 缺省应为 true")
+	}
+
+	// 显式 false 必须能真正关掉
+	os.WriteFile(fp, []byte(`{"notify":{"enabled":false},"backup":{"enabled":false},"update":{"enabled":false}}`), 0o600)
+	c, err = Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Notify.Enabled || c.Backup.Enabled || c.Update.Enabled {
+		t.Errorf("显式 false 应全部关闭，got notify=%v backup=%v update=%v",
+			c.Notify.Enabled, c.Backup.Enabled, c.Update.Enabled)
+	}
+}
