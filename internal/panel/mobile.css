@@ -330,7 +330,7 @@
   }
   .nav.open { transform: translateX(-50%); }
   .nav ul { display: flex; padding: 0; gap: 1px; }
-  .nav a { padding: 6px 9px 5px; font-size: 9.5px; border-radius: 11px; }
+  .nav a { padding: 6px 9px 5px; font-size: 9.5px; border-radius: 8px; }
   .nav a svg { width: 15px; height: 15px; }
   .nav-btn, .nav-veil { display: none !important; }
   .main { padding-bottom: 78px; }
@@ -338,7 +338,8 @@
   .topbar h2 { font-size: 17px; }
   .topbar .sig { display: none; }   /* 手机上状态收进各视图自身，顶栏只留标题与操作 */
   .tb-title { gap: 2px; }
-  .stat, .kpi { border-radius: 16px; }
+  .stat { border-radius: 12px; }
+  .kpi { border-radius: 8px; }
   /* 配置页保存条 sticky 在视口底，会被居中的 Dock 压住右侧按钮：
      抬到 Dock 上方并做成悬浮圆角条，让「保存配置」永远可点。 */
   .savebar { bottom: 66px; margin: 0 10px; border-radius: 14px; border: 1px solid var(--line-soft); box-shadow: var(--shadow); }

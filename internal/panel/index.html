@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -790,28 +790,42 @@ button:focus-visible, input:focus-visible, select:focus-visible {
    仍然零布局结构改动（除导航外），所有视图内容不受影响。
    ══════════════════════════════════════════════════════════════════════ */
 
-/* ── 1. 令牌：zinc 灰阶（LDC 口径）+ 蓝主色 ────────────────────────── */
+/* ── 1. 令牌：政务云设计规范 v1.0（light 默认，dark 只覆写语义层）─────
+   取值对齐 D:\Project\WorkOrder\design-system\tokens.css：
+   白卡 + 1px 淡描边 + 灰底页面零阴影分层；品牌蓝 #2F7BFF；
+   状态四色 ok/warn/bad/unk；文本四级。规则：业务样式不写裸 hex。 */
 :root {
-  --r-sm: 10px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px;
-  --bg: #09090b; --surface: #131316; --surface-2: #1c1c20; --raise: #232329;
-  --line: #27272d; --line-soft: #1f1f24;
-  --ink: #fafafa; --ink-2: #a1a1aa; --ink-3: #71717a;
-  --accent: #4d8dff; --accent-soft: rgba(77,141,255,.15);
-  --ok: #10b981; --ok-soft: rgba(16,185,129,.13);
-  --warn: #f59e0b; --warn-soft: rgba(245,158,11,.13);
-  --bad: #ef4444; --bad-soft: rgba(239,68,68,.12);
-  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 14px 32px -22px rgba(0,0,0,.75);
+  /* 圆角阶梯（外大内小，不跳级）：标签4 → 按钮/输入6 → 卡内格8 → 小卡10 → 面板12 → 弹层14 → 主卡16 */
+  --r-xs: 4px; --r-sm: 6px; --r-md: 8px; --r-lg: 10px; --r-xl: 12px; --r-2xl: 14px; --r-card: 16px;
+  --bg: #F5F7FA; --surface: #FFFFFF; --surface-2: #F7F8FA; --raise: #FFFFFF;
+  --line: #E5E6EB; --line-soft: #EDF0F4;          /* 结构线 vs 卡片线，两个角色不混用 */
+  --ink: #1D2129; --ink-2: #4E5969; --ink-3: #86909C; --ink-4: #C9CDD4;
+  --accent: #2F7BFF; --accent-hover: #1E6AF0; --accent-deep: #1B5CDB;
+  --accent-soft: #E8F3FF;                          /* 选中底：品牌 tint-2 实底 */
+  --accent-tint: #F3F8FF; --accent-track: #D6E8FF; /* 进度轨底是品牌浅蓝，不是灰 */
+  --teal: #36CFC9;                                 /* 仅区块标题下划线 */
+  --ok: #2D8A54; --ok-soft: #E8FFEA;               /* 文本用 strong 档保证白底可读 */
+  --warn: #B87700; --warn-strong: #FF7D00; --warn-soft: #FFF7E8;
+  --bad: #F53F3F; --bad-strong: #A31B1B; --bad-soft: #FFECE8;
+  --shadow: 0 6px 20px rgba(31,54,92,.08);         /* 仅浮层与悬停，普通卡片不用 */
+  --shadow-hover: 0 6px 18px rgba(47,123,255,.10);
+  --focus-ring: 0 0 0 2px rgba(47,123,255,.12);
 }
-[data-theme="light"] {
-  --bg: #fafafa; --surface: #ffffff; --surface-2: #f4f4f5; --raise: #ffffff;
-  --line: #e4e4e7; --line-soft: #ebebee;
-  /* ink-2/ink-3 是 zinc-600/zinc-500：维持 V2 定下的对比度底线（≥4.4:1） */
-  --ink: #18181b; --ink-2: #52525b; --ink-3: #87878f;
-  --accent: #2563eb; --accent-soft: rgba(37,99,235,.09);
-  --ok: #059669; --ok-soft: rgba(5,150,105,.1);
-  --warn: #d97706; --warn-soft: rgba(217,119,6,.11);
-  --bad: #dc2626; --bad-soft: rgba(220,38,38,.09);
-  --shadow: 0 1px 2px rgba(24,24,27,.04), 0 12px 28px -24px rgba(24,24,27,.3);
+[data-theme="dark"] {
+  /* 按规范扩展指引：dark 只动 bg/text/line 语义与状态底色，色板（品牌/状态前景）不动。
+     前景提亮一档换暗底可读性；底色从实色换同色系半透明。 */
+  --bg: #131418; --surface: #1C1E24; --surface-2: #24262D; --raise: #2A2D35;
+  --line: #30333B; --line-soft: #26282F;
+  --ink: #E8EAED; --ink-2: #A6ABB5; --ink-3: #71767F; --ink-4: #4E525A;
+  --accent: #4D8DFF; --accent-hover: #66A0FF; --accent-deep: #2F7BFF;
+  --accent-soft: rgba(77,141,255,.15); --accent-tint: rgba(77,141,255,.08); --accent-track: rgba(77,141,255,.22);
+  --teal: #36CFC9;
+  --ok: #3FD68C; --ok-soft: rgba(0,180,42,.16);
+  --warn: #FFB65C; --warn-strong: #FFB65C; --warn-soft: rgba(255,125,0,.14);
+  --bad: #F76560; --bad-strong: #F76560; --bad-soft: rgba(245,63,63,.16);
+  --shadow: 0 12px 32px rgba(0,0,0,.5);
+  --shadow-hover: 0 6px 18px rgba(0,0,0,.4);
+  --focus-ring: 0 0 0 2px rgba(77,141,255,.25);
 }
 
 /* ── 2. 壳层：单列 + 底部浮动 Dock ─────────────────────────────────── */
@@ -883,6 +897,125 @@ input, select { border-radius: var(--r-sm); }
 .pg-compose textarea { border-radius: var(--r-md); }
 
 #toasts { bottom: 88px; }   /* toast 别压在 Dock 上 */
+
+/* ══════════════════════════════════════════════════════════════════════
+   视觉刷新 V4 —— 政务云设计规范 v1.0（D:\Project\WorkOrder\design-system）
+   六条铁律落地：①无阴影分层 ②状态三重编码 ③数字等宽 ④紫色不引入
+   ⑤青色短条只给区块标题 ⑥外大内小圆角。底部 Dock 菜单结构不变。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* 密度：正文 13px（规范反直觉选择①），字体栈换 Inter */
+body { font: 13px/1.6 var(--sans); }
+:root { --sans: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif; }
+
+/* 键盘焦点：统一品牌光环（规范 components.css :focus-visible） */
+:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--r-sm); }
+
+/* ── 无阴影分层：白卡 + 1px 卡片线 + 灰底页面 ───────────────────────── */
+.box {
+  background: var(--surface); border: 1px solid var(--line-soft);
+  border-radius: var(--r-xl); box-shadow: none;
+}
+/* 区块标题：15/600 + 青色 28×3 短条（签名元素，铁律⑤） */
+.box > header h3 {
+  font-size: 15px; font-weight: 600; color: var(--ink);
+  padding-bottom: 7px; margin-bottom: -12px;
+  background: linear-gradient(var(--teal), var(--teal)) no-repeat left bottom / 28px 3px;
+}
+.dlg header h3 {
+  padding-bottom: 7px; margin-bottom: -13px;
+  background: linear-gradient(var(--teal), var(--teal)) no-repeat left bottom / 28px 3px;
+}
+.box > header { border-bottom-color: var(--line-soft); }
+
+/* ── 概览统计卡：ds「状态统计小卡」四色底 + 三重编码（底色+文字+标签点）── */
+.stats {
+  border: none; background: transparent; box-shadow: none; border-radius: 0;
+  gap: 12px; overflow: visible;
+}
+.stat {
+  background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--r-xl);
+  box-shadow: none; padding: 14px 16px;
+}
+.stat .v { font: 700 24px/1.15 var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.stat .k { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
+/* 有状态的卡换四色底：数值与标签同色（底色+数字色+标签词 = 三重编码） */
+.stat.good { background: var(--ok-soft); border-color: transparent; }
+.stat.warn { background: var(--warn-soft); border-color: transparent; }
+.stat.bad  { background: var(--bad-soft); border-color: transparent; }
+.stat.good .v, .stat.good .k { color: var(--ok); }
+.stat.warn .v, .stat.warn .k { color: var(--warn); }
+.stat.bad  .v, .stat.bad  .k { color: var(--bad); }
+/* 卡内指标格（用量视图）：ds .kpi 底 #F7F8FA 圆角 8 */
+.kpi { background: var(--surface-2); border-radius: var(--r-md); border: none; }
+
+/* ── 表格：表头 12px 灰底 sticky，行分隔用 divider，数字等宽 ─────────── */
+.acc th {
+  background: var(--surface-2); font-size: 11.5px; font-weight: 500;
+  color: var(--ink-3); border-bottom: 1px solid var(--line);
+}
+.acc td { border-bottom-color: var(--line-soft); font-size: 13px; }
+.acc tbody tr:hover { background: var(--surface-2); }
+
+/* ── 控件：按钮回 6px 圆角（规范 .btn），主按钮 hover 换深蓝 ────────── */
+button, input, select { border-radius: var(--r-sm); }
+button { transition: border-color var(--ds-dur-fast, 120ms), background var(--ds-dur-fast, 120ms), color var(--ds-dur-fast, 120ms); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); filter: none; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.primary:hover:not(:disabled) { color: #fff; }
+button.ghost:hover:not(:disabled) { color: var(--accent); }
+button.xs { border-radius: var(--r-sm); }
+select.xs { border-radius: var(--r-sm); }
+.dlg .tabs .tab { border-radius: var(--r-sm); }
+.dlg .tabs { border-radius: var(--r-md); }
+input:focus, select:focus { border-color: var(--accent); box-shadow: var(--focus-ring); }
+
+/* ── 状态标签：ds .tag 规格 —— 圆角 4、11px/600（脱离胶囊）───────────── */
+.tag { border-radius: var(--r-xs); font-size: 11px; font-weight: 600; padding: 2px 8px; gap: 5px; }
+.tag.ok  { color: var(--ok); }   /* 底色沿用 --ok-soft（实色四色底） */
+.tag.warn { color: var(--warn); }
+.tag.bad { color: var(--bad); }
+
+/* ── 弹层与浮层：圆角 14 + modal 阴影；遮罩用规范色 ─────────────────── */
+.veil { background: rgba(29,33,41,.45); }
+.dlg { border-radius: var(--r-2xl); border-color: var(--line-soft); box-shadow: var(--shadow-modal, 0 12px 40px rgba(0,0,0,.18)); }
+
+/* Toast：规范深色浮层（rgba(29,33,41,.9)），保留左侧级别色条作三重编码之一 */
+.tst {
+  background: rgba(29,33,41,.9); color: #fff; border: none;
+  border-left: 3px solid var(--ink-3); border-radius: var(--r-md); box-shadow: var(--shadow);
+}
+.tst.ok { border-left-color: var(--ok); } .tst.err { border-left-color: var(--bad); }
+
+/* ── 页头：h2 20/700（ds --ds-fs-h2），副标题 12px text-3 ───────────── */
+.topbar h2 { font-size: 20px; font-weight: 700; letter-spacing: .2px; }
+.topbar .meta { font-size: 12px; }
+.topbar .sig { background: var(--surface-2); border-color: var(--line-soft); font-family: var(--sans); font-size: 11.5px; }
+
+/* ── Dock（菜单不变，只换皮）：白胶囊 + 卡片线 + 浮层阴影，
+      选中项 = 品牌 tint-2 底 + 品牌字（规范导航选中态）──────────────── */
+.nav {
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  border-color: var(--line-soft); box-shadow: var(--shadow);
+}
+.nav a { border-radius: var(--r-md); font-weight: 500; }
+.nav a.on { background: var(--accent-soft); color: var(--accent-deep); font-weight: 600; }
+.nav a.on svg { color: var(--accent); }
+[data-theme="dark"] .nav a.on { color: var(--accent); }
+
+/* ── 进度轨：品牌浅蓝轨底（规范：进度轨不是灰）──────────────────────── */
+.qprog .qbar { background: var(--accent-track); }
+.bar { background: var(--accent-track); }
+.qprog .qbar i, .bar i { background: var(--accent); }
+
+/* ── 用量/日志里的杂项跟随 ─────────────────────────────────────────── */
+.uschart { border-radius: var(--r-lg); }
+.realm-tag { border-radius: var(--r-xs); background: var(--accent-soft); }
+.usage-item { border-radius: var(--r-xs); }
+.pg-compose textarea { border-radius: var(--r-md); }
+.empty { padding: 32px 20px; }
+.savebar { background: var(--surface-2); }
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->
 <link rel="stylesheet" href="mobile.css">
