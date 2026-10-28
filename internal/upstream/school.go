@@ -120,7 +120,7 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 
 // SchoolChatTimesEvents 构造一条 chat_request_send 事件（chat_3_times 计数）。
 func SchoolChatTimesEvents(conversationID string) map[string]any {
-	rid := "wb2api-" + clientToken()
+	rid := NewEventID()
 	return map[string]any{
 		"eventCode":   "chat_request_send",
 		"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
@@ -131,7 +131,7 @@ func SchoolChatTimesEvents(conversationID string) map[string]any {
 		"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
 		"traceId": rid, "rootRequestId": rid,
 		"parentConversationId": conversationID, "conversationId": conversationID,
-		"messageId": "msg-" + rid[len(rid)-8:],
+		"messageId": "msg-" + clientToken()[:8],
 		"agentName": "mp", "agentType": "main",
 		"codebuddy.session_id":              conversationID,
 		"codebuddy.conversation_request_id": rid,
@@ -205,7 +205,7 @@ func MiniPlaybookEvents(caseID, caseName string) []map[string]any {
 	send := map[string]any{
 		"eventCode": "playbook_prompt_send", "source": "discover",
 		"promptLength": 96, "isOfficial": 1,
-		"conversationId": "wb2api-mp-pb-" + clientToken(),
+		"conversationId": NewEventID(),
 		"extVersion":     "2.2.8",
 	}
 	for k, v := range base {

@@ -16,10 +16,20 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 // reportPath 活跃上报通道（实测）。
 const reportPath = "/v2/report"
+
+// NewEventID 生成上报体用的会话/请求 ID：官方形态 v4 UUID（8-4-4-4-12，
+// 版本位/变体位经 uuidDashed 校正，对齐 crypto.randomUUID()）。
+// 官方客户端在 /v2/report 的 conversationId、桌面事件、mp 事件等位置一律发
+// randomUUID；wb2api-<毫秒> 这类自证前缀会被服务端一条 LIKE 全量识别
+// （官方没有该渠道），所有上报 ID 统一走本函数。
+func NewEventID() string {
+	return uuidDashed(session.NewMessageID())
+}
 
 // billingJSON 发 billing 域（billingBase，codebuddy.cn）请求并解信封；body 为 nil 时不带请求体。
 // 与 travel.go 的 growthJSON 对称（growth 域走 chatBase + BillingHeaders；billing 域走 billingBase）。
@@ -139,7 +149,7 @@ type chatRequestEvent struct {
 }
 
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
-// conversationID 由调用方生成（如 wb2api-<ms>），无需真实会话——服务端不校验一致性。
+// conversationID 由调用方生成（官方形态 v4 UUID，NewEventID），无需真实会话——服务端不校验一致性。
 // requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
 // 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
 func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {

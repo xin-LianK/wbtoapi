@@ -31,7 +31,8 @@ func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	defer srv.Close()
 
 	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
-	if err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u-active"}, "wb2api-123", ""); err != nil {
+	cid := NewEventID()
+	if err := c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u-active"}, cid, ""); err != nil {
 		t.Fatalf("report: %v", err)
 	}
 	if len(got) != 1 {
@@ -44,8 +45,8 @@ func TestReportChatActivitySendsArrayWithUserID(t *testing.T) {
 	if ev["userId"] != "u-active" {
 		t.Errorf("userId=%v want u-active（缺失则服务端 200 但静默丢弃）", ev["userId"])
 	}
-	if ev["conversationId"] != "wb2api-123" {
-		t.Errorf("conversationId=%v want wb2api-123", ev["conversationId"])
+	if ev["conversationId"] != cid {
+		t.Errorf("conversationId=%v want %s", ev["conversationId"], cid)
 	}
 	if ev["mode"] != "craft" {
 		t.Errorf("mode=%v want craft", ev["mode"])
