@@ -70,7 +70,7 @@
     "alias": {}
   },
   "notify": {
-    "_comment": "出站告警，缺省 enabled=true，但配好 url 前是静默的（不会发任何请求）。format: generic(裸 JSON POST) / wecom(企业微信群机器人) / bark(iOS) / telegram。URL 为 webhook 地址；telegram 用 token+chat_id。只为失败告警（签到异常、账号被禁用），全成功不打扰。",
+    "_comment": "出站告警，缺省 enabled=true，但配好 url 前是静默的（不会发任何请求）。format: generic(裸 JSON POST) / wecom(企业微信群机器人) / bark(iOS) / telegram。URL 为 webhook 地址；bark 填 https://api.day.app/<你的device_key>；telegram 用 token+chat_id。只为失败告警（签到异常、账号被禁用），全成功不打扰。",
     "enabled": true,
     "url": "",
     "format": "generic",
