@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
@@ -198,6 +199,17 @@ type Config struct {
 		// 生效点：GET /v1/models 列表过滤 + POST /v1/chat/completions 点名拒绝。
 		// 面板保存后经 livecfg 热生效，无需重启。
 		Hidden []string `json:"hidden"`
+		// Alias 模型别名：客户端写的模型名 → 实际送上游的模型名。
+		//
+		// 存在理由：Claude Code / Codex 这类客户端会把模型名硬编码在请求里
+		// （如 claude-sonnet-4-5-20250929、gpt-5-codex），网关必须能把它们映到
+		// 账号池实际支持的模型上，否则一接进来就是 11102「无此模型」。
+		// 键 "*" 为兜底：任何未命中显式别名的模型名都用它（客户端会冒出新名字时
+		// 省去逐条维护）。
+		//
+		// 生效点：三个入站协议（chat/completions、messages、responses）共用的
+		// chat 流水线入口。改动需重启进程。
+		Alias map[string]string `json:"alias"`
 	} `json:"models"`
 
 	Prompt struct {
@@ -286,6 +298,46 @@ type Config struct {
 		// 防「间隔很小但持续打满」——单靠 MinInterval 挡不住高频长跑。
 		PerMinute int `json:"per_minute"`
 	} `json:"pacing"`
+
+	// Notify 出站告警（webhook）。见 internal/notify。
+	//
+	// 空配置 = 完全关闭（默认）：不改变任何既有行为，也不产生任何出站请求。
+	Notify struct {
+		Enabled bool   `json:"enabled"`
+		URL     string `json:"url"`
+		// Format 通道格式：generic（裸 JSON POST）/ wecom（企业微信群机器人）/
+		// bark（iOS 推送）/ telegram（Bot API）。空或非法 → generic。
+		Format string `json:"format"`
+		// Token telegram bot token（其它通道忽略）。
+		Token string `json:"token"`
+		// ChatID telegram 会话 id。
+		ChatID string `json:"chat_id"`
+		// MinIntervalMinutes 同类消息去重窗口（分钟），<=0 回落 10。
+		MinIntervalMinutes int `json:"min_interval_minutes"`
+	} `json:"notify"`
+
+	// Backup 本地备份（auths + data + config 打包）。
+	//
+	// 不做异地数据库镜像：个人自用场景真正怕的是「data 目录被误删 / 换机器迁移」，
+	// 一份带保留策略的 tar 包就够；引入 PostgreSQL 只会多一个会挂的组件。
+	Backup struct {
+		Enabled bool `json:"enabled"`
+		// Dir 备份输出目录，空 = <state_file 所在目录>/backups。
+		Dir string `json:"dir"`
+		// IntervalHours 自动备份间隔（小时），<=0 时不自动备份（仍可手动触发）。
+		IntervalHours int `json:"interval_hours"`
+		// Keep 保留份数，<=0 回落 7。
+		Keep int `json:"keep"`
+	} `json:"backup"`
+
+	// Update 版本更新检查（只提示，不自动升级）。
+	Update struct {
+		Enabled bool `json:"enabled"`
+		// Repo GitHub 仓库（owner/name），空 = 内置默认（本仓库）。
+		Repo string `json:"repo"`
+		// CheckHours 检查间隔（小时），<=0 回落 12。
+		CheckHours int `json:"check_hours"`
+	} `json:"update"`
 
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
@@ -751,6 +803,26 @@ func (c *Config) normalize() error {
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
+	}
+	// 通知通道：格式非法回落 generic，不 fail fast——通知是旁路能力，
+	// 不能因为它写错一个词就拒绝启动整个网关。
+	switch strings.ToLower(strings.TrimSpace(c.Notify.Format)) {
+	case notify.FormatWeCom, notify.FormatBark, notify.FormatTelegram:
+		c.Notify.Format = strings.ToLower(strings.TrimSpace(c.Notify.Format))
+	default:
+		c.Notify.Format = notify.FormatGeneric
+	}
+	if c.Notify.MinIntervalMinutes <= 0 {
+		c.Notify.MinIntervalMinutes = 10
+	}
+	if c.Backup.Keep <= 0 {
+		c.Backup.Keep = 7
+	}
+	if strings.TrimSpace(c.Update.Repo) == "" {
+		c.Update.Repo = "xin-LianK/wbtoapi"
+	}
+	if c.Update.CheckHours <= 0 {
+		c.Update.CheckHours = 12
 	}
 	return c.normalizePrompt()
 }

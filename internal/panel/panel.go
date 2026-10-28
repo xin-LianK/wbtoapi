@@ -22,12 +22,15 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/backup"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/update"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
@@ -69,6 +72,20 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// Notify 告警出口（nil = 未启用）。面板只用于「发一条测试消息」，
+	// 真正的业务告警由 scheduler / server 在各自失败点触发。
+	Notify *notify.Notifier
+
+	// Backup 本地备份器（nil = 未启用）。
+	Backup *backup.Manager
+
+	// Updater 版本更新检查器（nil = 未启用）。只读快照，不在这里发网络请求
+	// （刷新由后台定时任务与手动「立即检查」触发）。
+	Updater *update.Checker
+
+	// chatEndpoint 聊天测试台的转发目标（真实 chat 流水线），经 SetChatEndpoint 注入。
+	chatEndpoint http.Handler
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -198,6 +215,16 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/compensation", p.withAuth(p.compensation))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/compensation", p.withAuth(p.accountCompensationClaim))
 	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationAll))
+	// 告警通知（测试投递）与本地备份。
+	p.mux.HandleFunc("POST /panel/api/notify/test", p.withAuth(p.notifyTest))
+	p.mux.HandleFunc("GET /panel/api/notify/status", p.withAuth(p.notifyStatus))
+	p.mux.HandleFunc("GET /panel/api/backups", p.withAuth(p.backups))
+	p.mux.HandleFunc("POST /panel/api/backups", p.withAuth(p.backupCreate))
+	// 版本更新提示。
+	p.mux.HandleFunc("GET /panel/api/update", p.withAuth(p.updateInfo))
+	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.updateCheck))
+	// 聊天测试台（走真实 chat 流水线，SSE 直通）。
+	p.mux.HandleFunc("POST /panel/api/playground", p.withAuth(p.playground))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

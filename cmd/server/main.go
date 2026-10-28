@@ -14,12 +14,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/backup"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -28,12 +31,13 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/update"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.14.0-panel"
+const appVersion = "1.15.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -312,6 +316,46 @@ func main() {
 	up.SetCreditObserver(creditHist.Observe)
 	log.Printf("[credithist] 积分历史已启用: %s", stateSibling(cfg.StateFile, "credit-history.json"))
 
+	// 告警出口（见 internal/notify）。未配置时 New 返回 nil，所有调用点零成本。
+	notifier := notify.New(notify.Config{
+		Enabled:     cfg.Notify.Enabled,
+		URL:         cfg.Notify.URL,
+		Format:      cfg.Notify.Format,
+		Token:       cfg.Notify.Token,
+		ChatID:      cfg.Notify.ChatID,
+		MinInterval: time.Duration(cfg.Notify.MinIntervalMinutes) * time.Minute,
+	})
+	if notifier.Enabled() {
+		log.Printf("[notify] 告警通道已启用：%s", notifier.Format())
+	}
+
+	// 本地备份（见 internal/backup）。只收凭证、状态 JSON 与配置；
+	// request-logs 的 JSONL 归档不进包（体积远大于其余全部数据且可再生）。
+	backupDir := cfg.Backup.Dir
+	if strings.TrimSpace(backupDir) == "" {
+		backupDir = filepath.Join(filepath.Dir(cfg.StateFile), "backups")
+	}
+	var backups *backup.Manager
+	if cfg.Backup.Enabled {
+		backups = backup.New(backup.Config{
+			Dir: backupDir,
+			Sources: []backup.Source{
+				{Path: *cfgPath, Optional: true},
+				{Path: cfg.AuthDir, Exts: []string{".json"}, Optional: true},
+				{Path: filepath.Dir(cfg.StateFile), Exts: []string{".json"}, Optional: true},
+			},
+			Keep: cfg.Backup.Keep,
+		})
+		log.Printf("[backup] 本地备份已启用：%s（保留 %d 份，间隔 %dh）", backupDir, cfg.Backup.Keep, cfg.Backup.IntervalHours)
+	}
+
+	// 版本更新检查（只提示，不自动升级）。默认启用但只在后台每天查一次；
+	// 关掉时面板不显示更新卡片。
+	var updater *update.Checker
+	if cfg.Update.Enabled {
+		updater = update.New(cfg.Update.Repo, appVersion, time.Duration(cfg.Update.CheckHours)*time.Hour)
+	}
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -336,6 +380,9 @@ func main() {
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
+		Notify:        notifier,
+		Backup:        backups,
+		Updater:       updater,
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -374,11 +421,23 @@ func main() {
 		// 模型黑名单原始条目；运行期以 livecfg 快照为准（热生效），此处供
 		// Live 为 nil 的裸用/测试路径。
 		ModelsHidden: cfg.Models.Hidden,
+		// 模型别名（客户端硬编码的模型名 → 实际模型）。三个入站协议共用。
+		ModelAlias: cfg.Models.Alias,
+		// 告警出口：账号被终态禁用时推送（其余失败点由调度器各自触发）。
+		Notify: notifier,
 	})
+	// 面板聊天测试台：把真实 chat 流水线注入面板（panel 先于 handler 构造，
+	// 只能用 setter 补这一步）。
+	pn.SetChatEndpoint(h.ChatEndpoint())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	sch.SetNotifier(notifier)
+	// 定时备份（interval<=0 或未启用时 Start 立即返回，不起 goroutine）。
+	backups.Start(ctx, time.Duration(cfg.Backup.IntervalHours)*time.Hour)
+	// 后台版本检查（首次立即查一次，之后按 update.check_hours 周期）。
+	updater.Start(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
 

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
@@ -67,6 +69,11 @@ type Config struct {
 	// 裸用/测试路径经 loadLive() 归一化后使用）。
 	ModelsHidden []string
 
+	// ModelAlias 模型别名（config models.alias）：客户端写的名字 → 实际模型名。
+	// 键 "*" 为兜底。在 chatCompletions 入口统一生效，因此三个入站协议
+	// （chat/completions、messages、responses）共用同一份映射。
+	ModelAlias map[string]string
+
 	// Usage 逐请求用量记录器（可选；nil = 不记录）。
 	// 在 recordAttempt 这一唯一汇聚点调用，因此流式/非流式、成功/失败都会计入，
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
@@ -83,6 +90,10 @@ type Config struct {
 	// Pacer 出站节奏限制器（账号维度，见 internal/pace）。nil = 不做节奏控制。
 	// 与 pool 的在途租约互补：租约管「同时几个在路上」，Pacer 管「每秒几个」。
 	Pacer *pace.Limiter
+
+	// Notify 告警出口（可选；nil = 不推）。只在「账号被终态禁用」这类
+	// 需要人工介入的节点使用，不用于逐请求失败（那会把通知变成噪音）。
+	Notify *notify.Notifier
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -146,6 +157,13 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Anthropic Messages 兼容层（见 anthropic.go）：Claude Code / @anthropic-ai/sdk
+	// 的唯一入口。鉴权额外接受 x-api-key（SDK 默认形态，不发 Bearer）。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuthAnthropic(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuthAnthropic(h.anthropicCountTokens))
+	// OpenAI Responses API 兼容层（见 responses.go）：Codex CLI 等走的是这条路径，
+	// 不是 chat/completions。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
 	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
 	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
@@ -195,7 +213,14 @@ func (h *Handler) tracedRequest(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
 	}
-	return r.URL.Path == "/v1/chat/completions" || isSearchPath(r.URL.Path)
+	// 协议兼容端点（Anthropic Messages / OpenAI Responses）与 chat 共用同一份账本：
+	// 它们走的是同一条 chat 流水线（见 anthropic.go / responses.go），漏记会让面板
+	// 「请求记录」对这类客户端的流量完全失明。
+	switch r.URL.Path {
+	case "/v1/chat/completions", "/v1/messages", "/v1/responses":
+		return true
+	}
+	return isSearchPath(r.URL.Path)
 }
 
 // isSearchPath 判断是否为搜索端点。
@@ -211,6 +236,32 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// aliasFor 解析模型别名：显式键优先，其次 "*" 兜底；未配置返回空串（= 不改写）。
+func (h *Handler) aliasFor(model string) string {
+	if len(h.cfg.ModelAlias) == 0 || model == "" {
+		return ""
+	}
+	if v := strings.TrimSpace(h.cfg.ModelAlias[model]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(h.cfg.ModelAlias["*"])
+}
+
+// rewriteModelField 只替换请求体的 model 字段，其余字段逐字保留。
+//
+// 用 Decoder.UseNumber 而不是 Unmarshal 到 any：后者会把所有数字解成 float64，
+// 再 Marshal 时大整数可能变成科学计数法（max_tokens、seed 之类会被改坏）。
+func rewriteModelField(body []byte, model string) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var obj map[string]any
+	if err := dec.Decode(&obj); err != nil {
+		return nil, err
+	}
+	obj["model"] = model
+	return json.Marshal(obj)
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +626,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
+	// 模型别名（config models.alias）：在一切路由判定之前统一改写。
+	// 为什么连 body 一起改而不是只改 peek：真实模型名是随 body 发给上游的，
+	// 只改内存变量会让「出站模型」与「选号/记账/黑名单」两套口径分叉。
+	if alias := h.aliasFor(peek.Model); alias != "" && alias != peek.Model {
+		if nb, aerr := rewriteModelField(body, alias); aerr == nil {
+			body = nb
+			peek.Model = alias
+		}
+	}
+
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」
 	// 与「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
@@ -882,6 +943,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					h.cfg.Notify.Send(notify.LevelError, "账号已禁用",
+						"账号 "+logfmt.Label(acct.UID, acct.Nickname)+" 刷新 token 时 session dead，已移出账号池，需要重新登录")
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
@@ -1673,4 +1736,14 @@ func (h *Handler) hintOf(kind upstream.ErrKind, body, bareModel string, hasImage
 		msg = uerr.Msg
 	}
 	return upstream.GatewayHint(kind, msg, h.hintContext(bareModel, hasImage))
+}
+
+// ChatEndpoint 暴露 chat 流水线本身（不做网关鉴权），供面板「聊天测试台」使用。
+//
+// 为什么要复用同一条流水线而不是另写一个试调接口：测试台的价值就在于「测的就是
+// 真实链路」——同一套选号、节奏、错误分类、记账。另写一条只在测试台生效的路径，
+// 测出来的结果与客户端实际体验必然分叉（而且是那种"测着好好的，用起来报错"的分叉）。
+// 鉴权由调用方（面板 /panel/api/*）负责，这里不再重复校验。
+func (h *Handler) ChatEndpoint() http.Handler {
+	return http.HandlerFunc(h.chatCompletions)
 }

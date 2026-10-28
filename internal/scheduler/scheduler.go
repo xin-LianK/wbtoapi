@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -97,6 +99,14 @@ type Scheduler struct {
 	// 供面板「到期提醒」标注数据年龄：卡片展示的是这份快照，必须让年龄可读，
 	// 否则界面 5 秒轮询会让人误以为数据也是 5 秒级新鲜。
 	lastBalanceRefresh atomic.Int64
+
+	// notifier 告警出口（nil = 未配置）。异步投递，绝不阻塞排程主链路。
+	notifier *notify.Notifier
+}
+
+// SetNotifier 注入告警出口（main 装配时调用一次；nil = 关闭）。
+func (s *Scheduler) SetNotifier(n *notify.Notifier) {
+	s.notifier = n
 }
 
 // New 构建。
@@ -466,6 +476,9 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 func (s *Scheduler) RunCheckinNow() {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	// 本轮统计（告警用）：只有出现失败才推送，全成功不打扰。
+	var okN, alreadyN, failN, balanceFailN int
+	var failDetail []string
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -489,8 +502,11 @@ func (s *Scheduler) RunCheckinNow() {
 				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
 				if upstream.IsAlreadyCheckin(err) {
 					s.cfg.Pool.NoteCheckinDone(st.UID)
+					alreadyN++
 					log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
 				} else {
+					failN++
+					failDetail = append(failDetail, st.Nickname+"："+err.Error())
 					log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 				}
 				// 其余业务错误也继续走余额查询
@@ -498,6 +514,7 @@ func (s *Scheduler) RunCheckinNow() {
 				// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
 				// 重复触发时出现），成功也落一行。
 				s.cfg.Pool.NoteCheckinDone(st.UID)
+				okN++
 				log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
 			}
 		}
@@ -505,6 +522,8 @@ func (s *Scheduler) RunCheckinNow() {
 		// 按自然日聚合的全部批次（首页快照与「检查」共用同一口径）。
 		remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 		if err != nil {
+			balanceFailN++
+			failDetail = append(failDetail, st.Nickname+"：余额查询失败")
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			continue
 		}
@@ -519,6 +538,40 @@ func (s *Scheduler) RunCheckinNow() {
 		})
 	}
 	s.RunStreakBonusNow()
+	// 失败才告警：全成功是常态，每天推两条「一切正常」会让通知变成噪音，
+	// 真正出事时反而被忽略。明细带昵称与错误原文，手机上看一条就知道该修哪个号。
+	if failN > 0 || balanceFailN > 0 {
+		detail := failDetail
+		if len(detail) > 6 {
+			detail = detail[:6]
+		}
+		s.notifier.Send(notify.LevelWarn, "签到异常",
+			"成功 "+itoa(okN)+" / 已签到 "+itoa(alreadyN)+" / 失败 "+itoa(failN)+
+				" / 余额查询失败 "+itoa(balanceFailN)+"\n"+strings.Join(detail, "\n"))
+	}
+}
+
+// itoa 小整数转字符串（告警文案用，避免为此引入 strconv 的重复 import 语义）。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。
@@ -619,6 +672,11 @@ func (s *Scheduler) RunKeepaliveNow() {
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
+					// 账号被终态禁用是不可逆的人工介入点：只有重新扫码能救回来。
+					// 这条必须推——不推的话它会静默地从池子里消失，直到某天发现
+					// 可用账号少了一个。
+					s.notifier.Send(notify.LevelError, "账号已禁用",
+						st.Nickname+" 连续 "+itoa(pool.SessionDeadThreshold())+" 次 session dead（12153），已移出账号池，需要重新扫码登录")
 				}
 			}
 			continue

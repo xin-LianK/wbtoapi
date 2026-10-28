@@ -65,8 +65,31 @@
     "sanitize_blacklist_fingerprints": true
   },
   "models": {
-    "_comment": "hidden: 不对外暴露的模型黑名单。裸名=两域都藏；\"cn:xxx\"/\"global:xxx\"=只藏该域。/v1/models 列表过滤 + chat 点名拒绝，面板保存后热生效。",
-    "hidden": []
+    "_comment": "hidden: 不对外暴露的模型黑名单。裸名=两域都藏；\"cn:xxx\"/\"global:xxx\"=只藏该域。/v1/models 列表过滤 + chat 点名拒绝，面板保存后热生效。alias: 客户端写的模型名→实际模型（键 * 为兜底），用于 Claude Code / Codex 这类硬编码模型名的客户端。",
+    "hidden": [],
+    "alias": {}
+  },
+  "notify": {
+    "_comment": "出站告警。enabled=false 时完全关闭。format: generic(裸 JSON POST) / wecom(企业微信群机器人) / bark(iOS) / telegram。URL 为 webhook 地址；telegram 用 token+chat_id。只为失败告警（签到异常、账号被禁用），全成功不打扰。",
+    "enabled": false,
+    "url": "",
+    "format": "generic",
+    "token": "",
+    "chat_id": "",
+    "min_interval_minutes": 10
+  },
+  "backup": {
+    "_comment": "本地备份：auths/*.json + data/*.json + config.json 打成 tar.gz。dir 空 = <state_file 目录>/backups。interval_hours<=0 时不自动备份（仍可在面板手动触发）。",
+    "enabled": true,
+    "dir": "",
+    "interval_hours": 24,
+    "keep": 7
+  },
+  "update": {
+    "_comment": "版本更新提示（只提示不自动升级）。repo 为 GitHub 仓库 owner/name。",
+    "enabled": true,
+    "repo": "xin-LianK/wbtoapi",
+    "check_hours": 12
   },
   "prompt": {
     "mode": "passthrough",

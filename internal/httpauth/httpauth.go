@@ -36,6 +36,28 @@ func VerifyBearer(r *http.Request, key string) bool {
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
 }
 
+// VerifyAPIKey 在 Bearer 之外额外接受 Anthropic 形态的 `x-api-key` 头。
+//
+// 存在理由：Anthropic 官方 SDK 与 Claude Code 默认用 `x-api-key` 鉴权，不发
+// `Authorization: Bearer`。若只认 Bearer，`/v1/messages` 对这类客户端会直接
+// 401——而它恰恰是这条协议唯一的真实使用者。两种头都过同一个常量时间比较，
+// 不引入新的比较实现（避免两套口径漂移）。
+func VerifyAPIKey(r *http.Request, key string) bool {
+	if VerifyBearer(r, key) {
+		return true
+	}
+	if key == "" {
+		return true
+	}
+	tok := r.Header.Get("x-api-key")
+	if tok == "" {
+		// 与 VerifyBearer 同形：无头也走一次摘要比较，保持耗时形状一致。
+		subtle.ConstantTimeCompare(digest(""), digest(key))
+		return false
+	}
+	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
+}
+
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。
 func digest(s string) []byte {
 	sum := sha256.Sum256([]byte(s))

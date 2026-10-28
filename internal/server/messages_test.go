@@ -271,11 +271,13 @@ func TestMessagesSearchUpstreamErrorShape(t *testing.T) {
 	}
 }
 
-// TestMessagesRouteDoesNotShadowV1Messages 断言搜索端点没有占用 /v1/messages
-// （该路径保留给 Anthropic 模型对话）。
+// TestMessagesRouteDoesNotShadowV1Messages 断言搜索端点没有占用 /v1/messages。
+//
+// 该路径现在是 Anthropic **模型对话**入口（见 anthropic.go），必须由 chat 流水线处理，
+// 而不是被搜索端点接管：空 body 应当拿到「缺少 model」的对话侧错误，且绝不触发搜索上游。
 func TestMessagesRouteDoesNotShadowV1Messages(t *testing.T) {
 	up := newSearchUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Error("不得打上游")
+		t.Error("不得打搜索上游")
 	})
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
 		Upstream: up})
@@ -283,8 +285,24 @@ func TestMessagesRouteDoesNotShadowV1Messages(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{}`)))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("POST /v1/messages code=%d want 404（该路径留给模型对话）", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/messages code=%d want 400（对话端点缺 model）", rec.Code)
+	}
+	var out struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("error body must be JSON: %v", err)
+	}
+	if out.Type != "error" || out.Error.Type != "invalid_request_error" {
+		t.Errorf("envelope=%+v want invalid_request_error", out)
+	}
+	if !strings.Contains(out.Error.Message, "model") {
+		t.Errorf("message=%q want 提示缺少 model（不得走搜索分支）", out.Error.Message)
 	}
 }
 

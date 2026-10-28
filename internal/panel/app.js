@@ -350,7 +350,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', playground: '测试台', config: '配置', logs: '运行日志', system: '系统' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -361,6 +361,8 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
+  if (v === 'playground') initPlayground();
+  if (v === 'system') loadSystem();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
   // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
@@ -3439,3 +3441,462 @@ if ($('btnExpFold')) {
   };
 }
 applyExpFold();
+
+/* ══ 聊天测试台 ══════════════════════════════════════════════════════════
+   为什么要单独手写 fetch 而不用上面的 api()：api() 结尾是 r.json()，而流式响应
+   是一串 SSE 帧，必须自己拿 ReadableStream 逐帧解。这是全文件唯一手写 fetch 的
+   地方，所以鉴权头也在这里显式补；401 仍走同一个 openKey() 补密钥弹窗。
+   请求转发到 /panel/api/playground → 真实 /v1/chat/completions 流水线，
+   选号、节奏、熔断、记账与线上完全同一条路——测试台看不出问题，客户端也不会。 */
+let pgModels = null;          // 模型目录一次会话只拉一次：该接口直连上游，很贵
+let pgBusy = false;
+let pgHistory = [];           // 只有成功跑完的轮次才进历史
+
+function pgEfforts(m) { return (m && Array.isArray(m.supported_efforts)) ? m.supported_efforts : []; }
+
+/* 头部 note 只放一句话里的「原因段」：后端错误常是「原因: 补救建议」两段
+   （"没有可用账号: 请先在面板添加账号再查询"），整条塞进 header 会把「清空」
+   挤到贴字。冒号前第一段 + 10 字上限，完整原文挂 title。 */
+function pgShortErr(s) {
+  const str = String(s || '读取失败').trim();
+  const head = str.split(/[:：]/)[0].trim() || str;
+  return head.length > 10 ? head.slice(0, 10) + '…' : head;
+}
+
+async function initPlayground() {
+  if (pgModels) return;
+  const sel = $('pgModel');
+  sel.innerHTML = '<option value="">读取模型…</option>';
+  sel.disabled = true;
+  try {
+    const d = await api('models');
+    pgModels = d.models || [];
+  } catch (e) {
+    pgModels = [];
+    const msg = e.message || String(e);
+    $('pgNote').textContent = pgShortErr(msg);
+    $('pgNote').title = msg;
+  }
+  sel.disabled = false;
+  if (!pgModels.length) {
+    sel.innerHTML = '<option value="">无可用模型</option>';
+    sel.disabled = true;
+    $('pgEffort').innerHTML = '<option value="">-</option>';
+    $('pgEffort').disabled = true;
+    if (!$('pgNote').textContent) $('pgNote').textContent = '先把账号加进池子';
+    return;
+  }
+  sel.innerHTML = pgModels.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + '</option>').join('');
+  $('pgNote').textContent = pgModels.length + ' 个模型';
+  $('pgNote').title = '';
+  pgFillEffort();
+}
+
+function pgCurModel() {
+  const id = $('pgModel').value;
+  return (pgModels || []).find(m => m.id === id) || null;
+}
+
+/* 档位只列该模型支持的：把不支持的档位摆出来，选了也会被上游降级，
+   测试台就会给出「我明明选了 high 却按 medium 跑」的假结论。 */
+function pgFillEffort() {
+  const sel = $('pgEffort'), m = pgCurModel(), list = pgEfforts(m);
+  if (!list.length) {
+    sel.innerHTML = '<option value="">不指定</option>';
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  const def = (m && m.default_effort) || '';
+  sel.innerHTML = '<option value="">默认' + (def ? '（' + esc(def) + '）' : '') + '</option>' +
+    list.map(e => '<option value="' + esc(e) + '">' + esc(e) + '</option>').join('');
+}
+
+function pgScroll() { const t = $('pgThread'); t.scrollTop = t.scrollHeight; }
+
+/* 气泡：who 固定 26px，右侧一列装「思考块 + 正文」。正文用 textContent 增量写入，
+   不做 markdown 渲染——这里要看的是上游原样吐了什么，不是排版。 */
+function pgBubble(role, cls) {
+  const empty = $('pgEmpty');
+  if (empty) empty.remove();
+  const wrap = document.createElement('div');
+  wrap.className = 'pg-msg ' + role;
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent = role === 'user' ? '我' : 'AI';
+  const col = document.createElement('div');
+  col.style.cssText = 'flex:1;min-width:0';
+  const think = document.createElement('div');
+  think.className = 'pg-think';
+  think.hidden = true;
+  const body = document.createElement('div');
+  body.className = 'pg-body' + (cls ? ' ' + cls : '');
+  col.appendChild(think);
+  col.appendChild(body);
+  wrap.appendChild(who);
+  wrap.appendChild(col);
+  $('pgThread').appendChild(wrap);
+  pgScroll();
+  return { wrap: wrap, body: body, think: think };
+}
+
+/* 错误信封三处形状不同：网关 400/502 是 {error:{message}}，面板自己的 writeErr 是
+   {error:"..."}，上游原文可能压根不是 JSON。统一在一处抽文本。 */
+function pgErrText(d) {
+  if (!d) return '';
+  if (typeof d === 'string') return d;
+  if (d.error) {
+    if (typeof d.error === 'string') return d.error;
+    return d.error.message || d.error.code || JSON.stringify(d.error);
+  }
+  return d.message || '';
+}
+
+function pgRenderUsage(u, meta) {
+  const box = $('pgUsage');
+  const kv = (k, v) => '<div class="pg-kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+  const num = n => (Number(n) || 0).toLocaleString('zh-CN');
+  const rows = [];
+  if (u) {
+    rows.push(kv('输入', num(u.prompt_tokens)));
+    const cached = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || u.cached_tokens || 0;
+    if (cached) rows.push(kv('其中命中缓存', num(cached)));
+    rows.push(kv('输出', num(u.completion_tokens)));
+    const reason = (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || 0;
+    if (reason) rows.push(kv('其中思考', num(reason)));
+    rows.push(kv('合计', num(u.total_tokens)));
+  }
+  if (meta) {
+    if (meta.ttft) rows.push(kv('首字', Math.round(meta.ttft) + ' ms'));
+    rows.push(kv('耗时', Math.round(meta.total) + ' ms'));
+    if (meta.model) rows.push(kv('出站模型', esc(meta.model)));
+    if (meta.effort) rows.push(kv('档位', esc(meta.effort)));
+    if (meta.finish) rows.push(kv('结束原因', esc(meta.finish)));
+  }
+  box.innerHTML = rows.length ? rows.join('') : '<div class="note">还没有调用。</div>';
+}
+
+async function pgSend() {
+  if (pgBusy) return;
+  const text = $('pgInput').value.trim();
+  if (!text) return;
+  const model = $('pgModel').value;
+  if (!model) { toast('先选一个模型'); return; }
+  const effSel = $('pgEffort');
+  const effort = effSel.disabled ? '' : effSel.value;   // 模型不支持档位时不要硬塞
+  const streaming = $('pgStream').checked;
+
+  pgBusy = true;
+  $('btnPgSend').disabled = true;
+  $('pgMeta').textContent = '';
+  $('pgInput').value = '';
+
+  pgBubble('user').body.textContent = text;
+  const bot = pgBubble('bot');
+  bot.body.classList.add('busy');
+
+  const t0 = performance.now();
+  let ttft = 0, answer = '', errText = '', served = '', finish = '', usage = null;
+  const markTTFT = () => { if (!ttft) ttft = performance.now() - t0; };
+
+  // SSE 帧解析：只认 data: 行，event:/id:/注释行一律跳过（网关的 SSE 不含具名事件，
+  // 但客户端不该假设上游只发一种形状）。CRLF 用正则切，避免 \r\n\r\n 漏帧。
+  const handleFrame = frame => {
+    for (const raw of frame.split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith(':') || !line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') return;
+      let d;
+      try { d = JSON.parse(payload); } catch (e) { continue; }
+      if (d.error) { errText = pgErrText(d); continue; }
+      if (d.model) served = d.model;
+      if (d.usage) usage = d.usage;
+      const ch = (d.choices || [])[0];
+      if (!ch) continue;
+      const dl = ch.delta || ch.message || {};
+      const rc = dl.reasoning_content || (dl.reasoning && dl.reasoning.content) || '';
+      if (rc) {
+        markTTFT();
+        bot.think.hidden = false;
+        bot.think.textContent += rc;
+        bot.think.scrollTop = bot.think.scrollHeight;
+      }
+      if (typeof dl.content === 'string' && dl.content) {
+        markTTFT();
+        answer += dl.content;
+        bot.body.textContent = answer;
+        pgScroll();
+      }
+      if (ch.finish_reason) finish = ch.finish_reason;
+    }
+  };
+
+  try {
+    const h = { 'Content-Type': 'application/json' };
+    const k = localStorage.getItem(LS_KEY);
+    if (k) h['Authorization'] = 'Bearer ' + k;
+    const body = {
+      model: model,
+      messages: pgHistory.concat([{ role: 'user', content: text }]),
+      stream: streaming,
+    };
+    if (effort) body.reasoning_effort = effort;
+
+    const r = await fetch('/panel/api/playground', { method: 'POST', headers: h, body: JSON.stringify(body) });
+    if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      let d = null;
+      try { d = JSON.parse(raw); } catch (e) {}
+      throw new Error(pgErrText(d) || raw || ('HTTP ' + r.status));
+    }
+
+    if (streaming) {
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      const SEP = /\r?\n\r?\n/;
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let m;
+        while ((m = SEP.exec(buf))) {
+          handleFrame(buf.slice(0, m.index));
+          buf = buf.slice(m.index + m[0].length);
+        }
+      }
+      buf += dec.decode();
+      if (buf.trim()) handleFrame(buf);
+    } else {
+      const d = await r.json();
+      if (d.error) throw new Error(pgErrText(d));
+      if (d.model) served = d.model;
+      usage = d.usage || null;
+      const ch = (d.choices || [])[0] || {};
+      const msg = ch.message || {};
+      finish = ch.finish_reason || '';
+      const rc = msg.reasoning_content || (msg.reasoning && msg.reasoning.content) || '';
+      if (rc) { bot.think.hidden = false; bot.think.textContent = rc; }
+      answer = typeof msg.content === 'string' ? msg.content : '';
+      bot.body.textContent = answer;
+    }
+
+    if (errText) throw new Error(errText);
+    if (answer) {
+      pgHistory.push({ role: 'user', content: text });
+      pgHistory.push({ role: 'assistant', content: answer });
+    } else if (!bot.think.hidden) {
+      // 只回思考不回正文（思考预算被截断）：如实标注，不留一个空气泡
+      bot.body.textContent = '（上游只返回了思考内容，没有正文）';
+    } else {
+      bot.body.textContent = '（上游返回空内容）';
+    }
+  } catch (e) {
+    errText = e.message || String(e);
+    bot.body.classList.add('err');
+    bot.body.textContent = errText;
+  } finally {
+    bot.body.classList.remove('busy');
+    const ms = performance.now() - t0;
+    $('pgMeta').textContent = (ttft ? '首字 ' + Math.round(ttft) + ' ms · ' : '') + '共 ' + Math.round(ms) + ' ms';
+    pgRenderUsage(usage, {
+      ttft: ttft, total: ms, model: served || model,
+      effort: effort, finish: finish, err: errText,
+    });
+    pgBusy = false;
+    $('btnPgSend').disabled = false;
+    $('pgInput').focus();
+  }
+}
+
+function pgClear() {
+  if (pgBusy) return;
+  pgHistory = [];
+  $('pgThread').innerHTML = '<div class="pg-empty" id="pgEmpty">选一个模型，发一条消息。<br>这里看到的就是客户端拿到的东西。</div>';
+  $('pgMeta').textContent = '';
+  $('pgUsage').innerHTML = '<div class="note">还没有调用。</div>';
+}
+
+if ($('pgModel')) $('pgModel').onchange = pgFillEffort;
+if ($('btnPgSend')) $('btnPgSend').onclick = pgSend;
+if ($('btnPgClear')) $('btnPgClear').onclick = pgClear;
+if ($('pgInput')) {
+  $('pgInput').addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); pgSend(); }
+  });
+}
+
+/* ══ 系统页：告警通知 / 备份 / 版本更新 ══════════════════════════════════
+   三块互不依赖，各自 try 各自报错：备份目录没权限不该把更新卡片也一起变成空白。 */
+let sysNotifyOn = false;
+
+async function loadSystem() {
+  loadSystemNotify();
+  loadSystemBackup();
+  loadSystemUpdate();
+}
+
+async function loadSystemNotify() {
+  const st = $('sysNotifyState'), fmt = $('sysNotifyFormat'), hint = $('sysNotifyHint'), btn = $('btnNotifyTest');
+  if (!st) return;
+  try {
+    const d = await api('notify/status');
+    sysNotifyOn = !!d.enabled;
+    st.textContent = d.enabled ? '已启用' : '未启用';
+    fmt.textContent = d.format || '—';
+    // 只放键名：整句「在 config.json 里设 notify.enabled = true」在半宽卡里会折成两行，
+    // 把「通道」那一行顶开。完整说明挂 title。
+    hint.textContent = d.enabled ? 'config.json → notify' : 'notify.enabled';
+    hint.title = d.enabled ? '' : '在 config.json 里设 notify.enabled = true 并填 url';
+    if (btn) { btn.disabled = !d.enabled; btn.title = d.enabled ? '' : '先启用告警通道'; }
+  } catch (e) {
+    st.textContent = '读取失败';
+    hint.textContent = e.message || String(e);
+  }
+}
+
+async function loadSystemBackup() {
+  const note = $('sysBackupNote'), dir = $('sysBackupDir'), list = $('sysBackupList'), btn = $('btnBackupNow');
+  if (!list) return;
+  try {
+    const d = await api('backups');
+    if (!d.enabled) {
+      dir.textContent = '未启用';
+      note.textContent = 'config.json → backup';
+      list.innerHTML = '<div class="sys-empty">备份未启用：在 config.json 里设 backup.enabled = true</div>';
+      if (btn) { btn.disabled = true; btn.title = '先启用备份'; }
+      return;
+    }
+    if (btn) { btn.disabled = false; btn.title = ''; }
+    dir.textContent = d.dir || '—';
+    const items = d.items || [];
+    note.textContent = items.length ? items.length + ' 份' : '还没有备份';
+    list.innerHTML = items.length
+      ? items.map(it =>
+          '<div class="sys-file">' +
+          '<span class="nm" title="' + esc(it.name) + '">' + esc(it.name) + '</span>' +
+          '<span class="sz">' + fmtBytes(it.size) + '</span>' +
+          '<span class="mt" title="' + esc(fmtLocalDateTime(new Date(it.mod_time).getTime())) + '">' +
+            esc(ago(it.mod_time)) + '</span></div>').join('')
+      : '<div class="sys-empty">还没有备份</div>';
+  } catch (e) {
+    note.textContent = '读取失败';
+    list.innerHTML = '<div class="sys-empty">' + esc(e.message) + '</div>';
+  }
+}
+
+/* 更新提示落在两处：系统页的对比卡 + 侧栏「系统」上的角标。
+   角标由 start() 用快照接口静默拉一次（只读，不打网络），所以不点进系统页也看得见。
+   失败原因单独占一行（#sysUpdResult）：塞进 .sys-line 会把下面「发布时间」顶开半张卡。 */
+function applyUpdateInfo(info, keepResult) {
+  if (!info) return;
+  const st = $('sysUpdState');
+  $('sysUpdCurrent').textContent = info.current || '-';
+  $('sysUpdLatest').textContent = info.latest || '-';
+  if (info.err) st.textContent = '检查失败';
+  else if (!info.latest) st.textContent = '还没检查过';
+  else if (info.has_update) st.textContent = '有新版本可用';
+  else st.textContent = '已是最新';
+  const res = $('sysUpdResult');
+  if (res && !keepResult) {
+    if (info.err) { res.className = 'sys-result err'; res.textContent = '检查失败：' + info.err; }
+    else { res.className = 'sys-result'; res.textContent = ''; }
+  }
+  $('sysUpdTime').textContent = info.published_at && !String(info.published_at).startsWith('0001-')
+    ? fmtLocalDateTime(new Date(info.published_at).getTime()) : '—';
+  const open = $('btnUpdOpen');
+  if (open) {
+    open.hidden = !info.url;
+    if (info.url) open.onclick = () => window.open(info.url, '_blank', 'noopener');
+  }
+  setUpdateBadge(info);
+}
+
+function setUpdateBadge(info) {
+  const b = $('navUpd');
+  if (!b) return;
+  const has = !!(info && info.has_update);
+  b.hidden = !has;
+  if (has) { b.textContent = '新版本'; b.title = '有新版本 ' + (info.latest || '') + '，点进「系统」查看'; }
+}
+
+async function refreshUpdateBadge() {
+  try {
+    const d = await api('update');
+    if (d && d.enabled) setUpdateBadge(d.info);
+  } catch (e) { /* 角标是锦上添花：拉不到就不显示，不打扰 */ }
+}
+
+async function loadSystemUpdate() {
+  const st = $('sysUpdState');
+  try {
+    const d = await api('update');
+    if (!d.enabled) {
+      if (st) st.textContent = '未启用';
+      return;
+    }
+    applyUpdateInfo(d.info);
+  } catch (e) {
+    if (st) st.textContent = '读取失败：' + (e.message || e);
+  }
+}
+
+if ($('btnNotifyTest')) $('btnNotifyTest').onclick = async () => {
+  const out = $('sysNotifyResult'), btn = $('btnNotifyTest');
+  btn.disabled = true;
+  out.className = 'sys-result';
+  out.textContent = '发送中…';
+  try {
+    const d = await api('notify/test', { method: 'POST', body: JSON.stringify({ level: 'info' }) });
+    out.className = 'sys-result ok';
+    out.textContent = '已投递（通道：' + (d.format || '?') + '）。到手机上确认真的收到了——这里只能说请求成功。';
+  } catch (e) {
+    out.className = 'sys-result err';
+    out.textContent = '投递失败：' + (e.message || e);
+  } finally {
+    btn.disabled = !sysNotifyOn;
+  }
+};
+
+if ($('btnBackupNow')) $('btnBackupNow').onclick = async () => {
+  const out = $('sysBackupResult'), btn = $('btnBackupNow');
+  btn.disabled = true;
+  out.className = 'sys-result';
+  out.textContent = '打包中…';
+  try {
+    const d = await api('backups', { method: 'POST' });
+    const it = d.item || {};
+    out.className = 'sys-result ok';
+    out.textContent = '已生成 ' + (it.name || '备份') + (it.size ? '（' + fmtBytes(it.size) + '）' : '');
+    loadSystemBackup();
+  } catch (e) {
+    out.className = 'sys-result err';
+    out.textContent = '备份失败：' + (e.message || e);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+if ($('btnUpdateCheck')) $('btnUpdateCheck').onclick = async () => {
+  const out = $('sysUpdResult'), btn = $('btnUpdateCheck');
+  btn.disabled = true;
+  out.className = 'sys-result';
+  out.textContent = '检查中…';
+  try {
+    const d = await api('update/check', { method: 'POST' });
+    const info = d.info || {};
+    applyUpdateInfo(info, true);
+    out.className = 'sys-result' + (info.err ? ' err' : ' ok');
+    out.textContent = info.err ? ('检查失败：' + info.err)
+      : (info.has_update ? ('发现新版本 ' + info.latest + '，去「打开发布页」看变更说明') : '已是最新版本');
+  } catch (e) {
+    out.className = 'sys-result err';
+    out.textContent = '检查失败：' + (e.message || e);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+refreshUpdateBadge();

@@ -612,17 +612,284 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     color: var(--ink-2); font-size: 12.5px; }
   .rm-row input { flex: 1; }
 
+/* ══════════════════════════════════════════════════════════════════════
+   视觉刷新 V2（覆盖层）
+   动机：V1 的信息架构没问题（分区、表格、观测值密度都合适），但视觉语言偏
+   "运维工具"——11px 圆角、硬阴影、贴边分割线，长时间看会显得拥挤。这一层只
+   调整外观（半径 / 间距 / 层次 / 色板），不改任何布局结构与交互逻辑，因此对
+   既有视图零风险；新视图（测试台 / 系统）直接用这套 token。
+   ══════════════════════════════════════════════════════════════════════ */
+:root {
+  --r-sm: 8px; --r-md: 11px; --r-lg: 16px; --r-xl: 20px;
+  --bg: #0a0c11; --surface: #12151c; --surface-2: #191d26; --raise: #212632;
+  --line: #232936; --line-soft: #1b202a;
+  --ink: #eef1f7; --ink-2: #a6aec0; --ink-3: #6c7488;
+  --accent: #6d8bff; --accent-soft: rgba(109,139,255,.14);
+  --shadow: 0 1px 2px rgba(0,0,0,.28), 0 12px 28px -20px rgba(0,0,0,.7);
+}
+[data-theme="light"] {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f7f8fa; --raise: #ffffff;
+  --line: #e6e8ee; --line-soft: #eef0f4;
+  /* ink-2/ink-3 比 V1 各压深一档：浅色底上 11.5px 的灰字（表头、提示）按
+     #8b93a5 只有 ~2.9:1，读起来发虚。压到 #757d8f 是 ~4.4:1，仍明显低于正文，
+     但不再需要凑近看——这是这次改版里唯一动了「信息色阶」的地方。 */
+  --ink: #12151c; --ink-2: #4c5464; --ink-3: #757d8f;
+  --accent: #4059d8; --accent-soft: rgba(64,89,216,.08);
+  --shadow: 0 1px 2px rgba(16,20,32,.04), 0 10px 26px -22px rgba(16,20,32,.35);
+}
+
+/* 顶栏：毛玻璃 + 更轻的分隔 */
+.topbar {
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom-color: var(--line-soft);
+  padding: 13px 24px;
+}
+.topbar h2 { font-size: 16px; font-weight: 600; }
+
+/* 导航：药丸式选中态 + 左侧强调条 */
+.nav { border-right-color: var(--line-soft); }
+.nav ul { padding: 8px 10px; }
+.nav a { border-radius: var(--r-md); padding: 8.5px 11px; position: relative; }
+.nav a.on { background: var(--accent-soft); }
+.nav a.on::before {
+  content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 16px; border-radius: 2px; background: var(--accent);
+}
+
+/* 统计卡：拆成独立卡片（原来是一整条带分割线的网格，视觉上像表格而非指标） */
+.stats {
+  border: none; background: none; box-shadow: none; overflow: visible;
+  gap: 10px; grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+.stat {
+  background: var(--surface); border: 1px solid var(--line-soft);
+  border-radius: var(--r-lg); padding: 15px 17px;
+  transition: border-color .15s, transform .15s;
+}
+.stat:hover { border-color: var(--line); transform: translateY(-1px); }
+.stat .v { font-size: 25px; letter-spacing: -.025em; }
+.stat .k { font-size: 11.5px; margin-top: 6px; }
+/* 覆盖层里的 .stats 是后声明的，会把 V1 的断点规则一并盖掉——这里必须补回，
+   否则 560~980px 区间仍是 7 列，每格不足 100px，数字挤成两行。 */
+@media (max-width: 980px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* 面板：更大圆角、更软的边线，头部留白放松 */
+.box { border-radius: var(--r-lg); border-color: var(--line-soft); }
+.box > header { padding: 13px 18px; background: transparent; }
+.box > header h3 { font-size: 13.5px; letter-spacing: -.005em; }
+.box .pad { padding: 18px; }
+
+/* 表格：表头吸顶（滚动长表时列名不丢），行悬停更克制 */
+.acc th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface); backdrop-filter: blur(6px);
+  font-weight: 500; letter-spacing: .02em; text-transform: none;
+}
+.acc tbody tr { transition: background .12s; }
+
+/* 控件：统一半径与聚焦环 */
+button, input, select { border-radius: var(--r-sm); }
+button { padding: 7px 14px; }
+button.xs, select.xs { border-radius: 7px; }
+button.primary { box-shadow: 0 6px 18px -10px var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+/* ── 测试台 ──────────────────────────────────────────────────────── */
+.pg { display: grid; grid-template-columns: 1fr 300px; gap: 18px; align-items: start; }
+@media (max-width: 1100px) { .pg { grid-template-columns: 1fr; } }
+.pg-thread { display: flex; flex-direction: column; gap: 14px; padding: 18px; min-height: 320px; max-height: 58vh; overflow-y: auto; }
+.pg-msg { display: flex; gap: 10px; }
+.pg-msg .who {
+  flex: none; width: 26px; height: 26px; border-radius: 9px; display: grid; place-items: center;
+  font-size: 11px; font-weight: 600; background: var(--surface-2); color: var(--ink-2);
+}
+.pg-msg.user .who { background: var(--accent-soft); color: var(--accent); }
+.pg-msg.bot .who { background: var(--ok-soft); color: var(--ok); }
+.pg-body {
+  flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word;
+  font-size: 13.5px; line-height: 1.65; padding-top: 2px;
+}
+.pg-body code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.pg-empty { margin: auto; text-align: center; color: var(--ink-3); font-size: 12.5px; line-height: 1.8; }
+.pg-compose { border-top: 1px solid var(--line-soft); padding: 14px 18px; }
+.pg-compose textarea {
+  width: 100%; min-height: 78px; resize: vertical; font: inherit; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 10px 12px; line-height: 1.6;
+}
+.pg-compose textarea:focus { outline: none; border-color: var(--accent); }
+.pg-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+.pg-row .grow { flex: 1; }
+.pg-meta { font: 11.5px var(--mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.pg-side .box { margin-bottom: 14px; }
+.pg-kv { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; padding: 5px 0; }
+.pg-kv + .pg-kv { border-top: 1px solid var(--line-soft); }
+.pg-kv .k { color: var(--ink-3); }
+.pg-kv .v { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+/* 思考链：灰底、限高、可滚。模型边想边说不该抢正文的位置。 */
+.pg-think {
+  margin: 0 0 8px; padding: 7px 10px; border-left: 2px solid var(--line);
+  background: var(--surface-2); border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-size: 12px; line-height: 1.62; color: var(--ink-3);
+  max-height: 168px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+.pg-body.err { color: var(--bad); font: 12.5px/1.65 var(--mono); }
+/* 流式光标：用 ::after 挂，避免每帧改 textContent 时还要维护光标节点 */
+.pg-body.busy::after {
+  content: '▌'; margin-left: 1px; color: var(--accent);
+  animation: pgBlink 1.05s steps(2) infinite;
+}
+@keyframes pgBlink { 50% { opacity: 0; } }
+/* 导航角标（系统页有新版本时出现）：margin-left:auto 把它推到行尾 */
+.nav-badge {
+  margin-left: auto; flex: none; padding: 0 6px; border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink);
+  font-size: 10.5px; font-weight: 600; line-height: 1.6; letter-spacing: 0;
+}
+
+/* ── 系统页（通知 / 备份 / 更新）─────────────────────────────────── */
+.sys-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.sys-grid .box { margin-bottom: 0; }
+.sys-line { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; font-size: 13px; flex-wrap: wrap; }
+.sys-line + .sys-line { border-top: 1px solid var(--line-soft); }
+.sys-line .k { color: var(--ink-2); min-width: 84px; flex: none; }
+/* 值是唯一可伸缩项：长错误/长路径在本行内折行，不把「状态」这一行撑成半张卡 */
+.sys-line .v { font-family: var(--mono); font-size: 12.5px; color: var(--ink); word-break: break-all; flex: 1; min-width: 0; text-align: right; }
+.sys-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.sys-result { margin-top: 10px; font-size: 12.5px; line-height: 1.6; word-break: break-word; }
+.sys-result.ok { color: var(--ok); }
+.sys-result.err { color: var(--bad); }
+/* 备份列表（不用 .acc：那张表 min-width:640px，塞进 ~290px 的卡片只会横向滚动，
+   文件名的「时间」列直接滚出可视区）。一行一条，文件名可省略，右侧常驻大小与时间。 */
+.sys-files { margin-top: 6px; }
+.sys-file { display: flex; align-items: baseline; gap: 9px; padding: 8px 0; font-size: 12.5px; }
+.sys-file + .sys-file { border-top: 1px solid var(--line-soft); }
+.sys-file .nm {
+  flex: 1; min-width: 0; font: 12px var(--mono); color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sys-file .sz { flex: none; font: 11.5px var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.sys-file .mt { flex: none; font: 11.5px var(--mono); color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.sys-empty { padding: 18px 0 10px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+.upd-card { display: flex; align-items: center; gap: 14px; padding: 4px 0 12px; }
+.upd-card .big { font: 600 22px var(--mono); letter-spacing: -.02em; }
+.upd-card .arrow { color: var(--ink-3); }
+
+/* ══════════════════════════════════════════════════════════════════════
+   视觉刷新 V3 —— linux-do/cdk 风格全量铺开（参考 ithtelab/workbuddy-manager，
+   其 UI 1:1 复刻 linux-do/cdk 并沿用其设计令牌）。V2 只刷了壳层共享件，
+   用户反馈「只有首页变了」——因为各视图内部组件（KPI 卡、表格、表单、
+   按钮）还在 V1 皮肤上。这一层做两件事：
+   ① 令牌换成 zinc 灰阶 + 蓝主色，全部视图自动跟随；
+   ② 导航从左侧边栏重构为底部浮动 Dock（该风格最具辨识度的元素）。
+   仍然零布局结构改动（除导航外），所有视图内容不受影响。
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. 令牌：zinc 灰阶（LDC 口径）+ 蓝主色 ────────────────────────── */
+:root {
+  --r-sm: 10px; --r-md: 12px; --r-lg: 16px; --r-xl: 20px;
+  --bg: #09090b; --surface: #131316; --surface-2: #1c1c20; --raise: #232329;
+  --line: #27272d; --line-soft: #1f1f24;
+  --ink: #fafafa; --ink-2: #a1a1aa; --ink-3: #71717a;
+  --accent: #4d8dff; --accent-soft: rgba(77,141,255,.15);
+  --ok: #10b981; --ok-soft: rgba(16,185,129,.13);
+  --warn: #f59e0b; --warn-soft: rgba(245,158,11,.13);
+  --bad: #ef4444; --bad-soft: rgba(239,68,68,.12);
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 14px 32px -22px rgba(0,0,0,.75);
+}
+[data-theme="light"] {
+  --bg: #fafafa; --surface: #ffffff; --surface-2: #f4f4f5; --raise: #ffffff;
+  --line: #e4e4e7; --line-soft: #ebebee;
+  /* ink-2/ink-3 是 zinc-600/zinc-500：维持 V2 定下的对比度底线（≥4.4:1） */
+  --ink: #18181b; --ink-2: #52525b; --ink-3: #87878f;
+  --accent: #2563eb; --accent-soft: rgba(37,99,235,.09);
+  --ok: #059669; --ok-soft: rgba(5,150,105,.1);
+  --warn: #d97706; --warn-soft: rgba(217,119,6,.11);
+  --bad: #dc2626; --bad-soft: rgba(220,38,38,.09);
+  --shadow: 0 1px 2px rgba(24,24,27,.04), 0 12px 28px -24px rgba(24,24,27,.3);
+}
+
+/* ── 2. 壳层：单列 + 底部浮动 Dock ─────────────────────────────────── */
+.shell { grid-template-columns: 1fr; }
+.main { padding-bottom: 88px; }   /* Dock 悬浮在内容上：留出高度，滚动到底不被压住 */
+
+.nav {
+  position: fixed; top: auto; bottom: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 60; height: auto; width: max-content; max-width: calc(100vw - 24px);
+  flex-direction: row; align-items: center;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(16px) saturate(1.5);
+  -webkit-backdrop-filter: blur(16px) saturate(1.5);
+  border: 1px solid var(--line-soft); border-radius: 999px;
+  box-shadow: var(--shadow);
+  padding: 6px 8px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.nav::-webkit-scrollbar { display: none; }
+.nav ul { display: flex; gap: 2px; padding: 0; flex: none; }
+.nav a {
+  flex-direction: column; gap: 4px; padding: 7px 11px 6px;
+  font-size: 10px; line-height: 1; font-weight: 500;
+  border-radius: 12px; color: var(--ink-3);
+}
+.nav a svg { width: 16px; height: 16px; opacity: 1; }
+.nav a:hover { background: var(--surface-2); color: var(--ink); }
+.nav a.on { background: var(--accent-soft); color: var(--accent); }
+.nav a.on::before { display: none; }   /* V2 的左强调条是侧栏语言，Dock 里没有锚点 */
+.nav-badge {
+  margin: 0; position: absolute; top: 3px; right: 5px;
+  padding: 0 4px; font-size: 9px; line-height: 1.5;
+}
+
+/* ── 3. 页头：大标题 + 灰副标题（参考图的页首范式），状态收成胶囊 ──── */
+.topbar {
+  background: transparent; border-bottom: none; position: static;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  padding: 24px 26px 4px; gap: 12px;
+}
+.tb-title { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.topbar h2 { font-size: 19px; font-weight: 650; letter-spacing: -.02em; }
+.topbar .sep { display: none; }
+.topbar .meta { font-family: var(--sans); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; }
+.topbar .sig {
+  display: inline-flex; align-items: center; gap: 7px; flex: none;
+  font: 11.5px var(--mono); color: var(--ink-3);
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  border-radius: 999px; padding: 4px 11px; white-space: nowrap;
+}
+.sig-sep { width: 1px; height: 10px; background: var(--line); flex: none; }
+
+/* ── 4. 指标卡：无边框大圆角灰卡（rounded-[20px] 范式）─────────────── */
+.stat { background: var(--surface-2); border: none; border-radius: var(--r-xl); }
+.stat:hover { transform: none; }
+.kpi { border: none; background: var(--surface-2); border-radius: var(--r-xl); }
+.kpi::before { top: 13px; bottom: 13px; width: 3px; border-radius: 2px; }
+.kpi .kbar { background: var(--line-soft); }
+
+/* ── 5. 面板 / 表格 / 图表：统一大圆角、弱边线 ─────────────────────── */
+.box { border-radius: var(--r-xl); border-color: var(--line-soft); }
+.uschart { border-radius: var(--r-lg); }
+.dlg { border-radius: var(--r-xl); }
+.acc th { font-weight: 500; font-size: 11.5px; color: var(--ink-3); letter-spacing: .02em; }
+
+/* ── 6. 控件：按钮全胶囊（参考图「添加账号 / 筛选」都是 pill）───────── */
+button { border-radius: 999px; }
+button.xs, select.xs { border-radius: 999px; }
+input, select { border-radius: var(--r-sm); }
+.pg-compose textarea { border-radius: var(--r-md); }
+
+#toasts { bottom: 88px; }   /* toast 别压在 Dock 上 */
 </style>
 <!-- 移动端适配：独立文件，必须在主 <style> 之后（@media 覆盖依赖层叠顺序） -->
 <link rel="stylesheet" href="mobile.css">
 </head>
 <body>
 <div class="shell">
-  <nav class="nav" id="navDrawer">
-    <div class="brand">
-      <div class="name">WorkBuddy2API</div>
-      <div class="sub" id="navSub">控制台</div>
-    </div>
+  <nav class="nav" id="navDrawer" aria-label="主导航">
     <ul>
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
@@ -639,17 +906,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
+      <li><a href="#playground" data-view="playground">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11v7h-6l-3 3v-3h-2z"/><path d="M5.5 6.5h5M5.5 8.5h3"/></svg>
+        测试台</a></li>
       <li><a href="#config" data-view="config">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         配置</a></li>
       <li><a href="#logs" data-view="logs">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
         运行日志</a></li>
+      <li><a href="#system" data-view="system">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4.5h11M2.5 11.5h11"/><circle cx="5.5" cy="4.5" r="1.6" fill="var(--surface)"/><circle cx="10.5" cy="11.5" r="1.6" fill="var(--surface)"/></svg>
+        系统<span class="nav-badge" id="navUpd" hidden></span></a></li>
     </ul>
-    <div class="sig">
-      <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
-      <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navRedis">-</span></div>
-    </div>
   </nav>
 
   <div class="main">
@@ -658,10 +927,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button class="icon ghost nav-btn" id="navBtn" aria-label="打开导航" aria-controls="navDrawer" aria-expanded="false">
         <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
       </button>
-      <h2 id="ttl">账号池</h2>
-      <span class="sep">/</span>
-      <span class="meta" id="subMeta">-</span>
+      <div class="tb-title">
+        <h2 id="ttl">账号池</h2>
+        <span class="meta" id="subMeta">-</span>
+      </div>
       <div class="grow"></div>
+      <div class="sig" aria-label="服务状态">
+        <span class="pulse" id="navPulse"></span><span id="navState">连接中</span>
+        <span class="sig-sep"></span>
+        <span id="navVer">v-</span>
+        <span class="sig-sep"></span>
+        <span id="navRedis">-</span>
+        <span id="navSub" hidden></span>
+      </div>
       <button class="icon ghost" id="btnTheme" title="切换明暗（跟随系统 → 浅色 → 深色）" aria-label="切换主题">
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
       </button>
@@ -1258,6 +1536,107 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             </tr></thead>
             <tbody id="creditBody"></tbody>
           </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 聊天测试台：不建密钥，直接调真实 chat 流水线（同选号/节奏/记账） -->
+    <section class="view" id="view-playground" hidden>
+      <div class="pg">
+        <div class="box" style="margin-bottom:0">
+          <header>
+            <h3>聊天测试台<span class="hint">走真实链路 · 含上游报错原文</span></h3>
+            <span class="grow"></span>
+            <span class="note" id="pgNote"></span>
+            <button class="xs" id="btnPgClear">清空</button>
+          </header>
+          <div class="pg-thread" id="pgThread">
+            <div class="pg-empty" id="pgEmpty">选一个模型，发一条消息。<br>这里看到的就是客户端拿到的东西。</div>
+          </div>
+          <div class="pg-compose">
+            <textarea id="pgInput" placeholder="输入消息，Ctrl/Cmd + Enter 发送"></textarea>
+            <div class="pg-row">
+              <select class="xs" id="pgModel" title="模型"></select>
+              <select class="xs" id="pgEffort" title="思考档位"></select>
+              <label class="inline" style="font-size:12.5px;color:var(--ink-2)">
+                <input type="checkbox" id="pgStream" checked> 流式
+              </label>
+              <span class="grow"></span>
+              <span class="pg-meta" id="pgMeta"></span>
+              <button class="primary" id="btnPgSend">发送</button>
+            </div>
+          </div>
+        </div>
+        <div class="pg-side">
+          <div class="box">
+            <header><h3>本次用量</h3></header>
+            <div class="pad" id="pgUsage"><div class="note">还没有调用。</div></div>
+          </div>
+          <div class="box">
+            <header><h3>说明</h3></header>
+            <div class="pad">
+              <div class="note" style="line-height:1.75">
+                测试台不建密钥，直接调用网关的 chat 流水线。<br><br>
+                消耗的是账号池真实积分，会计入用量与请求记录。<br><br>
+                模型列表来自 <code>/v1/models</code>，思考档位只列该模型支持的档位。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 系统：告警通知 / 备份 / 版本更新 -->
+    <section class="view" id="view-system" hidden>
+      <div class="sys-grid">
+        <div class="box">
+          <header>
+            <h3>告警通知</h3>
+            <span class="grow"></span>
+            <span class="note" id="sysNotifyState">-</span>
+          </header>
+          <div class="pad">
+            <div class="sys-line"><span class="k">通道</span><span class="v" id="sysNotifyFormat">-</span></div>
+            <div class="sys-line"><span class="k">配置</span><span class="v" id="sysNotifyHint">-</span></div>
+            <div class="note" style="margin-top:12px;line-height:1.7">只为失败告警：签到异常、账号被禁用。全成功不推送——否则真出事时会被噪音埋掉。</div>
+            <div class="sys-actions"><button id="btnNotifyTest">发送测试消息</button></div>
+            <div class="sys-result" id="sysNotifyResult"></div>
+          </div>
+        </div>
+
+        <div class="box">
+          <header>
+            <h3>备份</h3>
+            <span class="grow"></span>
+            <span class="note" id="sysBackupNote">-</span>
+            <button class="xs" id="btnBackupNow">立即备份</button>
+          </header>
+          <div class="pad">
+            <div class="sys-line"><span class="k">目录</span><span class="v" id="sysBackupDir">-</span></div>
+            <div class="sys-files" id="sysBackupList"></div>
+            <div class="sys-result" id="sysBackupResult"></div>
+          </div>
+        </div>
+
+        <div class="box">
+          <header>
+            <h3>版本更新</h3>
+            <span class="grow"></span>
+            <button class="xs" id="btnUpdateCheck">立即检查</button>
+          </header>
+          <div class="pad">
+            <div class="upd-card">
+              <div class="big" id="sysUpdCurrent">-</div>
+              <span class="arrow">→</span>
+              <div class="big" id="sysUpdLatest">-</div>
+            </div>
+            <div class="sys-line"><span class="k">状态</span><span class="v" id="sysUpdState">-</span></div>
+            <div class="sys-line"><span class="k">发布时间</span><span class="v" id="sysUpdTime">-</span></div>
+            <div class="sys-actions">
+              <button id="btnUpdOpen" hidden>打开发布页</button>
+            </div>
+            <div class="sys-result" id="sysUpdResult"></div>
+          </div>
         </div>
       </div>
     </section>

@@ -315,3 +315,32 @@
   /* 标签类（限流冷却 · 1时02分 / 模型档位）窄列里换行，而不是 nowrap 撑着容器溢出 */
   .tag { max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 }
+
+/* ══ V3 Dock：底部浮动导航（≤760px）════════════════════════════════════
+   抽屉方案整体退役：Dock 在手机上同样可用（放不下时横向滑动），汉堡按钮、
+   遮罩、transform 抽屉动画全部不再出现。追加在文件末尾以覆盖上面的抽屉规则。 */
+@media (max-width: 760px) {
+  .nav {
+    position: fixed; top: auto; bottom: 10px; left: 50%;
+    transform: translateX(-50%);
+    width: max-content; max-width: calc(100vw - 16px); height: auto;
+    flex-direction: row; align-items: center;
+    border: 1px solid var(--line-soft); border-radius: 999px;
+    padding: 5px 6px; box-shadow: var(--shadow);
+  }
+  .nav.open { transform: translateX(-50%); }
+  .nav ul { display: flex; padding: 0; gap: 1px; }
+  .nav a { padding: 6px 9px 5px; font-size: 9.5px; border-radius: 11px; }
+  .nav a svg { width: 15px; height: 15px; }
+  .nav-btn, .nav-veil { display: none !important; }
+  .main { padding-bottom: 78px; }
+  .topbar { padding: 14px 14px 2px; }
+  .topbar h2 { font-size: 17px; }
+  .topbar .sig { display: none; }   /* 手机上状态收进各视图自身，顶栏只留标题与操作 */
+  .tb-title { gap: 2px; }
+  .stat, .kpi { border-radius: 16px; }
+  /* 配置页保存条 sticky 在视口底，会被居中的 Dock 压住右侧按钮：
+     抬到 Dock 上方并做成悬浮圆角条，让「保存配置」永远可点。 */
+  .savebar { bottom: 66px; margin: 0 10px; border-radius: 14px; border: 1px solid var(--line-soft); box-shadow: var(--shadow); }
+  #toasts { bottom: 76px; }
+}
