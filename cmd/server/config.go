@@ -271,6 +271,21 @@ type Config struct {
 		// 另一域再选一次；显式 cn:/global: 前缀不受影响，行为与引入前完全一致。
 		// 语义取舍：跨域会消耗另一个域的额度，属策略选择，故默认关闭、显式开启。
 		CrossDomainFallback bool `json:"cross_domain_fallback"`
+		// StopOnBan 账号被上游**禁用/封禁**时是否立即终止本次请求的轮转（不再换号
+		// 重试），默认 true。
+		//
+		// 触发条件（见 upstream.IsAccountBanned / handler.banKind）：响应 body 里出现
+		// disabled / banned / suspended / deactivated / 封禁 / 禁用 等「账号状态被
+		// 封」字段，或 11140 "request illegal"（账号被上游按异常行为限制）。
+		//
+		// 为什么默认开：这类封禁几乎总是由**本请求这个形态**触发的风控判定（同一份
+		// 指纹/同一段内容被判异常）。把同一份请求原样灌给池里剩下的健康号，等于排队
+		// 去撞同一套规则——实测一个请求能在同一分钟内把整池账号逐个打成封禁（"全军
+		// 覆没"）。停下来只损失这一次请求，继续轮转损失的是整个池子。
+		// 显式 false = 保留旧行为（禁用当事号后继续换号），仅建议在「确认封禁是账号
+		// 自身历史问题、其余号清白」且更看重单请求成功率时使用。
+		// 改动需重启进程（Handler 装配期读取）。
+		StopOnBan bool `json:"stop_on_ban"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -414,6 +429,10 @@ func Default() *Config {
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：透传客户端原始 system（对齐上游；custom 由用户显式选择）
 	c.Pool.Strategy = pool.RegionStrategies{Domestic: pool.WeightedRandom, International: pool.WeightedRandom}
+	// StopOnBan 缺省 true：账号被上游禁用/封禁即终止本次请求的轮转（防连坐全军覆没）。
+	// 「缺省 true」靠 Default() 显式赋值实现（同 schedule 各开关）：JSON 键缺席时
+	// 字段保留此值，只有显式 false 才退回旧行为——老配置零影响、无需补键。
+	c.Pool.StopOnBan = true
 	c.Pool.MaxInFlight = 3
 	// MaxInFlightGlobal 缺省 2：global 域 WAF 风控更紧，压低单号并发（WAF 403 修复
 	// P1-1）；0/负数 normalize 回落默认（与 max_in_flight 的 0=不限语义不同，分档键

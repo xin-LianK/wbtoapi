@@ -84,6 +84,10 @@ func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, m
 				if errors.As(rerr, &ue) {
 					lastStatus, lastKind = ue.Status, ue.Kind
 					h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, "", ue)
+					// refresh 撞封禁：与 chat 同口径直接终止轮转（该号已硬禁用）。
+					if h.stopRotationOnBan(acct, ue.Kind, ue.Msg) {
+						break
+					}
 				} else {
 					h.cfg.Pool.NoteFailures(acct.UID)
 					lastStatus = http.StatusServiceUnavailable
@@ -123,6 +127,12 @@ func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, m
 			h.cfg.Pool.NoteFailures(acct.UID)
 			lastStatus = http.StatusServiceUnavailable
 		}
+		// 封号 fail-fast：与 chat 完全同口径——账号被上游禁用/封禁时立即终止轮转，
+		// 不把同一份搜索请求继续灌给余下健康号（封禁按请求形态连坐，见
+		// handler.stopRotationOnBan）。该号已由 applyErrorPolicy 硬禁用。
+		if ue != nil && h.stopRotationOnBan(acct, ue.Kind, ue.Msg) {
+			break
+		}
 		if !rotateBackoff(i, ctx) {
 			break
 		}
@@ -150,6 +160,13 @@ func (h *Handler) runSearch(ctx context.Context, query string, maxResults int, m
 	}
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
+		// 11140 账号限制与 chat 同口径返回 403：搜索链路的业务错误可能以 HTTP 200
+		// 信封下发（lastStatus=200），此时上面的 4xx 透传不生效，会落成 503——而 503
+		// 在 SDK 眼里可重试，重试是新请求、会重新选号（被禁的号已退出池子），等于把
+		// 单请求内的连坐搬到跨请求。
+		if ue.Kind == upstream.ErrAccountFault && upstream.IsAccountRestricted(ue.Msg) {
+			status = http.StatusForbidden
+		}
 		// 搜索无模型维度（bareModel 传空、无图片判定），其余判定口径与 chat 一致。
 		return nil, &searchFailure{
 			status: status,

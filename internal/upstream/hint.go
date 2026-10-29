@@ -54,7 +54,17 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
+		// 11140 账号限制是终态：该号已禁用、轮转已停止，措辞不能再写「网关会换号」
+		// ——那是旧行为，会误导客户端/用户以为换个请求还有救，进而重试去消耗余下账号。
+		// 14017（trial not activated）可自愈，保留原有轮换措辞。
+		if IsAccountRestricted(msg) {
+			return "account restricted by upstream (11140: abnormal behaviour); rotation was stopped and the account removed — retrying puts the remaining accounts at risk, appeal at the official channel to lift the restriction"
+		}
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
+	case ErrAccountBanned:
+		// 终态封禁：明确告诉客户端「换号/重试都没用」——轮转已被网关主动停止，
+		// 继续重试只会让上游把更多账号按同一份请求打进封禁。
+		return "account disabled/banned by upstream; rotation was stopped to protect the remaining accounts, re-login or appeal at the official channel"
 	case ErrChannelRefused:
 		// 11128 通道校验失败：账号健康，问题在请求指纹/出口通道。给可操作的排查指向。
 		return "upstream rejected the request channel (it may not look like the official client); check user-agent/headers or an intercepting proxy, then retry"

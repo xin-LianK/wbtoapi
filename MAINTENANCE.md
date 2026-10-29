@@ -55,9 +55,42 @@ A2  401/403 且 body 含 "request illegal"，code=11128
       再决定动不动 header。短时间高频出站会触发同一类拒绝，改头是白费功。
     → 节奏排除后再进第 5 节（指纹）逐项比对请求头。
 
-A3  body 含 "request illegal"，code=11140
-    → ErrAccountFault：账号被上游判定异常行为/风控。换号，别重试。
+A3  code=11140，body 为下列任一形态
+    · 英文 "request illegal"
+    · 中文「账号存在异常行为，已被限制使用」
+    → ErrAccountFault：账号被上游判定异常行为/风控。硬禁用，**并立即终止本次请求的轮转**
+      （pool.stop_on_ban 缺省开启）——同一份请求换号会连坐把余下号逐个打成封禁。
     → 若批量出现，说明整批号的注册/使用行为已被标记，池子该重建了。
+    → 中英两种文案都必须命中：只认英文时，中文形态会掉到通用 4xx 兜底（ErrClient：
+      只换号不罚号）→ 该号不被禁用、轮转也不停，是「整池连坐」的隐蔽入口。
+      判定见 client.go 的 IsAccountRestricted / accountRestrictedCnMarkers。
+    → 响应是 **403 `account_restricted`**，不是 503。区别不在话术而在客户端行为：
+      503 在 OpenAI 系 SDK 里属可重试错误（默认退避重试 2 次），而**客户端重试是一次
+      全新的 HTTP 请求**，网关会重新选号——被禁的号虽已退出池子，同一份请求仍会再撞
+      下一个健康号。`pool.stop_on_ban` 只终止「单请求内的 for 循环」，拦不住「客户端
+      又发了一次」，403 是唯一能掐断这条跨请求连坐链的信号。
+      14017（trial not activated）可自愈，仍走 503 并保持软冷却，别一起改成 403。
+
+A3.5 body 出现 "account is disabled" / "banned" / "suspended" / "封禁" / "禁用" 等字段
+    → ErrAccountBanned：账号已被上游禁用/封禁的**终态**（重登、等冷却都救不回来，
+      只能申诉或换号）。网关硬禁用该号 + 立即终止轮转（同上，pool.stop_on_ban）。
+    → 看 WARN 日志「rotation stopped: account ... hit a ban/disable signal」，
+      以及告警推送；词表在 client.go 的 banMarkers（IsAccountBanned）。
+
+A3.6 收到「账号疑似被封禁/限制（可手动解封）」告警，或面板上出现「疑似误封」标签
+    → 这是**本地判定**，不是上游给的结构化结论：网关从 body 里匹配到封禁/限制信号
+      （A3 / A3.5 两族），据此把该号移出池子并终止了轮转。判定是启发式的，会误伤：
+      文案撞词、临时风控（账号本身健康）、上游改文案。
+    → 三步核实（别直接放弃这个号）：
+      1. 面板「账号池」看该行：标签是 warn 色的「疑似误封」（不是红色的「已禁用」），
+         下面一行是剥掉 `ban-detected:` 前缀后的原始判定原因。
+      2. 用**官方客户端**登录该号发一句话：能正常对话 = 误判。
+      3. 点该行「解封」→ `POST /panel/api/accounts/{uid}/revive` → `Pool.Revive`
+         一并清除禁用 + 冷却 + 熔断，账号立刻回到选号候选。
+    → 官方客户端同样回「账号存在异常行为，已被限制使用」= 真封，只能提交反馈申诉。
+    → 为什么不自动放回池子：误判与真封在上游响应里长得完全一样，本地无法区分。
+      自动复活会让一个真被封的号反复被选中、反复撞同一套风控，把「连坐」变成常态。
+      所以留成**人工确认**，由人用官方客户端做那一次判别。
 
 A4  body 含 "trial not activated" / code=14017
     → 账号未完成试用激活（register 没走完），不是代码问题。
@@ -66,9 +99,12 @@ A5  402 或 body 含积分不足类文案
     → 余额耗尽。跑签到/成长任务，或换号。
 ```
 
-> ⚠️ 11128 和 11140 的 msg **都是 `request illegal`**，只能靠 code 分流
-> （`client.go:167` 与 `:177`）。注意代码里 11128 是按字面量 `"11-128"` 匹配的，
+> ⚠️ 11128 和 11140 的英文 msg **都是 `request illegal`**，只能靠 code 分流
+> （`client.go` 的 isChannelRefused / IsAccountRestricted）。注意代码里 11128 是按字面量 `"11-128"` 匹配的，
 > 若上游改了 code 的字符串形态，这里会静默失灵 → 表现是「通道拒绝被误判成普通 4xx，只换号不报警」。
+> 另外 11140 的中文形态不带 `request illegal`，靠 `accountRestrictedCnMarkers` 的文案分支判定
+> （文案自体特异，不要求 code）；HTTP 200 信封形态的 code 由 `envelopeErrorBody` 一并喂给
+> Classify，否则顶层 code 会被丢掉、同样落进 4xx 兜底。
 
 ### B. 单个模型全线失败，其他模型正常
 
@@ -153,7 +189,8 @@ G4  这类失效**不影响转发主链路**，优先级最低，可以先关掉
 | 11128 | `channel_refused` | **不罚号** | 通道校验失败（反代识别） |
 | 11133 | `client` | 视字段而定 | 参数非法（含 GPT 系 max_tokens<16） |
 | 11135 | `image_invalid` | 不罚号、透传 | 图片格式/数据错误 |
-| 11140 | `account_fault` | 冷却/禁用 | 账号被限制 |
+| 11140 | `account_fault` → **403** `account_restricted` | 禁用 + **终止轮转**（面板标「疑似误封」） | 账号被限制（`stop_on_ban`）：英文 `request illegal` 或中文「账号存在异常行为，已被限制使用」。**不用 503**——SDK 视 503 为可重试，重试是新请求、会重新选号 |
+| disabled/banned/suspended/封禁 字段 | `account_banned` | 禁用 + **终止轮转** | 账号被上游封禁（终态） |
 | 11148 | `client` | 换号 | tool_calls 报文形状问题（先靠 tool_pairing 修） |
 | 12153 | `session_dead` | 禁用 | session 失效，需重登 |
 | 14017 | `account_fault` | 冷却 | 试用未激活 |
@@ -175,6 +212,13 @@ G4  这类失效**不影响转发主链路**，优先级最低，可以先关掉
 | 新错误码没被识别 | `internal/upstream/client.go` | `Classify` :565 |
 | 403 / WAF 判断 | 同上 | `IsWafBlocked` :411 |
 | 通道校验判定 | 同上 | `isChannelRefused` :177 |
+| 账号限制判定（中英双文案） | 同上 | `IsAccountRestricted` / `accountRestrictedCnMarkers` |
+| 200 信封把 code 丢了 | 同上 | `envelopeErrorBody`（doJSON / doSearch 共用） |
+| 封禁/禁用判定（词表） | 同上 | `IsAccountBanned` / `banMarkers` |
+| 封号后是否继续换号 | `internal/server/handler.go` | `stopRotationOnBan`、`banKind`（`config.pool.stop_on_ban`） |
+| 11140 回什么状态码 | 同上 + `internal/server/search.go` | 末端映射 `case upstream.ErrAccountFault`（403 `account_restricted`，非 503） |
+| 面板为什么标「疑似误封」 | `internal/pool/entry.go` + `internal/panel/app.js` | `BanDetectedPrefix`、`Status.BanSuspect`、`stripBanPrefix` |
+| 封禁告警文案 | `internal/server/handler.go` | `banAlert`（三处轮转路径共用） |
 | 请求体被拒 | `internal/upstream/payload.go` | `PrepareBodyOpt...` :30 |
 | 工具调用配对 400 | `internal/upstream/tool_pairing.go` | 三步修复 |
 | 工具调用不执行 | `internal/upstream/dsml.go` | 标记解析 |

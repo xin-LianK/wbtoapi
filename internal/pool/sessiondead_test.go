@@ -160,3 +160,29 @@ func TestStatusDisabledReasonClearedByRevive(t *testing.T) {
 		t.Errorf("revive 后 reason=%q want 空", st.Reason)
 	}
 }
+
+// TestStatusBanSuspect 本地封禁判定（reason 带 BanDetectedPrefix）在 Status 上
+// 透出 BanSuspect，供面板标「疑似误封」+ 一键解封。普通禁用（session dead /
+// 人工禁用）不带该标记，避免把所有禁用都提示成可能误判。
+func TestStatusBanSuspect(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "ban"})
+	p.Add(&auth.Auth{UID: "dead"})
+
+	p.Disable("ban", BanDetectedPrefix+"upstream 11140 restriction")
+	p.Disable("dead", "12153 session dead")
+
+	if st, _ := p.Status("ban"); !st.BanSuspect {
+		t.Errorf("本地封禁判定必须透出 ban_suspect，disabled_reason=%q", st.DisabledReason)
+	}
+	if st, _ := p.Status("dead"); st.BanSuspect {
+		t.Errorf("12153 禁用不该被标成疑似误封（会误导运维去解封死 session）")
+	}
+
+	// 解封后标记必须一起消失，不能留着「疑似误封」标签指向一个可用账号。
+	p.ReviveDisabled("ban")
+	st, _ := p.Status("ban")
+	if st.BanSuspect || st.Disabled || st.DisabledReason != "" {
+		t.Errorf("解封后应清空 ban_suspect/disabled/disabled_reason: %+v", st)
+	}
+}

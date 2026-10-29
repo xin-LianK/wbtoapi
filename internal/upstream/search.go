@@ -181,7 +181,7 @@ func (c *Client) doSearch(req *http.Request) (*SearchOutcome, error) {
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if parsed.Code != 0 {
-		kind := Classify(resp.StatusCode, parsed.Msg)
+		kind := Classify(resp.StatusCode, envelopeErrorBody(parsed.Code, parsed.Msg))
 		if kind == ErrNone {
 			kind = ErrClient
 		}

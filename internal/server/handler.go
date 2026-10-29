@@ -94,6 +94,17 @@ type Config struct {
 	// Notify 告警出口（可选；nil = 不推）。只在「账号被终态禁用」这类
 	// 需要人工介入的节点使用，不用于逐请求失败（那会把通知变成噪音）。
 	Notify *notify.Notifier
+
+	// StopOnBan 账号被上游禁用/封禁（ErrAccountBanned / 11140 账号限制）时是否
+	// **立即终止轮转**。来自 config pool.stop_on_ban，缺省 true。
+	//
+	// 为什么默认要停：封禁几乎总是由「本请求这个形态」触发的风控判定（同一份指纹/
+	// 同一段内容被判异常），把同一份请求原样灌给池里剩下的健康号等于排队去撞同一套
+	// 规则——实测一个请求能在同一分钟内把整池账号逐个打进封禁（全军覆没）。停下来
+	// 只损失这一次请求，继续轮转损失的是整个池子。
+	// 显式 false = 保留旧行为（禁用当号后继续换号试），适合「只有一两个号被试出来
+	// 封禁、其余号确实清白」且更看重单请求成功率的场景。
+	StopOnBan bool
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -945,10 +956,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
 					h.cfg.Notify.Send(notify.LevelError, "账号已禁用",
 						"账号 "+logfmt.Label(acct.UID, acct.Nickname)+" 刷新 token 时 session dead，已移出账号池，需要重新登录")
+				} else if errors.As(err, &ue) && banKind(ue.Kind, ue.Msg) {
+					// refresh 也被上游判为封禁（disabled/banned 字段 / 11140）：与 chat
+					// 同族处置——硬禁用该号，随后由 stopRotationOnBan 决定终止轮转。
+					h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, bareModel, ue)
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
 				fail(acct.UID)
+				// 封号 fail-fast（refresh 路径）：该 token 链已被上游封死，换号重试
+				// 只会把同一份请求继续喂给余下号（连坐），见 Config.StopOnBan。
+				if ue != nil && h.stopRotationOnBan(acct, ue.Kind, ue.Msg) {
+					break
+				}
 				if !rotateBackoff(i, r.Context()) {
 					break // ctx 取消：终止轮转（refresh 失败换号退避）
 				}
@@ -1133,6 +1153,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
+			// 封号 fail-fast（优先于一切换号/退避）：账号被上游禁用/封禁时立即终止
+			// 轮转——同一份请求换号重试只会把余下健康号逐个触发同一套风控判定
+			// （"全军覆没"）。applyErrorPolicy 已把该号硬禁用并落盘，此处只决定
+			// 「还要不要用别的号再试一次」。见 Config.StopOnBan。
+			if h.stopRotationOnBan(acct, kind, string(respBody)) {
+				break
+			}
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
@@ -1189,6 +1216,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+				// 封禁信号：这里靠 200 + error 帧下发，回包已经开始、无法再换号，
+				// 但账号已被 applyErrorPolicy 移出池子——必须告警，否则运维只看到
+				// 「某个流失败了」，不知道这个号已经被判死，也无从得知可能是误判。
+				if banKind(kind, errFrame) {
+					h.banAlert(acct, kind, errFrame, "该请求的回包已开始，无法再切换账号")
+				}
 			case sErr != nil:
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
@@ -1342,6 +1375,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 含 requestId，客户端按 SDK 退避重试即可。
 			code = "upstream_busy"
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
+		case upstream.ErrAccountFault:
+			// 11140 账号限制（异常行为/风控）是**终态**：该号已被 applyErrorPolicy 硬
+			// 禁用，本次请求的轮转也已被 stopRotationOnBan 终止。这里用 403 而不是默认
+			// 的 503，因为两者对客户端是两种完全不同的信号：
+			//   - 503 在 OpenAI 系 SDK 眼里属可重试错误（默认退避重试 2 次，覆盖 5xx）。
+			//     而**客户端重试是一次全新的 HTTP 请求**——网关会重新选号（被禁的号已
+			//     退出池子），同一份请求于是又被灌给下一个健康号。pool.stop_on_ban 只
+			//     管得住「单请求内的 for 循环」，管不到「客户端又发了一次」这层，
+			//     403 才是唯一能掐断这条跨请求连坐链的信号。
+			//   - 403 语义也正确：不是「服务端忙，等会再来」，而是「这个号被限制，
+			//     等也不会好，去申诉」。监控上也不会被算进上游可用性错误率。
+			// 14017（trial not activated）是可自愈的授权状态（补完 register 即恢复），
+			// 仍走 503 默认分支，不受本 case 影响。
+			if upstream.IsAccountRestricted(ue.Msg) {
+				status = http.StatusForbidden
+				code = "account_restricted"
+				msg = "account restricted by upstream (11140 abnormal behaviour); rotation stopped and the account was removed — retrying only puts the remaining accounts at risk, appeal at the official channel to lift it"
+			}
+		case upstream.ErrAccountBanned:
+			// 账号被上游禁用/封禁（终态）：403 + account_banned。轮转已被
+			// stopRotationOnBan 主动终止、该号也已硬禁用——客户端不该再重试
+			// （换号会连坐，重试只会触发同一套风控判定）。
+			status = http.StatusForbidden
+			code = "account_banned"
+			msg = "account disabled/banned by upstream; rotation stopped to protect the remaining accounts"
 		case upstream.ErrModelBlocked:
 			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
 			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
@@ -1575,17 +1633,25 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, notFoundCooldown, "upstream 404")
 	case upstream.ErrAccountFault:
 		// 账号级授权/配额故障按业务码分野（口径与 Classify 一致）：
-		//   - 11140 + "request illegal" → 账号被上游限制（异常行为/风控）：硬禁用。
-		//     解除只能由用户在 WorkBuddy 官方渠道申诉，重登无效（issue 1849 结论）。
+		//   - 11140 → 账号被上游限制（异常行为/风控）：硬禁用。解除只能由用户在
+		//     WorkBuddy 官方渠道申诉，重登无效（issue 1849 结论）。上游有两种文案：
+		//     英文 "request illegal" 与中文「账号存在异常行为，已被限制使用」，
+		//     均由 upstream.IsAccountRestricted 覆盖。
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 注意 11128 的 msg 同为 "request illegal"，但那是通道校验失败，已在
 		// Classify 分流到 ErrChannelRefused，走不到这里。
 		if upstream.IsAccountRestricted(body) {
-			h.cfg.Pool.Disable(uid, "account restricted by upstream (11140 request illegal); appeal in WorkBuddy (submit feedback) to lift the restriction")
+			h.cfg.Pool.Disable(uid, accountRestrictedReason)
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+	case upstream.ErrAccountBanned:
+		// 账号被上游禁用/封禁（disabled / banned / suspended / 封禁 等字段）：
+		// 与 11140 账号限制同族的**终态**——重登、补 register、等冷却都救不回来，
+		// 只能申诉（或换号）。这里硬禁用，让它立刻退出选号；轮转是否继续由
+		// chatCompletions 的 stopRotationOnBan 决定（默认终止，防止连坐封号）。
+		h.cfg.Pool.Disable(uid, banDisabledReason)
 	case upstream.ErrChannelRefused:
 		// 11128 通道校验失败（上游判定请求可能不是官方客户端发出，displayMsg 就是
 		// 「请求被拦截，请重新发送」）。账号本身健康——官方客户端可正常使用同一账号，
@@ -1631,6 +1697,85 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 			h.cfg.Pool.NoteFailures(uid)
 		}
 	}
+}
+
+// banDisabledReason 账号被上游封禁时的禁用原因（面板/状态端点可见，供运维定位）。
+//
+// 带 pool.BanDetectedPrefix：这是**本地规则判定**（body 里出现 disabled/banned/
+// suspended/封禁 等字段），上游未必真的封了这个号——文案撞词、临时风控、上游改文案
+// 都可能误伤。面板据此展示「疑似误封」标记并提供一键解封（Revive）。
+const banDisabledReason = pool.BanDetectedPrefix +
+	"upstream ban signal (disabled/banned/suspended/封禁); local rule match — may be a false positive, " +
+	"verify upstream and revive from the panel if the account still works"
+
+// accountRestrictedReason 账号被上游 11140 限制（异常行为/风控）时的禁用原因。
+// 中英两种上游文案同归此因，便于运维在面板按原因聚合排查。
+// 同样带 ban-detected 前缀：11140 也可能是出口 IP/请求形态触发的临时风控，
+// 账号本身未必有事，必须允许人工解封验证。
+const accountRestrictedReason = pool.BanDetectedPrefix +
+	"upstream 11140 restriction (request illegal / 账号存在异常行为，已被限制使用); " +
+	"local rule match — may be a false positive, appeal or revive from the panel to re-test"
+
+// banKind 报告该错误是否属于「账号被上游禁用/封禁」一族，即是否应当触发
+// 「硬禁用 + 终止轮转」。
+//
+// 两个来源同族：
+//   - ErrAccountBanned：body 里带 disabled / banned / suspended / 封禁 等字段
+//     （upstream.IsAccountBanned 分类，见其 banMarkers 注释）；
+//   - ErrAccountFault + 11140 账号限制：英文 "request illegal" 或中文「账号存在
+//     异常行为，已被限制使用」，语义同样是终态封禁（14017 trial not activated
+//     不算——补 register 可自愈，走软冷却，轮转照常）。
+//
+// 为什么用 body 再判一次而不是只看 kind：ErrAccountFault 一个 kind 承载两种语义
+// （可自愈的 14017 与终态的封禁/限制），terminate 与否必须看 body 细节。
+func banKind(kind upstream.ErrKind, body string) bool {
+	if kind == upstream.ErrAccountBanned {
+		return true
+	}
+	return kind == upstream.ErrAccountFault && upstream.IsAccountRestricted(body)
+}
+
+// banAlert 封禁信号的统一人工告警出口。
+//
+// 为什么必须发：封禁会把账号移出池子。静默处理时运维只有在「池子被逐个打空、
+// 请求全失败」之后才会发现，而这时已经损失了一批号。
+//
+// 为什么告警里必须写「可能误判、可手动解封」：这个判定是**网关本地规则**做的
+// （文案匹配 / 11140 推断），不是上游给的结构化结论，存在三类误伤——文案撞词、
+// 临时风控（账号本身健康）、上游改文案。运维拿到告警后应当去核实，而不是直接
+// 放弃这个号；面板「账号池」的「解封」按钮会一并清掉禁用+冷却+熔断（Pool.Revive）。
+//
+// action 描述本次请求的处置，由调用方按上下文给：三轮转路径各自不同，
+// 统一写 "rotation stopped" 会在流式路径（回包已开始、本来就无法换号）误导排查。
+func (h *Handler) banAlert(acct *auth.Auth, kind upstream.ErrKind, body, action string) {
+	label := logfmt.Label(acct.UID, acct.Nickname)
+	h.cfg.Notify.Send(notify.LevelError, "账号疑似被封禁/限制（可手动解封）",
+		"账号 "+label+" 命中封禁信号（kind="+kind.String()+"），已移出账号池；"+action+"。\n"+
+			"⚠ 这是网关本地规则判定，不是上游给出的结构化封禁结论，存在误判可能。若核实该号仍可用"+
+			"（官方客户端能正常对话），请到面板「账号池」点该账号的「解封」恢复——会一并清除禁用、冷却与熔断。\n"+
+			"上游原文："+logfmt.Truncate(body, 300))
+}
+
+// stopRotationOnBan 在「该号被判封禁」时决定是否终止本次请求的轮转。
+// 返回 true = 调用方立即 break（不再换号）。
+//
+// 告警与轮转决策分离：账号被移出池子这件事与 pool.stop_on_ban 开关无关，
+// 所以**命中封禁信号一律告警**；开关只决定「本次请求还要不要拿别的号再试」。
+// 两种情况的 action 措辞不同——关掉开关时继续轮转，绝不能声称已停止。
+func (h *Handler) stopRotationOnBan(acct *auth.Auth, kind upstream.ErrKind, body string) bool {
+	if !banKind(kind, body) {
+		return false
+	}
+	if !h.cfg.StopOnBan {
+		// 开关关闭 = 旧行为：禁用该号后继续换号。仍告警（账号确实被移出了池子），
+		// 但说明本次请求会继续尝试其它账号，避免运维误以为请求已失败。
+		h.banAlert(acct, kind, body, "pool.stop_on_ban=false，本次请求会继续尝试其它账号")
+		return false
+	}
+	log.Printf("WARN: [server] rotation stopped: account %s hit a ban/disable signal (kind=%s): %s (remaining accounts are no longer tried for this request)",
+		logfmt.Label(acct.UID, acct.Nickname), kind, logfmt.Truncate(body, 200))
+	h.banAlert(acct, kind, body, "本次请求已终止轮转，避免同一份请求把余下账号逐个打成封禁")
+	return true
 }
 
 // ---------------------------------------------------------------------------

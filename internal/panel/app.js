@@ -385,6 +385,13 @@ setTimeout(() => {
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+/* stripBanPrefix 剥掉禁用原因里的 "ban-detected: " 标记（见 pool.BanDetectedPrefix）。
+   该标记是给状态端点/运维脚本识别「这是本地封禁判定、可能误判」用的机器前缀，
+   界面上直接展示原文会让用户看到一串无意义的英文。 */
+function stripBanPrefix(r) {
+  return String(r || '').replace(/^ban-detected:\s*/, '');
+}
+
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
@@ -398,7 +405,11 @@ function renderAccounts(list) {
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
     let cls = '', tag;
-    if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
+    // ban_suspect：该禁用来自网关**本地封禁判定**（封禁文案匹配 / 11140 推断），
+    // 不是上游给的结构化结论，可能误判（文案撞词、临时风控、上游改文案）。
+    // 用 warn 色而非 bad：这是「去核实」的提醒，不是「宣告死刑」。
+    if (s.disabled && s.ban_suspect) { cls = 'off'; tag = '<span class="tag warn">疑似误封</span>'; }
+    else if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
     else if (cool > 0) {
       cls = 'cool';
@@ -406,7 +417,20 @@ function renderAccounts(list) {
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
-    const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    // 状态备注：疑似误封时先给一句可操作的人话（核实 → 点「解封」），再挂原始原因。
+    // 原始原因里的 "ban-detected: " 前缀是给机器/运维识别的标记，对界面是噪音，剥掉。
+    let note = '';
+    if (s.disabled && s.ban_suspect) {
+      note = '<div class="hint" style="font-size:11.5px;color:var(--warn);margin-top:3px">'
+        + '本地规则判定，上游未必真封；若官方客户端能正常对话，点「解封」放回池子'
+        + '</div>'
+        + (s.disabled_reason
+          ? '<div class="hint" style="font-size:11px;color:var(--ink-3);margin-top:2px">'
+            + esc(stripBanPrefix(s.disabled_reason)) + '</div>'
+          : '');
+    } else if (s.reason) {
+      note = '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>';
+    }
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
@@ -462,7 +486,9 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
-        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
+        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '"'
+                    + (s.disabled && s.ban_suspect ? ' title="清除禁用 + 冷却 + 熔断，把账号放回池子（用于本地判定误封）"' : '') + '>'
+                    + (s.disabled && s.ban_suspect ? '解封' : '解冻') + '</button>'
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
@@ -574,7 +600,9 @@ $('accBody').addEventListener('click', async ev => {
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
     } else if (a === 'revive') {
       await api('accounts/' + encodeURIComponent(u) + '/revive', { method: 'POST' });
-      toast('已解冻', 'ok');
+      // 解封（Revive）不是只清 disabled：冷却、连续失败/熔断计数一并清掉，
+      // 账号立刻回到选号候选。文案说清楚，避免运维以为只解了禁用。
+      toast('已解封（禁用 / 冷却 / 熔断已清除，账号回到池子）', 'ok');
     } else if (a === 'disable') {
       await api('accounts/' + encodeURIComponent(u) + '/disable', { method: 'POST' });
       toast('已禁用', 'ok');

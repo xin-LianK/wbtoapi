@@ -102,6 +102,11 @@ type Status struct {
 	Enterprise      bool       `json:"enterprise,omitempty"`
 	Disabled        bool       `json:"disabled"`
 	DisabledReason  string     `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// BanSuspect 该禁用来自网关**本地封禁判定**（DisabledReason 带 BanDetectedPrefix），
+	// 存在误判可能——上游可能根本没封这个号，是本地文案/11140 规则判的。面板据此
+	// 展示「疑似误封」标记 + 一键解封入口，避免运维把健康号当死号处理。
+	// 仅 disabled 时为 true；人工禁用、12153 连续的禁用不带该标记。
+	BanSuspect      bool       `json:"ban_suspect,omitempty"`
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
@@ -550,6 +555,25 @@ const sessionDeadThreshold = 3
 
 // sessionDeadReason 12153 判定为 session 死亡时的持久化 reason。
 const sessionDeadReason = "12153 session dead"
+
+// BanDetectedPrefix 禁用原因前缀：标记该禁用来自**网关本地封禁判定**，而不是
+// 上游给出的结构化封禁结果。
+//
+// 为什么需要这个区分：网关的封禁判定本质是启发式的——「body 里出现
+// account is disabled / 封禁 等字段」或「11140 + 限制文案」。它能挡住真实封禁，
+// 但也会误伤：
+//   - 上游文案撞词（业务错误里夹带 "account disabled"/"限制使用" 之类字样）；
+//   - 临时风控（同一出口 IP/同一请求形态被误判，账号本身健康）；
+//   - 上游改文案（本地规则猜错语义）。
+// 这类禁用**不能自愈**（没人会去重登一个其实没被封的号），所以必须让运维在面板
+// 上一眼看出「这是本地判的，可能误判」，并提供一键解封（Revive）。
+//
+// 实现取舍：用 reason 前缀而不是新增持久化字段——reason 已经落盘并经
+// Status.DisabledReason 透出面板，前缀方案零 schema 变更、旧状态文件天然兼容，
+// 也与 BlockModelClear 按 reason 前缀识别 11102 的既有做法一致。
+// 上游明确封禁与本地推断目前都走这条前缀：对运维而言「可能误判」的提示一律适用，
+// 因为两者都无法验证真伪，误判成本远高于多看一眼。
+const BanDetectedPrefix = "ban-detected: "
 
 // SessionDeadThreshold 暴露连续 12153 的禁用阈值（供 scheduler 日志/运维文档引用）。
 func SessionDeadThreshold() int { return sessionDeadThreshold }

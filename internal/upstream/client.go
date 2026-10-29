@@ -38,6 +38,7 @@ const (
 	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
 	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 请求级错误：不罚号、不轮转，末端 400 透传原文
 	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrAccountBanned                 // 账号被上游禁用/封禁（disabled / banned / suspended / 封禁 等字段）→ 硬禁用 + 终止轮转
 	ErrChannelRefused                // 11128 request illegal 通道校验失败（上游认为请求不是官方客户端发的）→ 不罚账号
 	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
@@ -75,6 +76,8 @@ func (k ErrKind) String() string {
 		return "upstream_busy"
 	case ErrAccountFault:
 		return "account_fault"
+	case ErrAccountBanned:
+		return "account_banned"
 	case ErrChannelRefused:
 		return "channel_refused"
 	case ErrClient:
@@ -157,18 +160,45 @@ var accountFaultMarkers = []string{
 	"trial version is not yet activated",
 }
 
-// accountRestrictedMsg 是 WorkBuddy 11140 账号限制的正文关键词。
+// accountRestrictedMsg 是 WorkBuddy 11140 账号限制的**英文**正文关键词。
+// 11128 通道校验失败同文案（"request illegal"），靠业务码区分，故英文分支必须
+// code + 文案双条件。
 const accountRestrictedMsg = "request illegal"
 
-// IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的账号级限制（11140
-// "request illegal"）。必须 code + 文案双条件：
-//   - 只看文案："request illegal" 也出现在 11128 通道校验失败里（健康账号）；
-//   - 只看 code：11140 也承载模型级限流文案（应归 ErrSoftRate）。
+// accountRestrictedCnMarkers 是同一账号限制（11140）的**中文**文案族。
+//
+// 为什么必须单列：国内线路把 "request illegal" 直接译为中文下发，实测原文是
+// 「账号存在异常行为，已被限制使用」。此前 IsAccountRestricted 只认英文串，
+// 中文形态一律漏判 → 落到末尾的通用 4xx 兜底（ErrClient：只换号、不罚号）：
+// 该号既没被禁用也没被终止轮转，于是请求继续换号重试，每个账号都拿同一份请求
+// 去撞同一套风控——这是「全军覆没」的入口之一，且比英文形态更隐蔽（日志里只
+// 见一串 client 4xx）。
+//
+// 只收两类文案：完整句「账号存在异常行为…」与「账号…被限制使用」。两者同时
+// 出现只会来自 11140 账号限制，不会被限流/内容审核/模型权限撞上，故中文分支
+// 允许**不带 code**（上游可把 code 放在别处、SSE error 帧甚至只透传 message）。
+var accountRestrictedCnMarkers = []string{
+	"账号存在异常行为",
+	"账号已被限制使用",
+	"账号被限制使用",
+}
+
+// IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的账号级限制（11140）。
+//
+// 两种形态任一成立即真：
+//   - 英文 "request illegal" + code 11140：必须双条件，因为该文案也出现在 11128
+//     通道校验失败里（健康账号），且 11140 也承载模型级限流文案（应归 ErrSoftRate）；
+//   - 中文限制文案族（accountRestrictedCnMarkers）：文案本身特异，不要求 code。
 func IsAccountRestricted(body string) bool {
-	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
-		return false
+	if hasBusinessCode(body, "11140") && strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return true
 	}
-	return hasBusinessCode(body, "11140")
+	for _, m := range accountRestrictedCnMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // isChannelRefused 报告上游 body 是否为 WorkBuddy 的通道校验失败（11128
@@ -179,6 +209,49 @@ func isChannelRefused(body string) bool {
 		return false
 	}
 	return hasBusinessCode(body, "11-128")
+}
+
+// banMarkers 账号被上游**禁用 / 封禁**的字段与文案（小写比较 + 中文原文比较双通道）。
+//
+// 与 accountFaultMarkers（授权/配额状态）和 sessionDeadMarkers（session 失效）
+// 都不同：这一族是账号级**终态封禁**——重登/补 register 都救不回来，只能申诉或
+// 换号。之所以单列并单独分类（ErrAccountBanned），是因为它有一个别的错误都没有
+// 的处置要求：**立即终止轮转**。
+//
+// 为什么必须终止轮转（而不是像 402/429 那样换号继续试）：封禁几乎总是由「本请求
+// 这个形态」触发的风控判定（同一份指纹/同一段内容被上游判定为异常）。把同一份
+// 请求原样灌给池里剩下的健康号，等于排队去撞同一套风控规则——实测一个请求能把
+// 整池账号在同一分钟内逐个打成封禁（"全军覆没"）。停下来只损失这一次请求，继续
+// 轮转损失的是整个池子。
+//
+// 词表宁缺毋滥：只收明确指向「账号状态被禁用/封禁」的措辞，不收 "account abnormal"
+// 这类会被限流/内容审核误撞的宽泛表达（误判代价是把健康号硬禁用 + 直接失败请求）。
+var banMarkers = []string{
+	"account is disabled", "account has been disabled", "account was disabled", "account disabled",
+	"account is banned", "account has been banned", "account was banned", "account banned",
+	"account is suspended", "account has been suspended", "account was suspended", "account suspended",
+	"account is deactivated", "account has been deactivated", "account was deactivated",
+	"user is disabled", "user has been disabled", "user is banned", "user has been banned",
+	"账号已被禁用", "账号被禁用", "账号已被封禁", "账号被封禁", "账号已被封号", "账号被封",
+	"账号禁用", "账号封禁", "账号已停用", "账号被停用",
+}
+
+// IsAccountBanned 报告响应 body 是否为「账号被上游禁用/封禁」形态（终态封禁）。
+//
+// status 为 0 表示调用方没有状态码上下文（SSE error 帧等）——此时只按文案判定；
+// 否则仅对 >=400 的响应判定：正常业务响应里出现 "disabled" 字样（例如模型目录里
+// 某个模型被标记停用）不构成账号封禁证据。
+func IsAccountBanned(status int, body string) bool {
+	if status != 0 && status < 400 {
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, m := range banMarkers {
+		if strings.Contains(lower, m) || strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // contentBlockedMarkers 内容策略拦截关键词（大小写不敏感子串匹配）。
@@ -360,6 +433,20 @@ func modelBlockFields(body string) (code, msg string) {
 		}
 	}
 	return code, msg
+}
+
+// envelopeErrorBody 把「200 信封 + 非零业务码」重新拼成最小 JSON，供 Classify 使用。
+//
+// 为什么不直接传 msg：Classify 的部分判据是 **code + 文案双条件**（11140 账号限制
+// 见 IsAccountRestricted，11128 通道校验见 isChannelRefused）。丢掉 code 会让这些
+// 形态一律落到通用 4xx 兜底（ErrClient：只换号、不罚号）——账号既不被禁用也不终止
+// 轮转，同一份请求继续灌给池里余下账号，是整池连坐的入口之一。中文限制文案靠文案
+// 分支本可命中，但中英两种形态必须走同一条判定路径，否则又是一处隐蔽漏判。
+//
+// 只拼 code/msg 两个字段（不带 data）：避免模型目录等业务数据里的 "disabled" 之类
+// 字样被 IsAccountBanned 误当成账号封禁证据。
+func envelopeErrorBody(code int, msg string) string {
+	return `{"code":` + strconv.Itoa(code) + `,"msg":` + strconv.Quote(msg) + `}`
 }
 
 // hasBusinessCode reports whether a JSON error envelope contains an exact
@@ -562,6 +649,13 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     而不命中，天然落到 softRateMarkers 层，不受影响。
 //     同一层先按业务码分流 11128 通道校验失败（文案同为 "request illegal"）：
 //     那是客户端指纹/通道问题，账号本身健康，归 ErrChannelRefused 不罚号。
+//     11140 在中文本地化下不下发 "request illegal"，而是「账号存在异常行为，
+//     已被限制使用」——中文文案族同样归本层（见 accountRestrictedCnMarkers）。
+//  3.5. IsAccountBanned —— 账号被上游禁用/封禁（disabled/banned/suspended/
+//     封禁/禁用 等字段），归 ErrAccountBanned。判在此层（先于 429/5021/hardMarkers
+//     各层）是因为它是**终态**且极可能由本请求形态触发：handler 处置不止「禁用
+//     该号」，还要终止轮转以免同一份请求把余下健康号逐个打成封禁。
+//     先于 accountFaultMarkers：封禁不可自愈，撞车时按更重的一侧归类。
 //  4. 429 + code 14018 —— 明确的账号积分耗尽，归 ErrHardCredit（issue #175）。
 //     只认结构化业务码，不靠可能跨计费/限流两界的文案猜测。
 //  5. 429 + 6021 queue.full —— 渠道级容量满载（上游集群排队打满），归
@@ -609,12 +703,22 @@ func Classify(status int, body string) ErrKind {
 	//     不罚号。误判成 account_fault 会硬禁用正常账号（issue 1849 同款误伤）。
 	//   - 11140 = 账号被上游限制（异常行为/风控）→ account_fault，由 handler 禁用。
 	// 两者都要求 code + 文案双条件，避免 11140 的模型级限流变体被误判（见
-	// IsAccountRestricted 注释）。
+	// IsAccountRestricted 注释）。中文形态（「账号存在异常行为，已被限制使用」）
+	// 文案自体特异，走同一函数的文案分支，不要求 code。
 	if isChannelRefused(body) {
 		return ErrChannelRefused
 	}
 	if IsAccountRestricted(body) {
 		return ErrAccountFault
+	}
+	// 账号被上游禁用/封禁（disabled / banned / suspended / 封禁 / 禁用 等字段）：
+	// 账号终态，且极可能由**本请求**触发（风控按请求形态连坐），故单列一类
+	// ErrAccountBanned：handler 除硬禁用该号外还要**终止轮转**（不再把同一份请求
+	// 灌给其余健康号，见 banMarkers 注释）。
+	// 判在 accountFaultMarkers 之前：14017 trial not activated 是「可自愈」的授权
+	// 状态（补 register 即恢复），封禁是不可自愈的终态，两者撞车时按更重的一侧处理。
+	if IsAccountBanned(status, body) {
+		return ErrAccountBanned
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
@@ -1041,7 +1145,7 @@ func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
 		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
-		kind := Classify(resp.StatusCode, env.Msg)
+		kind := Classify(resp.StatusCode, envelopeErrorBody(env.Code, env.Msg))
 		if kind == ErrNone {
 			kind = ErrClient
 		}

@@ -426,6 +426,10 @@ func main() {
 		ModelAlias: cfg.Models.Alias,
 		// 告警出口：账号被终态禁用时推送（其余失败点由调度器各自触发）。
 		Notify: notifier,
+		// 封号 fail-fast：账号被上游禁用/封禁（disabled/banned/封禁 等字段，或 11140
+		// 账号限制）时立即终止本次请求的轮转，不再换号重试——同一份请求换号会连坐
+		// 把余下健康号逐个打成封禁。缺省 true（config pool.stop_on_ban）。
+		StopOnBan: cfg.Pool.StopOnBan,
 	})
 	// 面板聊天测试台：把真实 chat 流水线注入面板（panel 先于 handler 构造，
 	// 只能用 setter 补这一步）。

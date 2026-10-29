@@ -38,6 +38,16 @@ func TestClassify(t *testing.T) {
 		{403, `{"code":"11-128","msg":"request illegal"}`, ErrChannelRefused},
 		{400, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
 		{403, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		// 11140 中文本地化文案：国内线路不下发 "request illegal"，实际是
+		// 「账号存在异常行为，已被限制使用」。只认英文串会漏判到通用 4xx
+		// （ErrClient：只换号不罚号）——该号既不禁用也不终止轮转，整池连坐。
+		{403, `{"code":11140,"msg":"账号存在异常行为，已被限制使用"}`, ErrAccountFault},
+		{400, `{"code":11140,"msg":"账号存在异常行为,已被限制使用"}`, ErrAccountFault},
+		// 中文文案自体特异（"账号存在异常行为" / "账号被限制使用" 的组合只会来自
+		// 11140），故 code 被上游包装或省略时同样成立——与下面裸 "request illegal"
+		// 必须落 ErrClient 并不矛盾：英文串与 11128 共用，不具辨识度。
+		{403, `{"msg":"账号存在异常行为，已被限制使用"}`, ErrAccountFault},
+		{400, `账号已被限制使用`, ErrAccountFault},
 		// 无 code 的裸 "request illegal" 不归属任何账号级判定（宁可走通用 4xx 兜底，
 		// 也不能凭一句文案硬禁用账号）。
 		{400, `{"msg":"request illegal"}`, ErrClient},
@@ -75,6 +85,19 @@ func TestClassify(t *testing.T) {
 		{401, `Offline user session not found`, ErrSessionDead},
 		{401, `{"code":12153,"msg":"Offline user session not found"}`, ErrSessionDead},
 		{401, `{"code":9999,"msg":"bad token"}`, ErrClient},
+		// 账号被上游禁用/封禁（disabled / banned / suspended / 封禁 等字段）：终态，
+		// 且极可能由本请求形态触发的风控连坐 → ErrAccountBanned。与 ErrAccountFault
+		// 的区别在处置：actor 除硬禁用该号外还要**终止轮转**（继续换号会把同一份
+		// 请求灌给余下健康号，逐个触发同样的封禁）。
+		{403, `{"code":11014,"msg":"account is disabled"}`, ErrAccountBanned},
+		{400, `{"code":"ACCOUNT_BANNED","msg":"this account has been banned"}`, ErrAccountBanned},
+		{401, `{"msg":"账号已被封禁"}`, ErrAccountBanned},
+		{403, `{"code":1,"msg":"account is suspended"}`, ErrAccountBanned},
+		{403, `<html><body>Account disabled</body></html>`, ErrAccountBanned},
+		// 正常业务响应（200）里的 "disabled"（如模型目录条目标记停用）不是账号封禁证据。
+		{200, `{"msg":"model disabled"}`, ErrNone},
+		// 终态封禁优先于可自愈的授权状态（14017 trial not activated 补 register 即可恢复）。
+		{400, `{"code":14017,"msg":"trial not activated, account is disabled"}`, ErrAccountBanned},
 		{500, `boom`, ErrServer},
 		{503, `unavailable`, ErrServer},
 		{200, ``, ErrNone},
@@ -703,5 +726,64 @@ func TestClassifyRealChannelRefusedBody(t *testing.T) {
 	}
 	if got := Classify(403, `{"code":"`+code+`","msg":"request illegal"}`); got != ErrChannelRefused {
 		t.Fatalf("Classify(real 11-128, 403)=%v want ErrChannelRefused", got)
+	}
+}
+
+// TestEnvelopeErrorBodyKeepsCode 钉住「200 信封 + 非零业务码」的分类口径。
+//
+// 回归的是漏判路径：doJSON/doSearch 原先把信封的 msg **单独**传给 Classify，
+// 丢失顶层 code。而 11140 账号限制的判定是 code + 文案双条件（IsAccountRestricted），
+// 于是 HTTP 200 形态的 11140 一律落进通用 4xx 兜底（ErrClient：只换号、不罚号）——
+// 该号不被禁用、也不终止轮转，同一份请求继续灌给余下账号（整池连坐）。
+func TestEnvelopeErrorBodyKeepsCode(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want ErrKind
+	}{
+		{"英文 11140", `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		{"中文 11140", `{"code":11140,"msg":"账号存在异常行为，已被限制使用"}`, ErrAccountFault},
+		{"14017 试用未激活仍可自愈", `{"code":14017,"msg":"trial not activated"}`, ErrAccountFault},
+		// 11140 的模型级限流变体：有 code 但无限制文案，必须仍是软限流（不能因
+		// code 11140 就一刀切成账号故障——那是 issue #175 家族的反向误伤）。
+		{"11140 模型限流变体", `{"code":11140,"msg":"The model provider is rate-limiting requests."}`, ErrSoftRate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			c := &Client{HTTP: srv.Client()}
+			req, err := http.NewRequest("POST", srv.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.doJSON(req)
+			var ue *Error
+			if !errors.As(err, &ue) {
+				t.Fatalf("want *upstream.Error, got %v", err)
+			}
+			if ue.Kind != tc.want {
+				t.Errorf("kind=%s want %s", ue.Kind, tc.want)
+			}
+		})
+	}
+}
+
+// TestEnvelopeErrorBodyQuotesMsg 中文与引号必须原样进入最小信封：中文被转义成
+// \uXXXX 会让 IsAccountBanned/IsAccountRestricted 的中文文案分支匹配不上。
+func TestEnvelopeErrorBodyQuotesMsg(t *testing.T) {
+	got := envelopeErrorBody(11140, `账号存在异常行为，已被限制使用"备注"`)
+	if !strings.Contains(got, "账号存在异常行为") {
+		t.Fatalf("中文被转义，文案分支会失效: %s", got)
+	}
+	if !hasBusinessCode(got, "11140") {
+		t.Fatalf("重构出的信封必须能被 hasBusinessCode 解析: %s", got)
+	}
+	if !IsAccountRestricted(got) {
+		t.Fatalf("重构出的信封必须命中账号限制判定: %s", got)
 	}
 }

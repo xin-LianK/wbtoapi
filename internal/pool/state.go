@@ -632,6 +632,9 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。
 		st.DisabledReason = e.reason
+		// 本地封禁判定（reason 带 ban-detected 前缀）可能误判：面板据此提示
+		// 「疑似误封」并提供一键解封。见 BanDetectedPrefix 注释。
+		st.BanSuspect = strings.HasPrefix(e.reason, BanDetectedPrefix)
 	}
 	if st.Cooling {
 		// 冷却剩余秒数（向上取整，避免 0 显示为已到期）。

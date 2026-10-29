@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -865,6 +866,185 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	st, _ := p.Status("u1")
 	if !st.Disabled {
 		t.Errorf("account should be disabled: %+v", st)
+	}
+}
+
+// TestChatAccountBannedStopsRotation 上游返回「账号被禁用/封禁」字段时的核心保护：
+// 硬禁用当事号 **并立即终止轮转**——不再把同一份请求灌给池里剩下的健康号。
+//
+// 理由：这类封禁几乎总是由本请求这个形态触发的风控判定（同一份指纹/同一段内容被
+// 判异常），换号重试等于排队去撞同一套规则，一个请求就能把整池号逐个打成封禁
+// （"全军覆没"）。断言：只打一次上游、另一个号零调用且零惩罚、客户端拿到 403
+// account_banned + 上游原文。
+func TestChatAccountBannedStopsRotation(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 403, `{"code":11014,"msg":"account is disabled"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "banned", AccessToken: "at-banned", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("banned", 2000, 0) // 确定性源 r=0 → 先选 banned
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d body=%s (want 403 account_banned)", rec.Code, rec.Body)
+	}
+	if calls["Bearer at-banned"] != 1 || calls["Bearer at-good"] != 0 {
+		t.Errorf("calls=%v want banned 1 次、good 0 次（封号后必须停止轮转）", calls)
+	}
+	if st, _ := p.Status("banned"); !st.Disabled {
+		t.Errorf("被封禁的号必须被硬禁用（退出选号）: %+v", st)
+	}
+	// 其余账号完好：没有连坐（不冷却/不熔断/不禁用）。
+	if st, _ := p.Status("good"); st.Disabled || st.Cooling || st.ErrTotal != 0 || st.BreakerFails != 0 {
+		t.Errorf("封号 fail-fast 不得惩罚未参与轮转的号: %+v", st)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "account_banned") {
+		t.Errorf("响应应带 account_banned code: %s", body)
+	}
+	if !strings.Contains(body, "account is disabled") {
+		t.Errorf("响应应透传上游原文: %s", body)
+	}
+}
+
+// TestChatAccountRestrictedStopsRotation 11140「request illegal」账号限制与封禁同族
+// （banKind 的第二个来源）：同样硬禁用 + 终止轮转，而不是只禁用继续换号。
+func TestChatAccountRestrictedStopsRotation(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 403, `{"code":11140,"msg":"request illegal"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "restricted", AccessToken: "at-restricted", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("restricted", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+
+	if calls["Bearer at-restricted"] != 1 || calls["Bearer at-good"] != 0 {
+		t.Errorf("calls=%v want restricted 1 次、good 0 次（账号限制同样停止轮转）", calls)
+	}
+	if st, _ := p.Status("restricted"); !st.Disabled {
+		t.Errorf("11140 账号限制必须硬禁用: %+v", st)
+	}
+	// 403 而非 503：503 会被 OpenAI 系 SDK 当可重试错误，而客户端重试是一次全新
+	// 请求、会重新选号（被禁的号已退出池子），等于把连坐搬到跨请求。
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d want 403 account_restricted body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "account_restricted") {
+		t.Errorf("响应应带 account_restricted code: %s", rec.Body)
+	}
+}
+
+// TestChatAccountRestrictedCnStopsRotation 11140 的**中文本地化**文案
+// 「账号存在异常行为，已被限制使用」与英文 "request illegal" 同族。
+//
+// 回归的是漏判路径：此前 IsAccountRestricted 只认英文串，中文形态落到通用 4xx
+// 兜底（ErrClient：只换号、不罚号）——该号既不会被禁用，也不会终止轮转，于是
+// 同一份请求继续灌给池里余下账号，每个账号都撞同一套风控（整池连坐的入口）。
+func TestChatAccountRestrictedCnStopsRotation(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 403, `{"code":11140,"msg":"账号存在异常行为，已被限制使用"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "restricted", AccessToken: "at-restricted", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("restricted", 2000, 0) // 确定性源 r=0 → 先选 restricted
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+
+	if calls["Bearer at-restricted"] != 1 || calls["Bearer at-good"] != 0 {
+		t.Errorf("calls=%v want restricted 1 次、good 0 次（中文 11140 同样停止轮转）", calls)
+	}
+	if st, _ := p.Status("restricted"); !st.Disabled {
+		t.Errorf("中文 11140 必须硬禁用（不是只换号）: %+v", st)
+	}
+	// 未参与轮转的号不能被连坐惩罚。
+	if st, _ := p.Status("good"); st.Disabled || st.Cooling || st.ErrTotal != 0 || st.BreakerFails != 0 {
+		t.Errorf("中文 11140 fail-fast 不得惩罚未参与轮转的号: %+v", st)
+	}
+	// 上游中文原文必须透传（用户/运维据此去官方渠道申诉），不能被网关改写成英文。
+	if body := rec.Body.String(); !strings.Contains(body, "账号存在异常行为") {
+		t.Errorf("响应应透传上游中文原文: %s", body)
+	}
+	// 中文形态同样必须 403：503 会被 SDK 当可重试，重试就是新请求、会重新选号。
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code=%d want 403 account_restricted body=%s", rec.Code, rec.Body)
+	}
+}
+
+// TestChatTrialNotActivatedKeeps503 14017（trial not activated）与 11140 同属
+// ErrAccountFault，但语义完全不同：它是**可自愈**的授权状态（补完 register 即恢复），
+// 所以必须保持 503 可重试语义、保持软冷却，不能被 11140 的 403 + 硬禁用误吞。
+func TestChatTrialNotActivatedKeeps503(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 429, `{"code":14017,"msg":"trial not activated"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "trial", AccessToken: "at-trial", ExpiresAt: 9999999999})
+	p.SetCredits("trial", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("code=%d want 503（14017 可自愈，不能返回 403）body=%s", rec.Code, rec.Body)
+	}
+	if st, _ := p.Status("trial"); st.Disabled {
+		t.Errorf("14017 不得硬禁用（补完 register 可恢复）: %+v", st)
+	}
+}
+
+// TestChatAccountBannedContinueRotationWhenStopDisabled pool.stop_on_ban=false 的
+// 逃生门：当事号仍被禁用，但轮转继续，其余健康号照常服务（旧行为）。
+func TestChatAccountBannedContinueRotationWhenStopDisabled(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		if strings.Contains(authz, "banned") {
+			return 403, `{"code":11014,"msg":"account is disabled"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "banned", AccessToken: "at-banned", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("banned", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up}) // StopOnBan 缺省 false = 旧行为
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s (stop_on_ban=false 时应换号成功)", rec.Code, rec.Body)
+	}
+	if calls["Bearer at-banned"] != 1 || calls["Bearer at-good"] != 1 {
+		t.Errorf("calls=%v want banned 1 次、good 1 次（继续轮转）", calls)
+	}
+	if st, _ := p.Status("banned"); !st.Disabled {
+		t.Errorf("被封禁的号仍必须禁用: %+v", st)
 	}
 }
 
@@ -2052,5 +2232,53 @@ func TestModelsHiddenFiltered(t *testing.T) {
 	}
 	if ids["cn:deepseek-v3"] {
 		t.Errorf("hidden model leaked into /v1/models: ids=%v", ids)
+	}
+}
+
+// TestBanAlertNotifiesWithReviveHint 封禁必须推告警，且告警正文要写清两件事：
+//   1. 这是**本地规则判定**，可能误判；
+//   2. 核实后可在面板一键解封（Pool.Revive 会一并清冷却/熔断）。
+// 只推「账号被禁用」会让运维以为只能申诉/重登，把可能健康的号白白丢掉。
+func TestBanAlertNotifiesWithReviveHint(t *testing.T) {
+	got := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		select {
+		case got <- string(b):
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := notify.New(notify.Config{
+		Enabled: true,
+		URL:     srv.URL,
+		Format:  notify.FormatGeneric,
+		Timeout: 3 * time.Second,
+	})
+	if n == nil {
+		t.Fatal("notifier 构造失败")
+	}
+
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 403, `{"code":11140,"msg":"账号存在异常行为，已被限制使用"}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "restricted", AccessToken: "at-restricted", ExpiresAt: 9999999999})
+	p.SetCredits("restricted", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true, Notify: n})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+
+	select {
+	case body := <-got:
+		for _, want := range []string{"解封", "误判"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("告警正文缺少 %q（运维据此决定要不要解封）: %s", want, body)
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("封禁后没有收到告警（notify 未触发）")
 	}
 }

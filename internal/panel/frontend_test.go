@@ -1604,3 +1604,31 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+
+// TestAppJSBanSuspectHint 账号池必须能标出「疑似误封」并给出一键解封入口。
+//
+// 背景：封禁判定是网关**本地规则**做的（封禁文案匹配 / 11140 推断），会误伤——
+// 文案撞词、临时风控、上游改文案都可能把一个健康号标成封禁。此前面板统一显示
+// 「已禁用」+「解冻」，运维无从判断是真封还是误判，很可能把好号当死号扔了。
+// 本测试钉住三件事：读 ban_suspect 字段、显示疑似误封文案、绑定 revive 解封。
+func TestAppJSBanSuspectHint(t *testing.T) {
+	raw, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+	for _, want := range []string{
+		"s.ban_suspect",      // 消费后端字段
+		"疑似误封",             // 状态标签文案
+		"stripBanPrefix",     // 剥掉机器前缀再展示给用户
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js 缺少 %q：面板无法提示可能的误封/解封路径", want)
+		}
+	}
+	// 解封入口必须落在既有的 revive 动作上（Pool.Revive 会一并清冷却/熔断），
+	// 不能另开一个只清 disabled 的弱接口。
+	if !strings.Contains(js, "data-a=\"revive\"") {
+		t.Errorf("app.js 缺少 revive 操作绑定：疑似误封无法一键解封")
+	}
+}
