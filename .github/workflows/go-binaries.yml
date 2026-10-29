@@ -111,9 +111,13 @@ jobs:
           fetch-depth: 0   # 取历史 tag 算 compare 链接
       - name: tag 与源码版本一致性断言
         run: |
+          # 两侧都归一到「纯版本号」再比：appVersion 与 tag 都带 -panel 后缀，
+          # 只剥一侧会让 v1.15.x-panel 永远比不相等（v1.15.1/v1.15.2 的 tag
+          # 发布就是这样静默失败的——构建全绿，只有 publish 挂，Release 从未生成）。
           SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
-          SRC="${SRC%-panel}"   # appVersion 带 -panel 后缀，比对前剥掉
+          SRC="${SRC%-panel}"
           TAG="${GITHUB_REF_NAME#v}"
+          TAG="${TAG%-panel}"
           if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
             if [[ "$TAG" != "$SRC" ]]; then
               echo "::error::tag $GITHUB_REF_NAME 与源码 appVersion=$SRC 不一致（先提交版本号再打 tag）"
@@ -122,6 +126,7 @@ jobs:
           else
             echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$TAG src=$SRC"
           fi
+          echo "version assert OK: tag=$TAG src=$SRC"
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -135,10 +140,13 @@ jobs:
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}-panel
+          # 只取 ref_name：原先再加 "-panel" 会得到 v1.15.3-panel-panel。
+          name: ${{ github.ref_name }}
           prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             CI 自动构建发布（五平台二进制 + checksums）。
+            `linux/amd64` 的 Docker 镜像包（`wb2api-vX.Y.Z.tar.gz`，内含 `wb2api:local` 与
+            `wb2api:vX.Y.Z-panel` 双 tag）由本地打包后追加为附件，飞牛部署用它。
 
             完整变更：https://github.com/${{ github.repository }}/compare/${{ steps.prev.outputs.prev }}...${{ github.ref_name }}
           files: dist/*
