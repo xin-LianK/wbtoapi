@@ -48,6 +48,20 @@ func (s *upstreamStamps) gap() time.Duration {
 }
 
 // TestPacingSpacesOutboundRequests 同一账号连续两次请求，出站间隔必须 ≥ MinInterval。
+//
+// 容差说明（这是修 flaky，不是放宽断言）：断言比较的两个 time.Time 都取自
+// **upstream 收到请求**的时刻，而 pace.Wait 决定的是「Wait 何时返回」。两者之间
+// 还夹着构建请求体 / 选号 / 持锁等处理，且第一次请求往往承担冷路径开销（首次
+// 构建、缓存未热），δ₁ 常大于 δ₂：
+//
+//	间隔 = gap + (δ₂ - δ₁)
+//
+// 于是间隔会**合理地**略小于 gap（实测 119.6ms vs 120ms），在负载高的机器上
+// （全量测试并行跑）这个差值会被放大，导致断言偶发失败——它测的其实是调度抖动，
+// 不是 Pacer 有没有接线。
+//
+// 容差取 gap 的 1/8：Pacer 真没接上时间隔≈0（两个请求连着打），仍在检出范围内；
+// 上界用 3×gap 兜「重复计时」（Wait 被调用两次会把间隔推到 240ms）。
 func TestPacingSpacesOutboundRequests(t *testing.T) {
 	st := &upstreamStamps{}
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
@@ -69,8 +83,11 @@ func TestPacingSpacesOutboundRequests(t *testing.T) {
 	if got := st.count(); got != 2 {
 		t.Fatalf("期望 2 次出站，got %d", got)
 	}
-	if d := st.gap(); d < gap {
-		t.Fatalf("出站间隔 %v < MinInterval %v —— Pacer 没接在发请求之前", d, gap)
+	const tolerance = gap / 8
+	if d := st.gap(); d < gap-tolerance {
+		t.Fatalf("出站间隔 %v < MinInterval %v（容差 %v）—— Pacer 没接在发请求之前", d, gap, tolerance)
+	} else if d > 3*gap {
+		t.Fatalf("出站间隔 %v 远超 MinInterval %v —— Wait 可能被重复调用（重复计时）", d, gap)
 	}
 }
 

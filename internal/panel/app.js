@@ -456,6 +456,23 @@ function renderAccounts(list) {
         '  ' + c.model + '：' + (c.cost_per_1k <= 0 ? '免费' : c.cost_per_1k)).join('\n');
     }
     const frozen = s.disabled || cool > 0;
+    // 在途/上限：分母是该号**生效**的上限（global 域走 max_in_flight_global 分档，
+    // 由后端 pool.in_flight_limit 直出）。旧版只显示分子，只能看出「有没有请求在跑」，
+    // 看不出「还剩几个名额」——5 个号跑 3 个 agent 时，余量必须靠分母才能一眼判断。
+    // 0 = 未设上限（老配置兼容），显示「x/不限」而不是「x/0」，避免被读成已满。
+    const inflight = s.in_flight || 0;
+    const inflightLimit = s.in_flight_limit || 0;
+    const inflightFull = inflightLimit > 0 && inflight >= inflightLimit;
+    const inflightCell = inflightLimit > 0
+      ? '<span' + (inflightFull ? ' style="color:var(--warn);font-weight:600"' : '') + '>' + inflight
+        + '</span><span class="of">/' + inflightLimit + '</span>'
+      : inflight + '<span class="of">/不限</span>';
+    const inflightTip = inflightLimit > 0
+      ? '在途 ' + inflight + ' / 上限 ' + inflightLimit
+        + (inflightFull ? '\n该号名额已满：新请求会自动分流到其他账号' : '')
+        + '\n全池占满时直接返回 503 no_healthy_account（不排队等待）'
+        + '\n上限来自 pool.max_in_flight' + (s.realm === 'global' ? '_global（国际版分档）' : '')
+      : '在途 ' + inflight + '\n未设上限（pool.max_in_flight = 0 表示不限）';
     const tu = s.token_usage || {};
     const req = tu.request_count || 0;
     const totalTok = formatTokenCount(tu.total_tokens);
@@ -469,7 +486,7 @@ function renderAccounts(list) {
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
-      '<td class="num">' + (s.in_flight || 0) + '</td>' +
+      '<td class="num" title="' + esc(inflightTip) + '">' + inflightCell + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
         '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
         '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
