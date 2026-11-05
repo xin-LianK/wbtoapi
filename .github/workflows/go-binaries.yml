@@ -13,6 +13,8 @@ name: go-binaries
 on:
   push:
     branches: [main]
+    # 正式版本的 Release 由 tag 触发（见 release 任务）；只推 main 只更新 latest 滚动包。
+    tags: ["v*"]
   pull_request:
     paths:
       - "go.mod"
@@ -265,13 +267,12 @@ jobs:
             gh release create latest dist/* --title "$TITLE" --notes "$NOTES" --latest=false --verify-tag
           fi
 
-  # 仅 push main：appVersion 对应的 vX.Y.Z 标签还不存在（这次推送升了版本号）时，打标签并建正式 Release，
-  # 说明取 docs/CHANGELOG.md 里这一版的条目，附五平台包（文件名带版本号）和 checksums。标签已在更早的提交上
-  # （版本号没变）就跳过。不受 rolling 的「过时跳过」影响：每个版本都要有自己的 Release。
-  # 上一次发版中途失败、标签没打上时，下一次推送会补发（标签落在那次推送的提交上）。
+  # 仅 tag 发布：tag 的版本号必须与 appVersion 一致，说明取 docs/CHANGELOG.md 里这一版的条目，
+  # 附五平台包（文件名带版本号）和 checksums。push main 只更新 latest 滚动包（见 rolling），
+  # 两条路互不影响：发版中途失败时，重推同一个 tag 会补发 Release。
   release:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -282,8 +283,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # 取已有的版本标签，算对比链接
-      - name: 判断是否新版本
-        id: ver
+      - name: tag 与源码版本一致性断言
         run: |
           # 两侧都归一到「纯版本号」再比：appVersion 与 tag 都带 -panel 后缀，
           # 只剥一侧会让 v1.15.x-panel 永远比不相等（v1.15.1/v1.15.2 的 tag
@@ -298,17 +298,18 @@ jobs:
               exit 1
             fi
           else
-            echo "new=true" >> "$GITHUB_OUTPUT"
+            echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$TAG src=$SRC"
           fi
           echo "version assert OK: tag=$TAG src=$SRC"
       - uses: actions/download-artifact@v4
-        if: steps.ver.outputs.new == 'true'
         with:
           pattern: wb2api-panel-*
           path: dist
           merge-multiple: true
-      - name: 本版说明 + checksums
-        if: steps.ver.outputs.new == 'true'
+      - name: checksums
+        run: cd dist && sha256sum *.zip *.tar.gz > checksums.txt && ls -la
+      - name: 上一版 tag（compare 链接用）
+        id: prev
         run: |
           PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
