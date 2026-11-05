@@ -868,7 +868,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		// 域用上面已定好的 realm（跨域合池时为 ""，国内版优先时为此刻该用的域）：粘性候选若自己按模型名再判一次，
 		// 不带前缀的名字一律算国内版，合池时会话永远只绑国内版号，国际版号轮不到。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, bareModel, realm, tried); ok {
+		// 有序策略（轮询/顺序耗尽）下选号必须由池的游标决定：会话层只查已有绑定，
+		// 不按 key 哈希分配，否则第一个请求就会跳到队列中间的号。
+		resolve := h.cfg.Session.ResolveForModel
+		if h.cfg.Pool.StrategyForRealm(realm) != pool.WeightedRandom {
+			resolve = h.cfg.Session.LookupForModel
+		}
+		if uid, ok := resolve(sessKey, bareModel, realm, tried); ok {
 			stickyUID = uid
 		}
 	}
@@ -1688,6 +1694,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 含 requestId，客户端按 SDK 退避重试即可。
 			code = "upstream_busy"
 			msg = "upstream capacity is full (queue.full); retry after a short wait"
+		case upstream.ErrQueueUserLimit:
+			// 6022「这个号排队的数量到上限」：轮转循环里已换过号（所有号都这样才走到
+			// 这里），不罚号。回 503 upstream_busy，hint 里带 6022 的说明。
+			code = "upstream_busy"
 		case upstream.ErrAccountFault:
 			// 11140 账号限制（异常行为/风控）是**终态**：该号已被 applyErrorPolicy 硬
 			// 禁用，本次请求的轮转也已被 stopRotationOnBan 终止。这里用 403 而不是默认
@@ -2086,11 +2096,22 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 注意 11128 的 msg 同为 "request illegal"，但那是通道校验失败，已在
 		// Classify 分流到 ErrChannelRefused，走不到这里。
-		if upstream.IsAccountRestricted(body) {
+		// 走到这个分支说明 Classify 已经排除了 11128 通道校验（那里文案同为
+		// "request illegal"），所以这里只凭文案判 11140 也安全；带业务码时再走
+		// IsAccountRestricted 的严格判定。
+		if upstream.IsAccountRestricted(body) || strings.Contains(strings.ToLower(body), "request illegal") {
+			// 已禁用的号（测活复测）再回 11140 不是新的风控：不记风控波，
+			// 否则复测两个早就被限制的号就会把同域其余账号一起暂停。
+			before, _ := h.cfg.Pool.Status(uid)
 			h.cfg.Pool.Disable(uid, accountRestrictedReason)
+			if !before.Disabled {
+				h.cfg.Pool.NoteRestriction(uid)
+			}
 			return
 		}
-		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
+		// 14015 授权过期、14016 企业未激活、14017 trial not activated 都可自愈，
+		// 统一软冷却，原因文案带上真实业务码（面板要能分清是哪种）。
+		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), upstream.AccountFaultReason(body))
 	case upstream.ErrAccountBanned:
 		// 账号被上游禁用/封禁（disabled / banned / suspended / 封禁 等字段）：
 		// 与 11140 账号限制同族的**终态**——重登、补 register、等冷却都救不回来，
@@ -2132,7 +2153,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// (账号, 模型) 负缓存避让。复用 modelCooldowns 机制（与 6004 同域），
 		// 选号侧 healthyForModel 对该账号自动避开该模型。
 		// 立即换号（本轮 continue），该账号该模型冷却，下次选号避开。
-		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReasonFor(body))
+		reason := upstream.ModelBlockReasonFor(body)
+		if reason == upstream.ModelForbiddenReason {
+			// 11158 是账号类型级的确定性拒绝（换时间也不会好）：进「不接的模型」名单，
+			// 一直生效，面板可见、可手动加删。
+			h.cfg.Pool.BlockModelForever(uid, model, reason)
+			return
+		}
+		h.cfg.Pool.BlockModelBackoff(uid, model, reason)
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
 		// ErrClient（未知 4xx）喂连败计数（issue #114）：连续 N 次该形态失败 →

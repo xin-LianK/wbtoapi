@@ -121,7 +121,8 @@ func (h *Handler) searchRealm(model string, tried map[string]bool) (realm string
 // searchPenalized 搜索失败里说明号本身有状况的几类，和对话一样罚号。
 func searchPenalized(kind upstream.ErrKind) bool {
 	switch kind {
-	case upstream.ErrHardCredit, upstream.ErrSoftRate, upstream.ErrSessionDead, upstream.ErrAccountFault, upstream.ErrWafBlock:
+	case upstream.ErrHardCredit, upstream.ErrSoftRate, upstream.ErrSessionDead, upstream.ErrAccountFault,
+		upstream.ErrAccountBanned, upstream.ErrWafBlock:
 		return true
 	}
 	return false
@@ -171,8 +172,12 @@ func (h *Handler) runSearch(ctx context.Context, q upstream.SearchQuery, model s
 				h.cfg.Pool.Release(acct.UID)
 				lastErr = err
 				var ue *upstream.Error
-				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+				if errors.As(err, &ue) {
+					h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, "", ue)
+					// refresh 撞封禁：与 chat 同口径直接终止轮转（该号已被硬禁用）。
+					if h.stopRotationOnBan(acct, ue.Kind, ue.Msg) {
+						return nil, h.searchGaveUp(lastErr, &slot)
+					}
 				} else if !upstream.IsRouteError(err) {
 					h.cfg.Pool.NoteError(acct.UID) // 号的代理连不上不罚号
 				}
@@ -218,6 +223,11 @@ func (h *Handler) runSearch(ctx context.Context, q upstream.SearchQuery, model s
 			return nil, f
 		} else if searchPenalized(ue.Kind) {
 			h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, "", ue)
+			// 封号保护与对话同口径：命中封禁族立即终止轮转，不把同一份搜索请求
+			// 继续灌给余下健康号（封禁按请求形态连坐）。
+			if h.stopRotationOnBan(acct, ue.Kind, ue.Msg) {
+				return nil, h.searchGaveUp(lastErr, &slot)
+			}
 			if ue.Kind == upstream.ErrWafBlock {
 				if _, stop := h.noteWafBlock(acct.UID, tried, "", realm); stop {
 					break // 出口 IP 被 WAF 拦了，别的出口也没有号能接：换号不换 IP（同对话）
@@ -263,6 +273,12 @@ func (h *Handler) searchGaveUp(lastErr error, slot *slotWait) *searchFailure {
 		f.code, f.hint = "search_failed", h.hintOf(ue.Kind, ue.Msg, "", false, ue)
 		if ue.Kind == upstream.ErrSoftRate {
 			f.status, f.code = http.StatusTooManyRequests, "rate_limit_exceeded"
+		}
+		// 封禁 / 11140 受限回 403：503 在 SDK 眼里可重试，重试是新请求会重新选号，
+		// 等于把「停止轮转」的连坐保护搬到跨请求去。与对话出口同口径。
+		if ue.Kind == upstream.ErrAccountBanned ||
+			(ue.Kind == upstream.ErrAccountFault && upstream.IsAccountRestricted(ue.Msg)) {
+			f.status, f.code = http.StatusForbidden, "account_restricted"
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			f.msg = s

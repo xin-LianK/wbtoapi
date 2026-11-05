@@ -732,6 +732,11 @@ func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
 func (s *Scheduler) RunBalanceRefreshNow() {
+	// 没装配账号池或上游客户端时直接返回：单测会只构造 Scheduler 来验证排程逻辑，
+	// 生产路径上两者一定非空（main 里先建池再建调度器）。
+	if s == nil || s.cfg.Pool == nil || s.cfg.Upstream == nil {
+		return
+	}
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 func TestPrepareBodyForcesStream(t *testing.T) {
@@ -964,17 +965,20 @@ func TestUserResourceSnapshotDeductionEndTime(t *testing.T) {
 	day2Later := day2.Add(3 * time.Hour) // 同一天 12:00
 	cycleOnly := day2.Add(14 * 24 * time.Hour)
 	far := time.Date(today.Year()+9, today.Month(), today.Day(), 9, 0, 0, 0, softRateResetLoc)
-	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
-		`{"PackageName":"gift-a","CycleCapacitySize":100,"CycleCapacityRemain":100,"CycleEndTime":"` + day2.Format(packageEndLayout) + `"},` +
-		`{"PackageName":"gift-b","CycleCapacitySize":50,"CycleCapacityRemain":50,"CycleEndTime":"` + day2Later.Format(packageEndLayout) + `"},` +
-		`{"PackageName":"experience","CycleCapacitySize":500,"CycleCapacityRemain":488,"CycleEndTime":"` +
-		cycleOnly.Format(packageEndLayout) + `","DeductionEndTime":` + strconv.FormatInt(far.UnixMilli(), 10) + `}` +
-		`]}}}}`
+	// 三个包走逐包接口（免费包）：汇总 404 时网关用逐包合计，正好验证这条兜底。
+	freePacks := []string{
+		upstreamtest.Package(100, 100, `"PackageName":"gift-a","CycleEndTime":"`+day2.Format(packageEndLayout)+`"`),
+		upstreamtest.Package(50, 50, `"PackageName":"gift-b","CycleEndTime":"`+day2Later.Format(packageEndLayout)+`"`),
+		// 一次性发放的包（activity）才按 DeductionEndTime 算到期；PackageCode 决定这一点，
+		// 所以这里必须带上（真实上游一定下发）。
+		upstreamtest.Package(500, 488, `"PackageName":"experience","PackageCode":"TCACA_code_007_nzdH5h4Nl0","CycleEndTime":"`+
+			cycleOnly.Format(packageEndLayout)+`","DeductionEndTime":`+strconv.FormatInt(far.UnixMilli(), 10)),
+	}
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
-			return nil, errors.New("wrong path: " + r.URL.Path)
+		if resp, ok := billingResp(r.URL.Path, freePacks...); ok {
+			return resp, nil
 		}
-		return jsonResp(200, payload), nil
+		return nil, errors.New("wrong path: " + r.URL.Path)
 	})
 
 	remain, total, expiring, earliestAt, earliestRemaining, buckets, err := c.UserResourceSnapshot(

@@ -1,0 +1,253 @@
+--- FAIL: TestSaveConfigEBUSYFallbackCloseError (1.99s)
+    testing.go:1617: TempDir RemoveAll cleanup: unlinkat C:\Users\zp\AppData\Local\Temp\TestSaveConfigEBUSYFallbackCloseError1163382860\001\config.json: The process cannot access the file because it is being used by another process.
+--- FAIL: TestStateSiblingAndUsagePath (0.00s)
+    main_funcs_test.go:49: stateSibling("/var/lib/wb/state.json","output_probes.json")="\\var\\lib\\wb\\output_probes.json" want "/var/lib/wb/output_probes.json"
+--- FAIL: TestRestartRequiredFields (0.00s)
+    main_funcs_test.go:100: 空配置应只有固定项: [upstream.timeout_seconds upstream.header_timeout_seconds upstream.idle_timeout_seconds upstream.user_agent cn.chat_base session_sticky.ttl session_sticky.gc_interval server.read_timeout]
+2026/11/05 10:07:32 WARN: [upstream] model catalog (cn): v3/config status 400: {"code":400}，每 1m0s 重试
+--
+--- FAIL: TestLoadOrInitConfig (0.02s)
+    --- FAIL: TestLoadOrInitConfig/目录不可写时退回默认配置 (0.01s)
+        run_test.go:275: 默认配置不对: &{Listen::7863 APIKey:sk-NKor-vzOT1ULV8apgcrSKM53 AuthDir:./auths StateFile:./data/state.json DNSServers:[] ModelRoutes:[] Panel:{PackageDetailLimit:5 UpdateCheck:true} Logging:{RequestArchiveEnabled:true RequestRetentionDays:7 RequestArchiveMaxMB:100 RequestClientInfo:true TaskLogEnabled:true TaskLogRetentionDays:30 TaskLogMaxMB:20 SystemLogEnabled:true SystemLogRetentionDays:30 SystemLogMaxMB:50 UsageRetentionDays:0 CreditLogEnabled:true CreditLogRetentionDays:0 CreditLogMaxMB:20} Server:{ReadTimeout:300s} Cooldown:{SoftRate:600s SoftRateMax:2h} Schedule:{CheckinHours:[9 21] TravelHours:[9 21] ActivityHours:[10] KeepaliveHours:[22] BlackcatHours:[23] GrowthHours:[1] CheckinEnabled:true TravelEnabled:true ActivityEnabled:true KeepaliveEnabled:true BlackcatEnabled:true GrowthEnabled:true IncludeDisabledInTasks:false BalanceRefreshEnabled:true BalanceRefreshMinutes:5 TaskSweepEnabled:true TaskSweepMinutes:15 TaskDiscoverAutoRun:true LivenessEnabled:true LivenessMinutes:30} Global:{Enabled:true ChatBase: BillingBase:} CN:{ChatBase:} Upstream:{TimeoutSeconds:120 HeaderTimeoutSeconds:120 IdleTimeoutSeconds:300 UserAgent: ClientVersion: CliVersion: ClientName: Profile: IDEVersion: Product: DeviceToken: DeviceTokenFile: ChatDeviceToken:false PassthroughIP:false ModelOptimization:false TLSFingerprint:true} Features:{SanitizeBlacklistFingerprints:true} Models:{Hidden:[] Alias:map[]} Prompt:{Mode:passthrough File:} PromptText: Upstash:{URL: Token:} Pool:{Strategy:{Domestic:weighted_random International:weighted_random} AccountOrder:{Domestic:[] International:[]} MaxInFlight:3 MaxInFlightGlobal:2 InFlightWait:30s MaxRPM:0 MaxRPMGlobal:0 BreakerThreshold:3 BreakerCooldown:30m BreakerCooldownMax:6h DegradeThreshold:5 DegradeCooldown:10m DegradeCooldownMax:2h IdleWeightPerHour:0.5 IdleWeightMax:5 PreferExpiring:true ExpiringSoon:168h CostExploreInterval:30m CreditFloor:0 CrossDomainFallback:false StopOnBan:true CrossRealm:off RestrictionWaveThreshold:2 RestrictionWaveWindow:15m RestrictionWavePause:30m} SessionSticky:{Enabled:true TTL:30m GCInterval:5m} Pacing:{Enabled:true MinIntervalMS:120 JitterMS:180 PerMinute:90} Notify:{Enabled:true URL: Format:bark Token: ChatID: MinIntervalMinutes:10} Backup:{Enabled:true Dir: IntervalHours:24 Keep:7} Update:{Enabled:true Repo:xin-LianK/wbtoapi CheckHours:12} SoftRateDur:10m0s SoftRateMaxDur:2h0m0s BreakerCooldownDur:30m0s BreakerCooldownMaxD:6h0m0s DegradeCooldownDur:10m0s DegradeCooldownMaxD:2h0m0s SessionTTL:30m0s SessionGCInterval:5m0s BalanceRefreshInterval:5m0s TaskSweepInterval:15m0s LivenessInterval:30m0s ExpiringSoonDur:168h0m0s CostExploreIntervalDur:30m0s InFlightWaitDur:30s RestrictionWaveWindowDur:15m0s RestrictionWavePauseDur:30m0s ServerReadTimeoutDur:5m0s PacingCfg:{MinInterval:120ms Jitter:180ms PerMinute:90}}
+--
+--- FAIL: TestSigninSaveFailureLog (0.03s)
+    main_more_test.go:104: 写回失败应打日志，实际日志=""
+FAIL
+--
+--- FAIL: TestCreate (0.01s)
+    apikeys_test.go:75: 文件应已写入且为 0600: &{api_keys.json 32 {1700089546 31288522} {1700094857 31288522} {1700094857 31288522} 0 573 0 0 {{} {0 0}} C:\Users\zp\AppData\Local\Temp\TestCreate2961938289\001\data\api_keys.json 0 0 0 false} <nil>
+2026/11/05 10:07:23 [apikeys] 写 C:\Users\zp\AppData\Local\Temp\TestSaveFailureRollsBack2123750121\001\api_keys.json 失败: open C:\Users\zp\AppData\Local\Temp\TestSaveFailureRollsBack2123750121\001\api_keys.json.tmp: is a directory
+--
+--- FAIL: TestSaveAtomicRefusals (0.02s)
+    auth_more_test.go:198: 不可写目录应报错，got <nil>
+2026/11/05 10:07:23 WARN: auth c1 realm backfill save: 写入 C:\Users\zp\AppData\Local\Temp\TestLoadDirBackfillWriteFailureDoesNotBlock314098820\001\workbuddy-c1.json.tmp 失败: open C:\Users\zp\AppData\Local\Temp\TestLoadDirBackfillWriteFailureDoesNotBlock314098820\001\workbuddy-c1.json.tmp: is a directory
+--
+--- FAIL: TestPruneDaysAndSize (0.11s)
+    --- FAIL: TestPruneDaysAndSize/目录不存在不算错，目录是文件算错 (0.01s)
+        logarchive_test.go:251: 目录是文件应记错
+--- FAIL: TestClear (0.04s)
+    logarchive_test.go:283: 目录是文件时清空应报错
+--- FAIL: TestClearRemoveError (0.01s)
+    logarchive_test.go:300: 删不掉应报错: <nil>
+--- FAIL: TestStats (0.03s)
+    logarchive_test.go:411: 目录是文件应记错
+--- FAIL: TestEdgeCases (0.01s)
+    logarchive_test.go:441: 目录是文件时读应报错
+--- FAIL: TestWriteRotateError (1.82s)
+    write_test.go:188: 应记录轮转失败: ""
+    testing.go:1617: TempDir RemoveAll cleanup: unlinkat C:\Users\zp\AppData\Local\Temp\TestWriteRotateError3171746021\001\requests-2026-11-05.1.jsonl: The process cannot access the file because it is being used by another process.
+--- FAIL: TestWriteBufWriteError (1.97s)
+    testing.go:1617: TempDir RemoveAll cleanup: unlinkat C:\Users\zp\AppData\Local\Temp\TestWriteBufWriteError2453980454\001\requests-2026-11-05.jsonl: The process cannot access the file because it is being used by another process.
+--- FAIL: TestWriteNewlineError (1.76s)
+    testing.go:1617: TempDir RemoveAll cleanup: unlinkat C:\Users\zp\AppData\Local\Temp\TestWriteNewlineError1331318515\001\requests-2026-11-05.jsonl: The process cannot access the file because it is being used by another process.
+--- FAIL: TestPruneEntryInfoError (0.01s)
+    write_test.go:311: Info 失败时不应删除文件
+FAIL
+--
+--- FAIL: TestRunAutoAllClaimsDoneButUnclaimed (0.03s)
+    autotask_claim_test.go:67: claim 调用次数 = 0, want 1（达标未领必须补领）
+2026/11/05 10:07:23 WARN: [upstream] web_session acct=u1: 获取网页登录态失败: upstream client (http 200): 登录码为空
+--
+--- FAIL: TestPanelCreditLog (0.02s)
+    creditlog_test.go:137: HTTP 200，想要 500，body={"by_account":[],"by_source":[],"count":0,"entries":[],"limit":500,"more":false,"total":0}
+2026/11/05 10:07:29 panel: 导出凭证 2 个账号
+--
+--- FAIL: TestImportCNBranches (0.03s)
+    --- FAIL: TestImportCNBranches/写盘失败记_skipped (0.02s)
+        full_more_test.go:131: 结果不对: map[errors:<nil> imported:1 notes:<nil> ok:true skipped:0 total:1]
+--
+--- FAIL: TestLoginPollSaveFailure (0.02s)
+    full_more_test.go:221: code=200 body={"checkin_message":"","credits":0,"credits_total":0,"done":true,"nickname":"x","proxy":{},"proxy_kept":false,"realm":"cn","uid":"u-save"}
+2026/11/05 10:07:29 INFO: [upstream] web_session acct=一号(u1): 已获取网页登录态
+--
+--- FAIL: TestRollbackSuccessResponse (0.01s)
+    full_more_test.go:564: code=400 body={"error":"Windows 不支持原地重启，请手动升级","ok":false}
+2026/11/05 10:07:29 INFO: [upstream] web_session acct=一号(u1): 已获取网页登录态
+--
+--- FAIL: TestKeysAPI (0.01s)
+    keys_test.go:80: 密钥文件应为 0600: &{api_keys.json 32 {1765299806 31288522} {1765299806 31288522} {1765299806 31288522} 0 659 0 0 {{} {0 0}} C:\Users\zp\AppData\Local\Temp\TestKeysAPI1317938115\001\api_keys.json 0 0 0 false} <nil>
+2026/11/05 10:07:29 [apikeys] 写 C:\Users\zp\AppData\Local\Temp\TestKeysSaveFailure1036695866\001\api_keys.json 失败: open C:\Users\zp\AppData\Local\Temp\TestKeysSaveFailure1036695866\001\api_keys.json.tmp: is a directory
+--
+--- FAIL: TestPanelLogsArchive (0.02s)
+    logstore_test.go:190: HTTP 200，想要 500，body={"entries":[],"limit":500,"more":false}
+--- FAIL: TestPanelLogStorage (0.03s)
+    logstore_test.go:294: HTTP 200，想要 500，body={"ok":true}
+2026/11/05 10:07:29 WARN: [upstream] models.dev fetch status 404 (silent fallback to 1M)
+--- FAIL: TestOverviewIncludesExpiryBuckets (0.00s)
+    overview_expiry_test.go:66: balance_refreshed_at 为零值：前端无法标注数据年龄
+--- FAIL: TestPanelRequestMetricsLogs (0.02s)
+    --- FAIL: TestPanelRequestMetricsLogs/归档读取失败_500 (0.01s)
+        panel_test.go:266: HTTP 200，想要 500，body={"entries":[],"limit":200}
+--
+--- FAIL: TestSweepFeedsDiscover (0.00s)
+    taskdiscover_test.go:211: 清扫应顺带把拉到的列表喂给发现
+2026/11/05 10:07:33 WARN: [upstream] web_session acct=u1: 获取网页登录态失败: upstream client (http 200): 登录码为空
+--
+--- FAIL: TestRunTaskDiscoverOnce (0.00s)
+    taskdiscover_test.go:247: tasks = 2, want 5（chat_5/template_9/brand_new_task/mp_only_new/Sequential_Tasks_1）
+    taskdiscover_test.go:250: new = 2, want 5（首轮全部是新码）
+--
+--- FAIL: TestTaskSweepAcceptAndClaim (0.00s)
+    tasksweep_test.go:152: accepted = 0, want 1（只有 invite_1 未接受）
+    tasksweep_test.go:156: claimed=0 credits=0 energy=0, want 2/200/10
+--
+--- FAIL: TestTaskSweepIdempotent (0.00s)
+    tasksweep_test.go:190: first round: claimed=0 credits=0, want 1/100
+2026/11/05 10:07:34 WARN: [upstream] web_session acct=u1: 获取网页登录态失败: upstream client (http 200): 登录码为空
+--
+--- FAIL: TestTaskSweepClaimErrorDoesNotBlock (0.00s)
+    tasksweep_test.go:246: claimed=0 credits=0, want 1/100（失败项不阻挡成功项）
+2026/11/05 10:07:34 WARN: [upstream] web_session acct=u1: 获取网页登录态失败: upstream client (http 200): 登录码为空
+--
+--- FAIL: TestTaskSweepSkipsBusyAccount (0.00s)
+    tasksweep_test.go:276: 解锁后 stats = {Accounts:1 Skipped:0 Accepted:0 Claimed:0 Credits:0 Energy:0 Errors:1}, want skipped=0 claimed=1
+--- FAIL: TestSelfUpdateBusy (0.01s)
+    update_more_test.go:151: 首次更新 status=400 body={"error":"Windows 不支持原地重启，请手动升级","ok":false}
+2026/11/05 10:07:34 [update] 有新版本 v1.2.0（当前 v1.1.0），面板里可以查看更新内容
+--
+--- FAIL: TestSelfUpdateEndpoints (0.01s)
+    update_test.go:255: update status=400 body={"error":"Windows 不支持原地重启，请手动升级","ok":false}
+FAIL
+--
+--- FAIL: TestFull8BlockModelBackoffEdges (0.00s)
+    full_more_test.go:117: 第三次应封顶 24h，实际 2h0m0s
+2026/11/05 10:07:23 [pool] cost explore model=m realm="" acct=u2 window=30m0s
+--
+--- FAIL: TestOpen (0.02s)
+    proxies_test.go:72: 落盘权限应为 0600: -rw-rw-rw- <nil>
+FAIL
+--
+--- FAIL: TestArchiveMkdirFailure (0.01s)
+    reqlog_more_test.go:167: 目录不可用时 ReadArchive 应报错
+FAIL
+--
+--- FAIL: TestWriteManifestStepErrors (1.78s)
+    --- FAIL: TestWriteManifestStepErrors/关闭失败 (1.76s)
+        full_more_test.go:155: 临时文件应被清掉: [- .current-28053000.json]
+--
+--- FAIL: TestLaunchEntry (0.05s)
+    --- FAIL: TestLaunchEntry/没有安装版本 (0.00s)
+        selfupdate_more_test.go:49: Updater = &{version:1.1.0 dir:C:\Users\zp\AppData\Local\Temp\TestLaunchEntry没有安装版本536962684\001\bin baseExe:C:\Users\zp\AppData\Local\Temp\go-build3638246687\b544\test.test.exe baseVersion:1.1.0 override:false unsupported:Windows 不支持原地重启，请手动升级 DownloadBase: Client:<nil> Restart:<nil> Grace:0s mu:{_:{} mu:{state:0 sema:0}} phase:idle target: done:0 total:0 err:}
+--
+--- FAIL: TestTrialRunPermissionHint (0.00s)
+    selfupdate_more_test.go:435: err = 试运行新程序失败：exec: "C:\\Users\\zp\\AppData\\Local\\Temp\\TestTrialRunPermissionHint933684274\\001\\wb2api": executable file not found in %PATH% 
+FAIL
+--
+--- FAIL: TestApplyErrorPolicyBizCodes (0.00s)
+    bizcode_policy_test.go:148: 14015：reason="account fault (14017)" 账号冷却=true
+2026/11/05 10:07:25 WARN: [upstream] chat_stream acct=u1: upstream 400 bad_params body={"code":11101,"msg":"Unmarshal chat params failed"}
+--
+--- FAIL: TestChat6022Rotates (0.00s)
+    capqueue_test.go:325: 所有号都 6022：status=503 code="no_healthy_account" msg="{\"code\":6022,\"msg\":\"queue.user_limit\"}" hint="this upstream account has too many requests waiting in the capacity queue (6022); the gateway tried other accounts; retry after a short wait"
+2026/11/05 10:07:25 WARN: [upstream] chat_stream acct=cn1: upstream 400 model_blocked body={"code":11102,"msg":"model [deepseek-v4.1-flash-sg] service info not found"}
+--
+--- FAIL: TestFull8ChatEmptyStream (0.00s)
+    full_more_test.go:433: body = "data: {\"error\":{\"message\":\"upstream returned an empty stream (transient upstream error, please retry)\",\"type\":\"upstream_error\",\"code\":\"upstream_parse\"}}\n\ndata: [DONE]\n\n"
+2026/11/05 10:07:27 WARN: [server] stream acct=u1 model=m: saw 1 native tool call block(s) but repaired none (tool names known=0)
+--
+--- FAIL: TestApplyErrorPolicyKinds (0.00s)
+    --- FAIL: TestApplyErrorPolicyKinds/账号故障按文案分野 (0.00s)
+        handler_more_test.go:334: 11140 request illegal 应禁用并提示申诉: {UID:u1 Nickname: Note: Credits:1000 CreditsTotal:0 CreditsExpiring:0 CreditsEarliestExpiry:0001-01-01 00:00:00 +0000 UTC CreditsEarliestRemaining:0 CreditsExpiryBuckets:[] Cooling:true CoolKind:soft_rate CoolRemaining:600 Until:2026-11-05 10:17:27.4483613 +0800 CST m=+604.359723801 Reason:account fault (14017) SoftStreak:0 RateLimitedModels:[] Realm:cn Enterprise:false Disabled:false DisabledReason: BanSuspect:false Paused:false ProxyBlocked: SuccessCount:0 ErrTotal:0 LastSuccessTime:0001-01-01 00:00:00 +0000 UTC LastLiveness:<nil> BlockedModels:[] Groups:[] Priority:0 LastErrTime:0001-01-01 00:00:00 +0000 UTC CheckinDone:false TokenUsage:{RequestCount:0 UsageCount:0 PromptTokens:0 CompletionTokens:0 TotalTokens:0 LastLatencyMs:0 LastTokensPerSecond:<nil> LastUsedAt:0001-01-01 00:00:00 +0000 UTC LastModel:} ModelCosts:[] ConsecutiveFails:0 DegradeUntil:0001-01-01 00:00:00 +0000 UTC InFlight:0 InFlightLimit:0 BreakerFails:0 BreakerUntil:0001-01-01 00:00:00 +0000 UTC}
+--
+--- FAIL: TestChatRegionSchedulingAndStickyPriority (0.00s)
+    handler_strategy_test.go:53: {model:cn:m conv:cn-one want:a}: status=200 selected=b body={"choices":[{"finish_reason":"stop","index":0,"message":{"content":"你好","role":"assistant"}}],"created":1753600000,"id":"chatcmpl-1","model":"glm-5.2","object":"chat.completion","usage":{"completion_tokens":1,"prompt_tokens":1,"total_tokens":2}}
+2026/11/05 10:07:27 WARN: [upstream] chat_stream acct=bad: upstream 400 bad_params body={"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}
+--
+--- FAIL: TestChatModelForbiddenByAccountTypeReturns400 (0.59s)
+    handler_test.go:1158: g1 应自动把 gpt-5.6-sol 加进名单: {UID:g1 Nickname: Note: Credits:1000 CreditsTotal:0 CreditsExpiring:0 CreditsEarliestExpiry:0001-01-01 00:00:00 +0000 UTC CreditsEarliestRemaining:0 CreditsExpiryBuckets:[] Cooling:false CoolKind: CoolRemaining:0 Until:0001-01-01 00:00:00 +0000 UTC Reason: SoftStreak:0 RateLimitedModels:[{Model:gpt-5.6-sol Kind:model_unavailable Until:2026-11-05 10:37:34.9467251 +0800 CST m=+1811.858087601 ResetAt:0001-01-01 00:00:00 +0000 UTC Reason:11158 model not allowed for account type}] Realm:global Enterprise:false Disabled:false DisabledReason: BanSuspect:false Paused:false ProxyBlocked: SuccessCount:0 ErrTotal:0 LastSuccessTime:0001-01-01 00:00:00 +0000 UTC LastLiveness:<nil> BlockedModels:[] Groups:[] Priority:0 LastErrTime:0001-01-01 00:00:00 +0000 UTC CheckinDone:false TokenUsage:{RequestCount:1 UsageCount:0 PromptTokens:0 CompletionTokens:0 TotalTokens:0 LastLatencyMs:1 LastTokensPerSecond:<nil> LastUsedAt:2026-11-05 10:07:34.9467251 +0800 CST m=+11.858087601 LastModel:gpt-5.6-sol} ModelCosts:[] ConsecutiveFails:0 DegradeUntil:0001-01-01 00:00:00 +0000 UTC InFlight:0 InFlightLimit:0 BreakerFails:0 BreakerUntil:0001-01-01 00:00:00 +0000 UTC}
+2026/11/05 10:07:35 WARN: [server] /v1/models: CN 模型目录拉取失败（5m0s 内不再重试，cn: 模型暂不列出）: v3/config status 500: boom
+--
+--- FAIL: TestTestAccountRepicksRefusedModel (3.12s)
+    --- FAIL: TestTestAccountRepicksRefusedModel/换模型测通 (0.95s)
+        liveness_test.go:295: 两个被拒的模型应自动加进名单、记下最后一次测通: [] &{At:2026-11-05 10:07:38.1849639 +0800 CST m=+15.096326401 OK:true Model:m-dear Status:200 Error: TTFBMs:0 DurationMs:1 Credit:0 Scheduled:false Recovered:false}
+--
+--- FAIL: TestResponsesNonStreamShape (0.00s)
+    responses_test.go:117: 响应形态={Object:response Status:completed OutputText: Output:[{Type:message Content:[{Type:output_text Text:答案是 42}]}] Usage:{InputTokens:9 OutputTokens:4}}
+2026/11/05 10:07:41 ERR: [upstream] chat_stream acct=u1: transport error: Post "https://fake.example/v2/chat/completions": 连不上号的代理「甲」：dial tcp <IP>:8080: connect: connection refused
+--
+--- FAIL: TestChatCacheMissNotesConversation (0.00s)
+    --- FAIL: TestChatCacheMissNotesConversation/非流式 (0.00s)
+        session_cache_test.go:112: 应记一行同号同会话 id 的 WARN，日志: ""
+--
+--- FAIL: TestSearchAccountBannedStopsRotation (1.59s)
+    stop_on_ban_coverage_test.go:110: calls=map[Bearer at-x-banned:1 Bearer at-x-good:1] want x-banned 1 次、x-good 0 次（搜索封禁也必须停止轮转）
+    stop_on_ban_coverage_test.go:113: 搜索命中的封禁号必须硬禁用: {UID:x-banned Nickname: Note: Credits:2000 CreditsTotal:0 CreditsExpiring:0 CreditsEarliestExpiry:0001-01-01 00:00:00 +0000 UTC CreditsEarliestRemaining:0 CreditsExpiryBuckets:[] Cooling:false CoolKind: CoolRemaining:0 Until:0001-01-01 00:00:00 +0000 UTC Reason: SoftStreak:0 RateLimitedModels:[] Realm:cn Enterprise:false Disabled:false DisabledReason: BanSuspect:false Paused:false ProxyBlocked: SuccessCount:0 ErrTotal:0 LastSuccessTime:0001-01-01 00:00:00 +0000 UTC LastLiveness:<nil> BlockedModels:[] Groups:[] Priority:0 LastErrTime:0001-01-01 00:00:00 +0000 UTC CheckinDone:false TokenUsage:{RequestCount:0 UsageCount:0 PromptTokens:0 CompletionTokens:0 TotalTokens:0 LastLatencyMs:0 LastTokensPerSecond:<nil> LastUsedAt:0001-01-01 00:00:00 +0000 UTC LastModel:} ModelCosts:[] ConsecutiveFails:0 DegradeUntil:0001-01-01 00:00:00 +0000 UTC InFlight:0 InFlightLimit:0 BreakerFails:0 BreakerUntil:0001-01-01 00:00:00 +0000 UTC}
+--
+--- FAIL: TestSearchAccountRestrictedCnStopsRotation (1.65s)
+    stop_on_ban_coverage_test.go:146: calls=map[Bearer at-x-good:1 Bearer at-x-restr:1] want x-restr 1 次、x-good 0 次（11140 中文同样停止搜索轮转）
+    stop_on_ban_coverage_test.go:152: want 403 account_restricted, got &{status:503 code:search_failed msg:{"code":11140,"msg":"账号存在异常行为，已被限制使用"} hint:account restricted by upstream (11140: abnormal behaviour); rotation was stopped and the account removed — retrying puts the remaining accounts at risk, appeal at the official channel to lift the restriction}
+--
+--- FAIL: TestPersistRoundTrip (0.03s)
+    persist_test.go:90: 文件权限 = -rw-rw-rw-
+--- FAIL: TestPersistWriteFailure (0.02s)
+    persist_test.go:239: 只读目录里应写不了
+2026/11/05 10:07:23 [session] 从 Redis 恢复 1 条粘性会话绑定
+--
+--- FAIL: TestLookupForModelOnlyReusesValidBinding (0.00s)
+    session_test.go:390: lookup allocated a new binding
+FAIL
+--
+--- FAIL: TestDeviceTokenFromConfigOrFile_Overrides (0.01s)
+    --- FAIL: TestDeviceTokenFromConfigOrFile_Overrides/auth_over_config (0.00s)
+        device_token_test.go:169: X-Device-Token = "" want "tok-auth"
+--
+--- FAIL: TestDesktopProfileHeaders (0.00s)
+    headers_desktop_test.go:45: Accept-Encoding = "gzip, compress, deflate, br", want "identity"
+    headers_desktop_test.go:66: acp-connection-id missing，桌面端每个 chat 请求都发
+--
+--- FAIL: TestLegacyProfileRestoresOldHeaders (0.00s)
+    headers_desktop_test.go:121: legacy 应发 Origin
+    headers_desktop_test.go:124: legacy 应发 X-Machine-ID
+--
+--- FAIL: TestChatHeadersPreservesConversationID (0.00s)
+    headers_test.go:60: X-Conversation-ID = "0123456789abcdef0123456789abcdef", want supplied "01234567-89ab-4def-8123-456789abcdef"
+--- FAIL: TestGatewayHintKindTable (0.00s)
+    --- FAIL: TestGatewayHintKindTable/waf_block (0.00s)
+        hint_test.go:34: GatewayHint(waf_block) = "upstream edge gateway blocked the request (WAF 403 or openresty/APISIX 401 page); check egress IP or retry after the block window"，应为 "upstream WAF blocked the gateway; retry after the block window"
+--
+--- FAIL: TestModelCatalogPutSave (0.03s)
+    --- FAIL: TestModelCatalogPutSave/目录不可写时内存缓存仍生效 (0.01s)
+        model_catalog_test.go:407: 不可写目录不应落盘，stat err=<nil>
+--
+--- FAIL: TestNoSelfIdentifyingPrefixInOutbound (0.05s)
+    outbound_fingerprint_test.go:63: 出站代码出现项目自证前缀字面量（官方同位置恒为 UUID v4 / 32 hex）：
+        ..\..\internal\selfupdate\install.go:43: return fmt.Sprintf("wb2api-panel-v%s-%s-%s.tar.gz", version, goos, goarch)
+--
+--- FAIL: TestProxyFromEnv (0.01s)
+    --- FAIL: TestProxyFromEnv/https_proxy_优先于_HTTP_PROXY (0.00s)
+        proxy_test.go:94: 得到 http://a:1（取自 HTTPS_PROXY），应为 http://a:1（取自 https_proxy）
+--
+--- FAIL: TestProxyConnectTunnel (10.93s)
+    proxy_test.go:391: GET https://example.com:57356/: Bad Gateway
+--- FAIL: TestProxySOCKS5Tunnel (20.33s)
+    --- FAIL: TestProxySOCKS5Tunnel/socks5 (10.17s)
+        proxy_test.go:490: GET https://example.com:53535/: Bad Gateway
+--
+--- FAIL: TestProxyHTTPSProxy (10.17s)
+    proxy_test.go:516: GET https://example.com:61810/: Bad Gateway
+--- FAIL: TestPinTransportSkipsProxy (10.16s)
+    proxy_test.go:609: GET https://example.com:63679/: Bad Gateway
+2026/11/05 10:08:20 WARN: [upstream] login accounts snapshot: status=500 code=0 err=http_error: upstream 500 code=500 msg=boom
+--- FAIL: TestRefreshTokenSingleFlightPerAccount (0.10s)
+    refresh_singleflight_test.go:59: upstream refresh hits = 2, want 1 (single-flight)
+--- FAIL: TestRefreshAdoptsNewerDiskTokenAfterSessionDead (0.01s)
+    refresh_singleflight_test.go:136: refresh should recover from disk token: refresh_failed: fetch account after refresh: upstream session_dead (http 401): {"code":12153,"msg":"refresh token is invalid"}
+2026/11/05 10:08:20 WARN: [upstream] web_session acct=号u-cn(u-cn): 获取网页登录态失败: upstream server (http 502): 登录码: upstream connect failed: 不知道这样的主机。 (os error 11001)
+--
+--- FAIL: TestRouteAllAccountMethods (72.94s)
+    route_test.go:258: 带号参数的方法 UserResourceSnapshot 没有验证它走号的代理
+    route_test.go:273: AcceptTasks 没有经号的代理发请求
+--
+--- FAIL: TestRouteProxyDown (0.17s)
+    route_test.go:335: 应返回 RouteError: upstream waf_block (http 401): <html>
+        <head><title>401 Authorization Required</title></head>
+--
+--- FAIL: TestRoutePinned (0.00s)
+    route_test.go:395: GET https://example.com:52590/: unexpected EOF
+--- FAIL: TestRouteLogin (0.07s)
+    route_test.go:489: 发起授权应经代理: <nil> 0
+2026/11/05 10:09:33 http: TLS handshake error from 127.0.0.1:52606: remote error: tls: bad certificate
+--
+--- FAIL: TestSchoolEventConstructors (0.00s)
+    --- FAIL: TestSchoolEventConstructors/SchoolChatTimesEvents (0.00s)
+        school_test.go:191: messageId = msg-ce9fcf93，应为 msg-1a9e8687

@@ -114,13 +114,16 @@ func (f *autoUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
 	h := f.route[autoRouteKey(r.Method, host, r.URL.Path, r.Header.Get("X-Client-Platform"))]
 	f.mu.Unlock()
 	if h == nil {
-		// 积分汇总 / 付费包 / 签到状态是每个账号维护流程都会发的伴随请求，各用例不必逐条登记。
-		// 免费包（余额本体）与签到仍须显式登记，避免用例漏测。
+		// 积分三个接口与签到状态是每个账号维护流程都会发的伴随请求，各用例不必逐条登记；
+		// 免费包在默认答复里是空列表，需要余额的用例自己登记。
+		// 签到本身默认成功：只关心「有没有签」的用例仍会显式登记，断言次数不受影响。
 		// 订阅任务状态是网页拉任务列表前的伴随请求，失败也不影响列表，统一回成功。
 		switch r.URL.Path {
-		case upstreamtest.SummaryPath, upstreamtest.PaidPath, upstreamtest.CheckinStatusPath:
+		case upstreamtest.SummaryPath, upstreamtest.PaidPath, upstreamtest.FreePath, upstreamtest.CheckinStatusPath:
 			status, body, _ := upstreamtest.Respond(r.URL.Path)
 			return autoHTTPResponse(status, body), nil
+		case upstreamtest.CheckinPath:
+			return autoHTTPResponse(200, autoEnvelope("{}")), nil
 		case autoSubscribePath:
 			return autoHTTPResponse(200, autoEnvelope("{}")), nil
 		}

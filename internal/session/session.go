@@ -180,6 +180,24 @@ func (r *Router) Resolve(key string) (string, bool) {
 	return r.ResolveForModel(key, "", "", nil)
 }
 
+// LookupForModel 只查已有绑定，不分配新号。有序策略（round_robin / sequential_exhaust）
+// 下选号顺序必须由池的游标决定，会话层只负责把已绑定的号粘住；否则按 key 哈希分配
+// 会打乱轮询次序（同一段对话第一次就跳到中间的号）。
+func (r *Router) LookupForModel(key, model, realm string, skip map[string]bool) (string, bool) {
+	now := time.Now()
+	r.mu.RLock()
+	e, found := r.entries[key]
+	r.mu.RUnlock()
+	if !found || expired(e, now, r.cfg.TTL) {
+		return "", false
+	}
+	if !r.availableSet(model, realm, skip)[e.uid] {
+		return "", false
+	}
+	r.touch(key, e.uid, now)
+	return e.uid, true
+}
+
 // ResolveForModel 返回会话 key 在该模型（裸名）与域上应绑定的账号 uid；realm 为 "" 即两域合池，skip 里的号
 // 不用（客户端密钥绑了分组时，组外的号）。命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/
 // 占满/被该模型限流/不在此刻最高的优先级层）走重新分配。

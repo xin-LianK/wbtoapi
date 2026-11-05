@@ -113,8 +113,10 @@ func TestFull8BlockModelBackoffEdges(t *testing.T) {
 	if mc.Hits != 3 {
 		t.Fatalf("Hits = %d", mc.Hits)
 	}
-	if d := time.Until(mc.Until); d < 23*time.Hour || d > 25*time.Hour {
-		t.Fatalf("第三次应封顶 24h，实际 %v", d)
+	// 本分支口径：30m 起、每次翻倍、封顶 6h（见 cooldown.go 的 modelBlock* 常量，
+	// 与 modelblocked_test.go 的 TestModelBlockBackoffPolicy 同一口径）。
+	if d := time.Until(mc.Until); d < 110*time.Minute || d > 130*time.Minute {
+		t.Fatalf("第三次应为 2h（30m×4），实际 %v", d)
 	}
 }
 

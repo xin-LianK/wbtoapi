@@ -255,6 +255,17 @@ func jsonResp(status int, body string) *http.Response {
 	}
 }
 
+// billingResp 积分三接口（summary / paid-packages / free-packages）与签到状态的默认答复，
+// 形状取自 upstreamtest.Respond：汇总 404（改用逐包合计）、付费包空、免费包放 packs。
+// 非这些路径返回 ok=false，由用例自己处理。
+func billingResp(path string, packs ...string) (*http.Response, bool) {
+	status, body, ok := upstreamtest.Respond(path, packs...)
+	if !ok {
+		return nil, false
+	}
+	return jsonResp(status, body), true
+}
+
 func testClient(fn rtFunc) *Client {
 	return &Client{
 		// 网页登录态的两个端点统一在这里答复，用例只关心业务请求。

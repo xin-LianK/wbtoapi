@@ -7,22 +7,20 @@ package upstream
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 // 余额查询成功必须通知观察者一次（uid + 余额）：这是积分历史留痕的唯一数据入口。
 func TestCreditObserverNotifiedOncePerQuery(t *testing.T) {
-	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
-		`{"PackageName":"p","CycleCapacitySize":30,"CycleCapacityRemain":30,"CycleCapacityUsed":0}` +
-		`]}}}}`
+	packs := []string{upstreamtest.Package(30, 30, "")}
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
-			return nil, errors.New("wrong path: " + r.URL.Path)
+		if resp, ok := billingResp(r.URL.Path, packs...); ok {
+			return resp, nil
 		}
-		return jsonResp(200, payload), nil
+		return nil, errors.New("wrong path: " + r.URL.Path)
 	})
 	type call struct {
 		uid     string
@@ -70,9 +68,11 @@ func TestCreditObserverSilentOnBusinessError(t *testing.T) {
 
 // 未挂载 / 注销观察者时必须零开销且不 panic（观察者是可选旁路，不得改变既有行为）。
 func TestCreditObserverOptionalAndDetachable(t *testing.T) {
-	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[]}}}}`
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(200, payload), nil
+		if resp, ok := billingResp(r.URL.Path); ok {
+			return resp, nil
+		}
+		return jsonResp(200, `{"code":0,"data":{}}`), nil
 	})
 	if _, _, _, _, _, err := c.UserResourceDetailedWithExpiry(&auth.Auth{AccessToken: "at", UID: "u1"}, 0); err != nil {
 		t.Fatalf("未挂载观察者时查询应正常: %v", err)
@@ -97,9 +97,12 @@ func TestCreditObserverOptionalAndDetachable(t *testing.T) {
 // 观察者是纯旁路：它 panic 绝不能打断余额查询主流程——调度器 goroutine 里未恢复的
 // panic 会直接带走整个进程。recover 之后查询结果必须照常返回。
 func TestCreditObserverPanicIsContained(t *testing.T) {
-	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"PackageName":"p","CycleCapacitySize":30,"CycleCapacityRemain":30,"CycleCapacityUsed":0}]}}}}`
+	packs := []string{upstreamtest.Package(30, 30, "")}
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(200, payload), nil
+		if resp, ok := billingResp(r.URL.Path, packs...); ok {
+			return resp, nil
+		}
+		return jsonResp(200, `{"code":0,"data":{}}`), nil
 	})
 	c.SetCreditObserver(func(string, int64) { panic("observer boom") })
 

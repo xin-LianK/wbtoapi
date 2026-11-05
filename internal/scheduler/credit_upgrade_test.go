@@ -25,6 +25,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 // upgBalanceFake 按 accessToken 识别账号，逐号返回可变的个人版余额。
@@ -43,19 +44,29 @@ func upgNewBalanceFake(t *testing.T) *upgBalanceFake {
 		remain: map[string]int64{},
 		calls:  map[string]int{},
 	}
+	// 官方 5.8.3 起余额走三个接口：汇总（这里 404，网关改用逐包合计）、付费包（空）、
+	// 免费包（放余额）。一次余额查询只按免费包计一次调用，callCount 的口径不变。
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		f.mu.Lock()
 		uid := f.tokens[tok]
-		f.calls[uid]++
 		remain := f.remain[uid]
+		if strings.HasSuffix(r.URL.Path, "-free-packages") {
+			f.calls[uid]++
+		}
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		if !strings.HasSuffix(r.URL.Path, "/get-user-resource") {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "-summary"):
 			http.Error(w, "not found", 404)
-			return
+		case strings.HasSuffix(r.URL.Path, "-paid-packages"):
+			fmt.Fprint(w, `{"code":0,"data":{"Accounts":[],"TotalCount":0}}`)
+		case strings.HasSuffix(r.URL.Path, "-free-packages"):
+			fmt.Fprintf(w, `{"code":0,"data":{"Accounts":[%s],"TotalCount":1}}`,
+				upstreamtest.Package(int64(1)<<40, remain, ""))
+		default:
+			http.Error(w, "not found", 404)
 		}
-		fmt.Fprintf(w, `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":%d,"CycleCapacityRemain":%d,"CycleCapacityUsed":0}]}}}}`, int64(1)<<40, remain)
 	}))
 	t.Cleanup(f.srv.Close)
 	return f

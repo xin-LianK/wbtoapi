@@ -128,12 +128,22 @@ func (f *upgFakeBilling) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fmt.Fprintf(w, `{"code":0,"msg":"OK","data":{"credit":%d,"limitNum":%d}}`, used, limit)
-	case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+	// 官方 5.8.3 起余额查三个接口：汇总 404（网关改用逐包合计）、付费包空、
+	// 免费包放余额。用 *Precise 字段，与真实上游一致。
+	case strings.HasSuffix(r.URL.Path, "-summary"):
+		http.Error(w, "not found", http.StatusNotFound)
+	case strings.HasSuffix(r.URL.Path, "-paid-packages"):
 		if fail {
 			io.WriteString(w, `{"code":400,"msg":"bad request"}`)
 			return
 		}
-		fmt.Fprintf(w, `{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":%d,"CycleCapacityRemain":%d,"CycleCapacityUsed":0}]}}}}`, upgFakeSize, remain)
+		io.WriteString(w, `{"code":0,"data":{"Accounts":[],"TotalCount":0}}`)
+	case strings.HasSuffix(r.URL.Path, "-free-packages"):
+		if fail {
+			io.WriteString(w, `{"code":400,"msg":"bad request"}`)
+			return
+		}
+		fmt.Fprintf(w, `{"code":0,"data":{"Accounts":[{"CycleCapacitySizePrecise":"%d","CycleCapacityRemainPrecise":"%d"}],"TotalCount":1}}`, upgFakeSize, remain)
 	case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
 		io.WriteString(w, `{"code":0,"msg":"ok","data":{}}`)
 	default:

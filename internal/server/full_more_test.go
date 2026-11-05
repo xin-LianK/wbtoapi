@@ -429,7 +429,7 @@ func TestFull8ChatEmptyStream(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`)))
-	if !strings.Contains(rec.Body.String(), "empty upstream stream") {
+	if !strings.Contains(rec.Body.String(), "empty stream") {
 		t.Fatalf("body = %q", rec.Body.String())
 	}
 }
