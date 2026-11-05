@@ -30,6 +30,7 @@ type creditLogResp struct {
 // 积分获取流水：按时间范围、账号、来源筛，新的在前、按 limit 截；合计算区间内符合条件的全部笔数，
 // 按积分从多到少排、同额按 key；按账号合计的昵称取时间上最新的那笔。没接上留存 501，读不了 500。
 func TestPanelCreditLog(t *testing.T) {
+	skipPosixOnly(t)
 	store := logarchive.New(logarchive.Config{Dir: t.TempDir(), Prefix: "credit", Enabled: true})
 	t.Cleanup(store.Close)
 	base := time.Date(2026, 10, 30, 8, 0, 0, 0, time.Local)

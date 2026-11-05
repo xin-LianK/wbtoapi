@@ -214,6 +214,7 @@ func TestPanelLogs(t *testing.T) {
 
 // 请求指标与归档列表：nil 记录器 501；有记录器时返回快照；limit 夹取。
 func TestPanelRequestMetricsLogs(t *testing.T) {
+	skipPosixOnly(t)
 	t.Run("nil 记录器 501", func(t *testing.T) {
 		p, _ := newPanelFor(t, Config{})
 		autoWantCode(t, get(p, http.MethodGet, "/panel/api/request_metrics"), http.StatusNotImplemented)

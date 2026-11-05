@@ -117,6 +117,7 @@ func TestMatchLevel(t *testing.T) {
 // 按时间范围查运行日志：两个频道合并、按时间先后排；ch / level / q / from / to / limit 都生效；
 // 取最新的 limit 行并回报 more；没接归档 501，读失败 500。
 func TestPanelLogsArchive(t *testing.T) {
+	skipPosixOnly(t)
 	task, system, _ := runtimeStores(t)
 	base := time.Date(2026, 10, 20, 9, 0, 0, 0, time.Local)
 	at := func(h int) time.Time { return base.Add(time.Duration(h) * time.Hour) }
@@ -193,6 +194,7 @@ func TestPanelLogsArchive(t *testing.T) {
 // 日志留存的占用：五类各自的状态，没接上的为 null。清空：按 kind 清对应的那类并在系统日志记一行；
 // kind 不认识 400，没接上 501，清不掉 500。
 func TestPanelLogStorage(t *testing.T) {
+	skipPosixOnly(t)
 	task, system, dir := runtimeStores(t)
 	reqDir := filepath.Join(t.TempDir(), "request-logs")
 	requests := reqlog.New(reqlog.Config{Dir: reqDir, Enabled: true, RetentionDays: 7})

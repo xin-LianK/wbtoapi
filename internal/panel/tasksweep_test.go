@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
@@ -37,6 +38,7 @@ type sweepBackend struct {
 	claimFn  func(code string) (int, map[string]any)       // (status, data)
 
 	reqs    atomic.Int32
+	lists   atomic.Int32 // 只数任务列表请求（登录握手、订阅状态等不计）
 	accepts atomic.Int32
 	claims  atomic.Int32
 }
@@ -49,9 +51,14 @@ func sweepTasksBody(tasks []map[string]any) string {
 func (b *sweepBackend) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		b.reqs.Add(1)
+		// 登录握手（取登录码 → 换 Cookie）由公共桩答复，不计业务请求。
+		if upstreamtest.WebSession(w, r) {
+			return
+		}
 		isMP := r.Header.Get("X-Client-Platform") == "miniprogram"
 		switch {
 		case r.URL.Path == "/v2/activity/growth/tasks":
+			b.lists.Add(1)
 			if b.listFn != nil {
 				w.Write([]byte(sweepTasksBody(b.listFn(isMP))))
 				return

@@ -74,6 +74,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 
 // 写下再读回：会话 id 与用过的号都在，文件只有本人可读写。
 func TestPersistRoundTrip(t *testing.T) {
+	skipPosixOnly(t)
 	path := filepath.Join(t.TempDir(), "data", "sessions.json")
 	avail := []string{"u1"}
 	r := warmRouter(&avail, "u1")
@@ -207,6 +208,7 @@ func TestPersistLoadBadLocalFile(t *testing.T) {
 
 // 写不了文件：记 WARN，改动标记留着下次再写，也不镜像半截状态。
 func TestPersistWriteFailure(t *testing.T) {
+	skipPosixOnly(t)
 	dir := t.TempDir()
 	blocker := filepath.Join(dir, "file")
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {

@@ -55,6 +55,7 @@ func decodeKey(t *testing.T, rec *httptest.ResponseRecorder) keyResp {
 
 // TestKeysAPI 新建、列出、修改、重新生成、删除；面板只认管理员密钥，客户端密钥登不了面板。
 func TestKeysAPI(t *testing.T) {
+	skipPosixOnly(t)
 	p, _, path := keysPanel(t, "sk-admin")
 
 	rec := keyReq(p, "GET", "/panel/api/keys", "")

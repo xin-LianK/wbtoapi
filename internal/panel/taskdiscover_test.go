@@ -201,7 +201,7 @@ func TestSweepFeedsDiscover(t *testing.T) {
 	}}
 	p := newSweepPanel(t, b, &auth.Auth{UID: "u1", AccessToken: "at"})
 
-	before := b.reqs.Load()
+	before := b.lists.Load()
 	p.RunTaskSweepOnce()
 
 	disc.RLock()
@@ -214,7 +214,8 @@ func TestSweepFeedsDiscover(t *testing.T) {
 		t.Errorf("template_9 = %+v，应为族 template 自动跑", d)
 	}
 	// 清扫本身固定 2 次列表（默认 + mp）；发现若自拉就必然多出来。
-	if got := b.reqs.Load() - before; got != 2 {
+	// 只数任务列表请求：登录握手与订阅状态是每次会话/每轮的固定开销，与发现无关。
+	if got := b.lists.Load() - before; got != 2 {
 		t.Errorf("requests = %d, want 2（发现不该产生额外列表请求）", got)
 	}
 }

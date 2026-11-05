@@ -210,6 +210,7 @@ func TestVersionCheckNow(t *testing.T) {
 }
 
 func TestSelfUpdateEndpoints(t *testing.T) {
+	skipPosixOnly(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(remoteChangelog))
 	}))

@@ -131,6 +131,7 @@ func TestStartUpdateCheckExits(t *testing.T) {
 
 // TestSelfUpdateBusy 下载进行中再次更新 → ErrBusy 映射 409；updaterErrStatus 的映射。
 func TestSelfUpdateBusy(t *testing.T) {
+	skipPosixOnly(t)
 	block := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-block

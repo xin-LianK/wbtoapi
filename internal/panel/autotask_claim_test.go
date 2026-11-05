@@ -14,6 +14,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 // TestRunAutoAllClaimsDoneButUnclaimed issue #174 顺带项：runAutoAll 遇到
@@ -26,6 +27,9 @@ func TestRunAutoAllClaimsDoneButUnclaimed(t *testing.T) {
 
 	var claims int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if upstreamtest.WebSession(w, r) {
+			return
+		}
 		switch {
 		case r.URL.Path == "/v2/activity/growth/tasks":
 			// 唯一存在且已达标（5/5）未完成领取的任务；accept_status=accepted，
@@ -90,6 +94,9 @@ func TestRunAutoAllSkipsClaimedTask(t *testing.T) {
 
 	var claims int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if upstreamtest.WebSession(w, r) {
+			return
+		}
 		switch {
 		case r.URL.Path == "/v2/activity/growth/tasks":
 			json.NewEncoder(w).Encode(map[string]any{

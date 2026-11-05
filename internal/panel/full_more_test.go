@@ -117,6 +117,7 @@ func TestImportCNBranches(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root 下权限位不生效")
 		}
+		skipPosixOnly(t)
 		p, _, _ := newLoginPanel(t)
 		ro := filepath.Join(t.TempDir(), "ro")
 		if err := os.Mkdir(ro, 0o500); err != nil {
@@ -203,6 +204,7 @@ func TestLoginPollMkdirFailure(t *testing.T) {
 
 // 登录完成时目录只读 → SaveAtomic 失败 500 save auth。
 func TestLoginPollSaveFailure(t *testing.T) {
+	skipPosixOnly(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root 下权限位不生效")
 	}
@@ -546,6 +548,7 @@ func (errReader) Read([]byte) (int, error) { return 0, errors.New("read boom") }
 
 // 回滚成功（没跑着面板装的版本）：200 + restarting=false，文件被删掉。
 func TestRollbackSuccessResponse(t *testing.T) {
+	skipPosixOnly(t)
 	dataDir := t.TempDir()
 	upd := selfupdate.Launch(dataDir, "1.1.0")
 	binDir := filepath.Join(dataDir, "bin")
