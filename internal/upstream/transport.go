@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // transport.go 出站 Transport 构造的单一事实来源（连接层加固，吸收 kongjianguan
 // 4 连击实测经验的前三件，见 .claude/reports/fork-scan-absorb.md T-2）：
 // 真正禁 h2 / TLS 握手超时 / 短 keepalive 探测，全参数集中定义可测试可调整。
@@ -63,7 +67,8 @@ func newDialer() *net.Dialer {
 	}
 }
 
-// newTransport 构造共享出站 Transport（HTTP 与 ChatHTTP 同一实例，连接池不重复）。
+// newTransport 构造共享出站 Transport（HTTP 与 ChatHTTP 同一实例，连接池不重复）。px 是出站代理
+// （proxy.go，nil 直连）：代理藏在拨号里，Transport.Proxy 不设，见 proxy.go 开头。
 // 分两层防半死连接：
 //   - TLS 层：空 TLSNextProto 真正禁 h2（kongjianguan 二次修正的实证：ForceAttemptHTTP2=false
 //     只对自定义 Dial 生效，默认 TLS 经 ALPN 仍协商出 h2，半死 h2 流复用表现为
@@ -71,10 +76,15 @@ func newDialer() *net.Dialer {
 //     完成后无 h2 协议可用，连接退回 HTTP/1.1）。
 //   - TCP 层：DialContext 10s 建连上限 + 15s keepalive 探测，半开连接在建立期
 //     和复用期都能被快速识别（见 dialTimeout/dialKeepAlive 注释）。
-func newTransport() *http.Transport {
-	dialer := newDialer()
+func newTransport(px *outboundProxy) *http.Transport {
+	dial := proxyDial(px, newDialer())
 	return &http.Transport{
-		DialContext: dialer.DialContext,
+		DialContext: dial,
+		// DialTLSContext 把 https 握手交给 uTLS 伪装官方客户端的 ClientHello（见 tlsmimic.go）。
+		// 设了它，Transport 就不再自己做 TLS，所以 ALPN、h2 升级、TLSHandshakeTimeout 都由这层管：
+		// uTLS 的 ALPN 只给 http/1.1，自然退回 HTTP/1.1；握手超时在 dialTLSMimic 里自卡。开关关掉时
+		// 这层回落标准库 TLS，等价旧行为。走代理时 dial 先建好隧道，握手在隧道里做。
+		DialTLSContext: dialTLSMimic(dial, nil),
 		// 空 TLSNextProto（非 nil）真正禁 h2：见函数注释。必须 make 而非 nil——
 		// nil 表示「让标准库注入默认 h2 映射」（kongjianguan 实测：设
 		// ForceAttemptHTTP2=false 后日志仍报 h2 timeout，正是这个陷阱）。

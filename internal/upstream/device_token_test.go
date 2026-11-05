@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // device_token_test.go X-Device-Token 注入 + 文件兜底读取单测。
 package upstream
 
@@ -24,9 +28,14 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 		apply    func(c *Client, req *http.Request)
 		wantPath string
 		chatDT   bool
+		want     string
 	}{
-		{"chat_opt_in", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions", true},
-		{"billing", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report", false},
+		// 打开 ChatDeviceToken 才在 chat 上发（默认关，见 TestDeviceTokenNotOnChatByDefault）。
+		{"chat_opt_in", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions", true, "tok-from-auth"},
+		{"chat_default_off", func(c *Client, req *http.Request) { c.ChatHeaders(req, a, "", ChatMeta{}) }, "/v2/chat/completions", false, ""},
+		// 通用 billing 请求不带设备头；只有签到（withDeviceToken）才带。
+		{"billing_generic", func(c *Client, req *http.Request) { c.BillingHeaders(req, a) }, "/v2/report", false, ""},
+		{"checkin_with_token", func(c *Client, req *http.Request) { c.withDeviceToken(a)(req) }, "/v2/report", false, "tok-from-auth"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got string
@@ -50,8 +59,8 @@ func TestDeviceTokenInjected_WhenSet(t *testing.T) {
 				t.Fatalf("do: %v", err)
 			}
 			resp.Body.Close()
-			if got != "tok-from-auth" {
-				t.Errorf("X-Device-Token = %q want %q", got, "tok-from-auth")
+			if got != tc.want {
+				t.Errorf("X-Device-Token = %q want %q", got, tc.want)
 			}
 		})
 	}
@@ -96,8 +105,9 @@ func TestDeviceTokenNotInjected_WhenEmpty(t *testing.T) {
 		BillingBaseCN: srv.URL,
 		// DeviceToken / DeviceTokenFile 皆空
 	}
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/chat/completions", nil)
-	c.ChatHeaders(req, a, "", ChatMeta{})
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/billing/meter/checkin", nil)
+	c.BillingHeaders(req, a)
+	c.withDeviceToken(a)(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)

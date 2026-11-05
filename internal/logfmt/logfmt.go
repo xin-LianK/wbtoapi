@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package logfmt 统一网关日志的 uid 截断与模块前缀约定。
 //
 // 约定：
@@ -7,14 +11,24 @@
 //     其他补 [pool]/[auth]/[server] 等 [mod] 方括号前缀，redisstore/session 已有保持。
 //   - 级别语义：正常流转不打级别字样（保持简洁）；可疑/降级/失败行加 WARN:/ERR: 前缀。
 //
-// 本包不引入日志库，只提供 UID8 截断 / Label 账号标签 / Pad 显示宽对齐三个纯字符串
+// 本包不引入日志库，只提供 UID8 截断 / Label 账号标签 / Pad 显示宽对齐 / MaskIPs 遮 IP 这几个纯字符串
 // helper，供各包替代裸写 [:8] 与手算表格列宽（防 uid 短于 8 越界、防中文昵称错位）。
 package logfmt
 
 import (
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
+
+// ipPattern IPv4，和方括号里的 IPv6（Go 的网络错误都这样写，如 dial tcp [2001:db8::1]:443）。
+var ipPattern = regexp.MustCompile(`\[[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[0-9A-Za-z]+)?\]|\b\d{1,3}(?:\.\d{1,3}){3}\b`)
+
+// MaskIPs 把 s 里的 IP 地址换成 <IP>，端口留着。网络错误原文里常带着代理、上游的地址，写进日志前先遮掉
+// （日志会被别人看到）。
+func MaskIPs(s string) string {
+	return ipPattern.ReplaceAllString(s, "<IP>")
+}
 
 // Truncate 截断字符串到 n 字节上限（先 TrimSpace，与旧 upstream/内部实现口径
 // 一致），切点落在多字节字符中间时回退到 UTF-8 rune 边界——错误 body 多为中文

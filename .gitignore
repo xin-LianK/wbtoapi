@@ -20,6 +20,11 @@ config.json
 *.tmp
 __pycache__/
 
+# 面板前端（web/）的依赖与构建产物。dist 只保留 .gitkeep（没构建前端时 go:embed 也能通过编译）
+web/node_modules/
+internal/panel/dist/*
+!internal/panel/dist/.gitkeep
+
 # Backups (contains auth tokens)
 backups/
 
@@ -29,9 +34,8 @@ backups/
 LOOP.md
 PLAN.md
 SPEC.md
-docs/
 
-# 设计/计划文档（但 README.md 必须进版本库）
+# 设计/计划文档（但 README.md、AGENTS.md 与 docs/ 下的使用文档必须进版本库）
 *.md
 !README.md
 # 维护手册必须进版本库（上游停更后这是最重要的文档）
@@ -39,6 +43,10 @@ docs/
 
 # 本地部署产物（deploy.sh 的编译输出，体积约 30MB，不进库）
 /dist/
+!/docs/*.md
+# 给 AI 编程工具看的仓库说明
+!/AGENTS.md
+!/CLAUDE.md
 
 # Windows binaries
 /wb2api.exe

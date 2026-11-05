@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package pool
 
 import (
@@ -78,7 +82,7 @@ func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 	now := time.Now()
 	p.SetCreditsDetailed("cn2", 100, 100, 100, now.Add(time.Hour), 100)
 
-	got := p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn")
+	got := p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn", nil)
 	want := []string{"cn1", "cn2", "cn2", "cn2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("weighted cn candidates=%v want %v", got, want)
@@ -89,7 +93,7 @@ func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 	if !p.Acquire("cn2") {
 		t.Fatal("failed to acquire cn2")
 	}
-	got = p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn")
+	got = p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn", nil)
 	want = []string{"cn1"}
 	p.Release("cn2")
 	if !reflect.DeepEqual(got, want) {
@@ -98,7 +102,7 @@ func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 
 	// 关闭总开关后逐账号只出现一次，旧行为完全恢复。
 	p.SetPreferExpiring(false)
-	got = p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn")
+	got = p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn", nil)
 	want = []string{"cn1", "cn2"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("disabled weighted cn candidates=%v want %v", got, want)
@@ -150,5 +154,118 @@ func TestPickExcludingForRealmTried(t *testing.T) {
 	}
 	if realmOf(a) != "cn" {
 		t.Fatalf("picked non-cn %s", a.UID)
+	}
+}
+
+// TestModelServesFilter 按目录的选号过滤在各条选号路径上都生效：企业专属模型只派给企业号
+// （普通选号、粘性候选、粘性号校验、可用列表），ModelBlocked 不把接不了的号算作「能服务」。
+// 拉域目录用的号优先个人号；EnterpriseUIDs 只列没禁用的企业号。
+func TestModelServesFilter(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "a-ent", EnterpriseID: "ent-1", Domain: "www.codebuddy.cn"})
+	p.Add(&auth.Auth{UID: "b-per", Domain: "www.codebuddy.cn"})
+	p.SetModelServes(func(uid, realm string, enterprise bool, model string) bool {
+		return model != "claude-x" || enterprise
+	})
+
+	if a := p.PickExcludingForRealm(nil, "claude-x", "cn"); a == nil || a.UID != "a-ent" {
+		t.Fatalf("企业专属模型应选到企业号，got %v", a)
+	}
+	if a := p.PickExcludingForRealm(map[string]bool{"a-ent": true}, "claude-x", "cn"); a != nil {
+		t.Fatalf("企业号试过后不应退到个人号，got %s", a.UID)
+	}
+	if got := p.WeightedAvailableUIDsForModelRealm("claude-x", "cn", nil); !reflect.DeepEqual(got, []string{"a-ent"}) {
+		t.Errorf("粘性候选=%v want [a-ent]", got)
+	}
+	if got := p.AvailableUIDsForModel("claude-x"); !reflect.DeepEqual(got, []string{"a-ent"}) {
+		t.Errorf("AvailableUIDsForModel=%v want [a-ent]", got)
+	}
+	if a := p.PickByUIDForModel("b-per", "claude-x"); a != nil {
+		t.Error("绑在个人号上的会话请求企业专属模型时，粘性号应判为不可用")
+	}
+	if got := p.WeightedAvailableUIDsForModelRealm("shared", "cn", nil); !reflect.DeepEqual(got, []string{"a-ent", "b-per"}) {
+		t.Errorf("普通模型两个号都可选，got %v", got)
+	}
+
+	p.BlockModelBackoff("a-ent", "claude-x", "11102 model not found")
+	if st := p.ModelBlocked("claude-x"); !st.Blocked || st.Count != 1 {
+		t.Errorf("唯一能接的企业号被模型级冷却时应判为模型阻塞，got %+v", st)
+	}
+
+	if uid := p.CatalogUIDForRealm("cn"); uid != "b-per" {
+		t.Errorf("拉域目录应优先个人号，got %q", uid)
+	}
+	if got := p.EnterpriseUIDs("cn"); !reflect.DeepEqual(got, []string{"a-ent"}) {
+		t.Errorf("EnterpriseUIDs=%v", got)
+	}
+	p.Disable("a-ent", "test")
+	if got := p.EnterpriseUIDs("cn"); len(got) != 0 {
+		t.Errorf("禁用的企业号不列出，got %v", got)
+	}
+}
+
+// TestCatalogUIDForRealm 拉域目录优先用个人号（企业号的名单各自单独记）；只有企业号时退回企业号；
+// 该域没有可用账号时为空。
+func TestCatalogUIDForRealm(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	if got := p.CatalogUIDForRealm("cn"); got != "" {
+		t.Fatalf("空池应返回空串，got %q", got)
+	}
+	p.Add(&auth.Auth{UID: "a-ent", EnterpriseID: "ent-1", Domain: "www.codebuddy.cn"})
+	if got := p.CatalogUIDForRealm("cn"); got != "a-ent" {
+		t.Fatalf("只有企业号时用企业号，got %q", got)
+	}
+	p.Add(&auth.Auth{UID: "b-per", Domain: "www.codebuddy.cn"})
+	if got := p.CatalogUIDForRealm("cn"); got != "b-per" {
+		t.Fatalf("有个人号时优先个人号，got %q", got)
+	}
+	p.Disable("b-per", "test")
+	if got := p.CatalogUIDForRealm("cn"); got != "a-ent" {
+		t.Fatalf("个人号不可用时退回企业号，got %q", got)
+	}
+	if got := p.CatalogUIDForRealm("global"); got != "" {
+		t.Fatalf("没有国际版号时应为空，got %q", got)
+	}
+}
+
+// TestCheapestWeightedUIDsForModelRealm 新会话分配只留最便宜那一层：实测免费 > 无观测 > 实测收费；
+// 条件探索窗口到了切到无观测层；模型为空不分层；快过期虚拟实例权重照常。
+func TestCheapestWeightedUIDsForModelRealm(t *testing.T) {
+	p := realmPool(t)
+	p.SetCostExploreInterval(0)
+	p.NoteModelCost("cn1", "glm-5.2", 0, 1000) // 免费
+	p.NoteModelCost("cn2", "glm-5.2", 5, 1000) // 收费
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "cn", nil); !reflect.DeepEqual(got, []string{"cn1"}) {
+		t.Fatalf("有免费号时只留免费号，got %v", got)
+	}
+	// 续用校验不分层：收费号仍算可用，绑在它上面的会话不会被挪走。
+	if got := p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn", nil); !reflect.DeepEqual(got, []string{"cn1", "cn2"}) {
+		t.Fatalf("续用校验不该分层，got %v", got)
+	}
+	// 合池：国际版两个号都没观测，排在收费号之前、免费号之后。
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"cn1"}) {
+		t.Fatalf("合池时仍只留免费号，got %v", got)
+	}
+	p.NoteModelCost("cn1", "kimi", 3, 1000)
+	if got := p.CheapestWeightedUIDsForModelRealm("kimi", "", nil); !reflect.DeepEqual(got, []string{"cn2", "g1", "g2"}) {
+		t.Fatalf("没有免费号时留无观测的号，got %v", got)
+	}
+	if got := p.CheapestWeightedUIDsForModelRealm("", "cn", nil); !reflect.DeepEqual(got, []string{"cn1", "cn2"}) {
+		t.Fatalf("模型为空不分层，got %v", got)
+	}
+	// 条件探索：免费层垄断、存在无观测的号、窗口已到 → 这一次切到无观测层。
+	p.SetCostExploreInterval(time.Hour)
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"g1", "g2"}) {
+		t.Fatalf("探索窗口到了应切到无观测层，got %v", got)
+	}
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"cn1"}) {
+		t.Fatalf("同一窗口内不再探索，got %v", got)
+	}
+	// 快过期虚拟实例权重照常。
+	p.SetCreditsDetailed("cn1", 100, 100, 100, time.Now().Add(time.Hour), 100)
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "cn", nil); !reflect.DeepEqual(got, []string{"cn1", "cn1", "cn1"}) {
+		t.Fatalf("快过期号应出现 3 次，got %v", got)
 	}
 }

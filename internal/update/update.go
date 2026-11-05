@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package update 版本更新检查：查 GitHub Releases 的最新 tag 与本地版本比对。
 //
 // 只做「提示」，不做自动升级。理由：自动升级要在运行期替换自己的二进制并重启，

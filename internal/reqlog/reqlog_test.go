@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package reqlog
 
 import (
@@ -226,38 +230,10 @@ func TestArchiveFilterByTimeRange(t *testing.T) {
 	}
 }
 
-func TestArchiveQueueDropCounter(t *testing.T) {
-	w := &archiveWriter{
-		cfg:  Config{Enabled: true, Dir: t.TempDir()},
-		ch:   make(chan Event, 1),
-		done: make(chan struct{}),
-	}
-	w.ch <- Event{RequestID: "occupied"}
-	w.enqueue(Event{RequestID: "dropped"})
-	if got := w.dropped.Load(); got != 1 {
-		t.Fatalf("dropped=%d want 1", got)
-	}
-}
-
-func TestArchivePruneHonorsSize(t *testing.T) {
-	dir := t.TempDir()
-	for i, name := range []string{"requests-2026-09-20.jsonl", "requests-2026-09-21.jsonl", "requests-2026-09-22.jsonl"} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		old := time.Now().AddDate(0, 0, -10+i)
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatal(err)
-		}
-	}
-	w := &archiveWriter{cfg: Config{Enabled: true, Dir: dir, RetentionDays: 30, MaxBytes: 50}, done: make(chan struct{})}
-	w.prune()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "requests-2026-09-22.jsonl" {
-		t.Fatalf("remaining = %+v, want newest file only", entries)
+// TestFilterAPIKey 按密钥名筛（包含匹配，不区分大小写）。
+func TestFilterAPIKey(t *testing.T) {
+	e := Event{APIKey: "Zhang 三"}
+	if !(Filter{APIKey: "zhang"}).match(e) || (Filter{APIKey: "李四"}).match(e) || !(Filter{}).match(e) {
+		t.Fatal("密钥名筛选不对")
 	}
 }

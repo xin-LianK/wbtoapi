@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // profile.go Web 控制台账号资料（issue #94：改名后免重登同步昵称）。
 //
 // GET {webBase}/console/account，Bearer + x-client-platform: web（与 tasks/claim
@@ -20,19 +24,7 @@ import (
 // FetchAccountProfile 拉取账号资料并返回最新昵称。uid 与凭证不一致时报错
 // （防串号）；业务/网络错误原样返回，调用方静默跳过即可。
 func (c *Client) FetchAccountProfile(a *auth.Auth) (string, error) {
-	req, err := http.NewRequest(http.MethodGet, c.webBase(a)+"/console/account", nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("x-client-platform", "web")
-	req.Header.Set("Origin", "https://www.workbuddy.cn")
-	req.Header.Set("Referer", "https://www.workbuddy.cn/profile/account-settings")
-	if ua := c.userAgent(a); ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
-	data, err := c.doJSON(req)
+	data, err := c.webJSON(a, http.MethodGet, "/console/account", webPageAccountSettings, nil)
 	if err != nil {
 		return "", err
 	}

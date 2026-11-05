@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // compensation.go 补偿活动的可观测化执行器（issue #189）。
 //
 // 承接 internal/upstream/compensation.go 补上的状态查询，把签到排程里那次「盲领」
@@ -37,24 +41,24 @@ const (
 
 // CompensationRow 单账号的补偿状态行（面板 GET /panel/api/compensation）。
 type CompensationRow struct {
-	UID      string                      `json:"uid"`
-	Nickname string                      `json:"nickname,omitempty"`
-	Status   upstream.CompensationStatus `json:"status"`
-	Skip     string                      `json:"skip,omitempty"`     // 非空 = 本次未发起上游查询/领取
-	SkipMsg  string                      `json:"skip_msg,omitempty"` // 跳过的中文说明
-	Error    string                      `json:"error,omitempty"`
+	UID      string                       `json:"uid"`
+	Nickname string                       `json:"nickname,omitempty"`
+	Status   *upstream.CompensationStatus `json:"status"`
+	Skip     string                       `json:"skip,omitempty"`     // 非空 = 本次未发起上游查询/领取
+	SkipMsg  string                       `json:"skip_msg,omitempty"` // 跳过的中文说明
+	Error    string                       `json:"error,omitempty"`
 }
 
 // CompensationResult 单账号的领取结果（面板 POST /panel/api/compensation_all）。
 type CompensationResult struct {
-	UID      string                      `json:"uid"`
-	Nickname string                      `json:"nickname,omitempty"`
-	Status   upstream.CompensationStatus `json:"status"`
-	Claimed  bool                        `json:"claimed"`
-	Credit   int64                       `json:"credit,omitempty"`
-	Skip     string                      `json:"skip,omitempty"`
-	SkipMsg  string                      `json:"skip_msg,omitempty"`
-	Error    string                      `json:"error,omitempty"`
+	UID      string                       `json:"uid"`
+	Nickname string                       `json:"nickname,omitempty"`
+	Status   *upstream.CompensationStatus `json:"status"`
+	Claimed  bool                         `json:"claimed"`
+	Credit   int64                        `json:"credit,omitempty"`
+	Skip     string                       `json:"skip,omitempty"`
+	SkipMsg  string                       `json:"skip_msg,omitempty"`
+	Error    string                       `json:"error,omitempty"`
 }
 
 // compTarget 一次遍历里某个账号的处理目标。

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Pool 账号池核心：结构定义、构造（New/Set* 注入）、在途租约（Acquire/Release）
 // 与账号增删（Add/SyncToDir/upsertLocked）。选号/冷却/状态/持久化见同包其他文件。
 package pool
@@ -12,8 +16,10 @@ import (
 )
 
 type Pool struct {
-	mu      sync.RWMutex
-	byUID   map[string]*entry
+	mu    sync.RWMutex
+	byUID map[string]*entry
+	// groups 账号分组（见 groups.go），随状态文件持久化。
+	groups  []Group
 	stateFp string
 	dirty   atomic.Bool // 内存有变更待落盘
 	// store 池状态快照镜像（redisstore.Store）；nil = 无需镜像（未配置 Redis / Noop 之外也可能 nil）。
@@ -46,14 +52,18 @@ type Pool struct {
 	// 账号 credits < floor 时不再参与选号——防止收费请求把余额打穿、连免费模型都
 	// 402 冷却到次日签到。签到回血（SetCreditsDetailed）越过 floor 即自动恢复。
 	// 全池触底且无免费模型可接时选号返回 nil（硬语义：宁 503 不打穿）。
-	// 收费与否的判据见 floorBlockedForModel：本地实测台账优先，缺失时用上游目录
+	// 收费与否的判据见 floorBlockedForRealmModel：本地实测台账优先，缺失时用上游目录
 	// 倍率（modelRateOf 注入）兜底，避免「无观测的高价新模型」绕过保底。
 	creditFloor int64
 	// modelRateOf 按 (realm, 模型) 查上游目录积分倍率（"0.79" / "" = 未知）。
 	// 由 main 用 upstream.Client.ModelRate 注入——pool 不依赖 upstream 包（避免
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
-	// 仅在持 p.mu 时由 floorBlockedForModel 调用；回调不得反向调用 Pool 方法。
+	// 仅在持 p.mu 时由 floorBlockedForRealmModel 调用；回调不得反向调用 Pool 方法。
 	modelRateOf func(realm, model string) string
+	// modelServes 按模型目录判断某个号能不能接某个模型（企业号各有自己的目录，企业专属
+	// 模型不派给个人号）。由 main 用 upstream.Client.ServesModel 注入；nil = 不按目录过滤。
+	// 仅在持 p.mu 时调用；回调不得反向调用 Pool 方法。
+	modelServes func(uid, realm string, enterprise bool, model string) bool
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
@@ -69,6 +79,25 @@ type Pool struct {
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
 	// WAF 风控更紧，压低并发）；0 = 未设置，回落 maxInFlight（不分档，零回归）。
 	maxInFlightGlobal int
+	// maxRPM / maxRPMGlobal 国内版、国际版单号每分钟请求数上限；0 = 不限（见 rpm.go）。
+	maxRPM       int
+	maxRPMGlobal int
+	// inFlightWait 能接请求的号在途都满时，请求最多等多久空位（SetInFlightWait 注入；默认
+	// defaultInFlightWait 30s，0 = 不等）。见 slotwait.go。
+	inFlightWait time.Duration
+	// slotMu / slotFreed 放出在途名额的通知（见 SlotFreed）；slotFreed 为 nil = 没人在等。
+	slotMu    sync.Mutex
+	slotFreed chan struct{}
+	// waveThreshold / waveWindow / wavePause 风控波熔断参数（SetRestrictionWave 注入；
+	// 默认值见 defaultRestrictionWave*，threshold 0 = 关闭）。waveHits 是各域窗口内
+	// 被 11140 限制的记录，运行态，不持久化（重启后从零记起）。
+	waveThreshold int
+	waveWindow    time.Duration
+	wavePause     time.Duration
+	waveHits      map[string][]restrictionHit
+	// exitKey 号的出口（SetExitKey，代理池装上）：风控波按出口分两层；nil 照旧整域暂停。调用时持着
+	// p.mu，它只取代理池自己的锁，不回调号池。
+	exitKey func(uid string) (key, label string)
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -108,6 +137,10 @@ func New(stateFp string) *Pool {
 		// config 显式 "0" 关停（SetCostExploreInterval(0)）。
 		costExploreInterval: defaultCostExploreInterval,
 		exploreLast:         map[string]time.Time{},
+		inFlightWait:        defaultInFlightWait,
+		waveThreshold:       defaultRestrictionWaveThreshold,
+		waveWindow:          defaultRestrictionWaveWindow,
+		wavePause:           defaultRestrictionWavePause,
 	}
 	if stateFp != "" {
 		p.load()
@@ -261,6 +294,31 @@ func (p *Pool) SetModelRateOf(fn func(realm, model string) string) {
 	p.modelRateOf = fn
 }
 
+// SetModelServes 注入按模型目录的选号过滤（main 用 upstream.Client.ServesModel 装配）。
+// fn 可为 nil（清注入）；回调只在持 p.mu 时被调用，不得反向调用 Pool 方法。
+func (p *Pool) SetModelServes(fn func(uid, realm string, enterprise bool, model string) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.modelServes = fn
+}
+
+// servableFor 账号对该模型可选：healthyForModel（禁用/暂停/冷却）且按目录能接这个模型。
+// 调用方必须已持有 p.mu（读锁或写锁）。
+func (p *Pool) servableFor(e *entry, now time.Time, model string) bool {
+	if !e.healthyForModel(now, model) {
+		return false
+	}
+	return p.servesModel(e, model)
+}
+
+// servesModel 按目录判断账号能不能接这个模型；未注入或模型为空时放行。调用方必须已持有 p.mu。
+func (p *Pool) servesModel(e *entry, model string) bool {
+	if p.modelServes == nil || model == "" {
+		return true
+	}
+	return p.modelServes(e.a.UID, e.a.Realm(), e.a.IsEnterprise(), model)
+}
+
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。
 func (p *Pool) SetMaxInFlight(n int) {
 	p.mu.Lock()
@@ -303,6 +361,7 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 // Acquire 为 uid 占一个在途名额（会话粘性命中后调用）；池上限内返回 true。
 // 名额用 entry.inFlight 原子自增，满额返回 false。上限按账号 realm 分档
 // （global 档 maxInFlightGlobal，P1-1；未设置回落 maxInFlight）。
+// 同时记一次每分钟请求数（见 rpm.go），最近 60 秒已到上限也返回 false。
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
@@ -310,10 +369,22 @@ func (p *Pool) Acquire(uid string) bool {
 		p.mu.RUnlock()
 		return false
 	}
-	limit := p.inFlightLimit(e)
+	limit, rpm := p.inFlightLimit(e), p.rpmLimit(e)
 	p.mu.RUnlock()
+	if !acquireSlot(e, limit) {
+		return false
+	}
+	// 每分钟请求数到上限：退回刚占的在途名额。没真正放出名额，不叫醒排队的请求。
+	if !e.rpm.take(rpm, time.Now()) {
+		e.inFlight.Add(-1)
+		return false
+	}
+	return true
+}
+
+// acquireSlot 在途名额 CAS 自增；limit <= 0 不限时计数仍累加（供状态观测），但永不拒绝。
+func acquireSlot(e *entry, limit int) bool {
 	if limit <= 0 {
-		// 不限：计数仍累加（供状态观测），但永不拒绝。
 		e.inFlight.Add(1)
 		return true
 	}
@@ -328,7 +399,8 @@ func (p *Pool) Acquire(uid string) bool {
 	}
 }
 
-// Release 释放一个在途名额。幂等减到 0 为止（防重复释放扣成负数）。
+// Release 释放一个在途名额。幂等减到 0 为止（防重复释放扣成负数）。放出名额后叫醒在等空位的
+// 请求（见 slotwait.go）。
 func (p *Pool) Release(uid string) {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
@@ -342,6 +414,7 @@ func (p *Pool) Release(uid string) {
 			return
 		}
 		if e.inFlight.CompareAndSwap(cur, cur-1) {
+			p.notifySlotFreed()
 			return
 		}
 	}

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package pool
 
 import (
@@ -76,8 +80,8 @@ func TestModelBlockedForRealmIgnoresOtherRealm(t *testing.T) {
 	p.Add(&auth.Auth{UID: "cn1", Domain: "www.codebuddy.cn"})
 	p.Add(&auth.Auth{UID: "g1", Domain: "www.workbuddy.ai"})
 	p.Add(&auth.Auth{UID: "g2", Domain: "www.workbuddy.ai"})
-	p.BlockModelBackoff("g1", "gpt-5.6-sol", "11158 model not allowed for account type")
-	p.BlockModelBackoff("g2", "gpt-5.6-sol", "11158 model not allowed for account type")
+	p.BlockModelForever("g1", "gpt-5.6-sol", "11158 model not allowed for account type")
+	p.BlockModelForever("g2", "gpt-5.6-sol", "11158 model not allowed for account type")
 
 	if st := p.ModelBlockedForRealm("gpt-5.6-sol", "global"); !st.Blocked || st.Count != 2 {
 		t.Fatalf("global 域应判定为全锁，得到 %+v", st)
@@ -91,7 +95,7 @@ func TestModelBlockedForRealmIgnoresOtherRealm(t *testing.T) {
 	if st := p.ModelBlocked("gpt-5.6-sol"); st.Blocked {
 		t.Fatalf("跨域仍有 cn1 可用，旧入口不应报全锁：%+v", st)
 	}
-	// 11158 与 11102 一样是确定性负缓存，权限恢复后成功请求必须能清除。
+	// 11158 一直屏蔽，但权限恢复后（指定这个模型测活）成功了必须能清除。
 	p.BlockModelClear("g1", "gpt-5.6-sol")
 	p.BlockModelClear("g2", "gpt-5.6-sol")
 	if st := p.ModelBlockedForRealm("gpt-5.6-sol", "global"); st.Blocked {

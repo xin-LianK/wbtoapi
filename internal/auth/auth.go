@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package auth 解析 WorkBuddy auth 文件（嵌套形/扁平形双形态），
 // 提供 refresh 后的原子写回。
 package auth
@@ -37,13 +41,78 @@ type Auth struct {
 	UID          string
 	EnterpriseID string
 	Nickname     string
-	FilePath     string // 来源文件；refresh 后原子写回此处
+	// DepartmentFullName 企业号的部门全名（账号接口的 departmentFullName，落盘于
+	// account.departmentFullName）。官方有值时给桌面端请求带 X-Department-Info、给上报事件带
+	// enterprise；个人号为空。登录时取，刷新令牌后随取账号更新（RefreshToken 在锁内改写，
+	// 读用 DepartmentValue）。
+	DepartmentFullName string
+	// DepartmentSet 凭证里有 departmentFullName 这个键（值可以为空）。官方核对身份时缺这个键和
+	// 空串算不同的值，见 AccountType。
+	DepartmentSet bool
+	// AccountType、OneIDAccountID、IDP、TokenType 是官方刷新令牌后核对身份用的其余字段
+	// （getAuthenticationAuthorityKey：account 的 type、oneidAccountId、idp 与 auth 的 tokenType），
+	// 网关别处不用，原样存在凭证里原来的位置。指针为 nil 表示凭证里没有这个键。AccountType 为
+	// nil 也说明凭证是 1.1.2 以前的网关写的（账号接口恒有 type），刷新时只补字段、不比对。
+	AccountType    *string
+	OneIDAccountID *string
+	IDP            *string
+	TokenType      *string
+	FilePath       string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
 	// 顶层 device_token 也会被解析（与桌面端共用状态文件的部署方式）。
 	DeviceToken string
+
+	// proxy 号绑的出站代理（代理池，见 internal/proxies），落盘于顶层 proxy 对象，嵌套形与扁平形
+	// 共用。零值 = 没绑，走默认线路（环境变量里的代理或直连）。读写都持 a.mu（ProxyBinding /
+	// SetProxyBinding），刷新令牌写回凭证时原样保留。
+	proxy ProxyBinding
+	// proxyURL 凭证顶层的 proxy_url（CLIProxyAPI 插件等工具的写法）：只在导入、启动时用来认出该绑
+	// 哪个代理（TakeProxyURL），取走即清空，不写回。
+	proxyURL string
+}
+
+// ProxyBinding 号绑的出站代理。ID 为空而 Pool 非空 = 绑了池但池里暂时没有空位（等代理）。
+// Manual 表示代理是单独指定的，池内重新均分时不动它。
+type ProxyBinding struct {
+	Pool   string `json:"pool,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Manual bool   `json:"manual,omitempty"`
+}
+
+// Empty 没绑任何池或代理。
+func (b ProxyBinding) Empty() bool { return b.Pool == "" && b.ID == "" }
+
+// ProxyBinding 读号绑的出站代理。
+func (a *Auth) ProxyBinding() ProxyBinding {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.proxy
+}
+
+// SetProxyBinding 改号绑的出站代理（只改内存，落盘由调用方 SaveAtomic）。
+func (a *Auth) SetProxyBinding(b ProxyBinding) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proxy = b
+}
+
+// SetProxyURL 记下凭证里带的 proxy_url（自己解析凭证文件、不走 Parse 的命令行工具用），号进代理池时认出代理。
+func (a *Auth) SetProxyURL(u string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proxyURL = strings.TrimSpace(u)
+}
+
+// TakeProxyURL 取走凭证里带的 proxy_url（取一次就清空）。
+func (a *Auth) TakeProxyURL() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	u := a.proxyURL
+	a.proxyURL = ""
+	return u
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -78,6 +147,29 @@ func (a *Auth) DomainValue() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.Domain
+}
+
+// DepartmentValue 加锁读取 DepartmentFullName（RefreshToken 在锁内改写它）。
+func (a *Auth) DepartmentValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.DepartmentFullName
+}
+
+// AccountTypeValue 加锁读取账号类型，没有时为空串（RefreshToken 在锁内改写 AccountType）。
+func (a *Auth) AccountTypeValue() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.AccountType == nil {
+		return ""
+	}
+	return *a.AccountType
 }
 
 // RefreshTokenValue 加锁读取 RefreshToken（同 AccessTokenValue：RefreshToken 在锁内
@@ -174,7 +266,8 @@ func BackfillRealmFor(a *Auth, realm string) (bool, error) {
 	if a == nil {
 		return false, fmt.Errorf("nil auth")
 	}
-	switch strings.TrimSpace(realm) {
+	realm = strings.TrimSpace(realm)
+	switch realm {
 	case "cn", "global":
 	default:
 		return false, fmt.Errorf("realm must be cn/global, got %q", realm)
@@ -290,10 +383,22 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	return time.Now().Add(within).Unix() >= a.ExpiresAt
 }
 
+// expiresAtSeconds 把凭证里的到期时间统一成 Unix 秒。网关自己写的是秒，官方客户端存的是
+// 毫秒（calculateExpiresAt：Date.now()+1e3*expiresIn），原样当秒读会永远不主动刷新，
+// 令牌到期后只剩 401。大于 1e11 的按毫秒算：1e11 秒是公元 5138 年，1e11 毫秒是 1973 年，不会混。
+func expiresAtSeconds(v int64) int64 {
+	if v > 1e11 {
+		return v / 1000
+	}
+	return v
+}
+
 // Parse 兼容两种磁盘形态：
 //
 //	嵌套形 {"auth":{...},"account":{...}}  （插件 OAuth 输出）
 //	扁平形 {"accessToken":...,"uid":...}   （手写/旧版）
+//
+// expiresAt 秒和毫秒都认，读进来一律是秒（expiresAtSeconds）。
 func Parse(raw []byte) (*Auth, error) {
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("empty auth storage")
@@ -306,59 +411,90 @@ func Parse(raw []byte) (*Auth, error) {
 	if _, nested := probe["auth"]; nested {
 		var n struct {
 			Auth struct {
-				AccessToken  string `json:"accessToken"`
-				RefreshToken string `json:"refreshToken"`
-				ExpiresAt    int64  `json:"expiresAt"`
-				Domain       string `json:"domain"`
-				Realm        string `json:"realm"`
+				AccessToken  string  `json:"accessToken"`
+				RefreshToken string  `json:"refreshToken"`
+				ExpiresAt    int64   `json:"expiresAt"`
+				Domain       string  `json:"domain"`
+				Realm        string  `json:"realm"`
+				TokenType    *string `json:"tokenType"`
 			} `json:"auth"`
 			Account struct {
-				UID          string `json:"uid"`
-				EnterpriseID string `json:"enterpriseId"`
-				Nickname     string `json:"nickname"`
+				UID            string  `json:"uid"`
+				EnterpriseID   string  `json:"enterpriseId"`
+				Nickname       string  `json:"nickname"`
+				Department     *string `json:"departmentFullName"`
+				Type           *string `json:"type"`
+				OneIDAccountID *string `json:"oneidAccountId"`
+				IDP            *string `json:"idp"`
 			} `json:"account"`
 			// DeviceToken 顶层 device_token（嵌套形与扁平形共用；手写时无需嵌进 auth 对象）。
 			DeviceToken string `json:"device_token"`
+			// Proxy、ProxyURL 顶层 proxy、proxy_url（两种形状共用），见 Auth.proxy。
+			Proxy    ProxyBinding `json:"proxy"`
+			ProxyURL string       `json:"proxy_url"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  n.Auth.AccessToken,
-			RefreshToken: n.Auth.RefreshToken,
-			ExpiresAt:    n.Auth.ExpiresAt,
-			Domain:       n.Auth.Domain,
-			realm:        n.Auth.Realm,
-			UID:          n.Account.UID,
-			EnterpriseID: n.Account.EnterpriseID,
-			Nickname:     n.Account.Nickname,
-			DeviceToken:  n.DeviceToken,
+			AccessToken:        n.Auth.AccessToken,
+			RefreshToken:       n.Auth.RefreshToken,
+			ExpiresAt:          expiresAtSeconds(n.Auth.ExpiresAt),
+			Domain:             n.Auth.Domain,
+			realm:              n.Auth.Realm,
+			UID:                n.Account.UID,
+			EnterpriseID:       n.Account.EnterpriseID,
+			Nickname:           n.Account.Nickname,
+			DepartmentFullName: deref(n.Account.Department),
+			DepartmentSet:      n.Account.Department != nil,
+			AccountType:        n.Account.Type,
+			OneIDAccountID:     n.Account.OneIDAccountID,
+			IDP:                n.Account.IDP,
+			TokenType:          n.Auth.TokenType,
+			DeviceToken:        n.DeviceToken,
+			proxy:              n.Proxy,
+			proxyURL:           strings.TrimSpace(n.ProxyURL),
 		}
 	} else {
 		var f struct {
-			AccessToken  string `json:"accessToken"`
-			RefreshToken string `json:"refreshToken"`
-			ExpiresAt    int64  `json:"expiresAt"`
-			Domain       string `json:"domain"`
-			Realm        string `json:"realm"`
-			UID          string `json:"uid"`
-			EnterpriseID string `json:"enterpriseId"`
-			Nickname     string `json:"nickname"`
-			DeviceToken  string `json:"device_token"`
+			AccessToken    string       `json:"accessToken"`
+			RefreshToken   string       `json:"refreshToken"`
+			ExpiresAt      int64        `json:"expiresAt"`
+			Domain         string       `json:"domain"`
+			Realm          string       `json:"realm"`
+			UID            string       `json:"uid"`
+			EnterpriseID   string       `json:"enterpriseId"`
+			Nickname       string       `json:"nickname"`
+			Department     *string      `json:"departmentFullName"`
+			Type           *string      `json:"type"`
+			OneIDAccountID *string      `json:"oneidAccountId"`
+			IDP            *string      `json:"idp"`
+			TokenType      *string      `json:"tokenType"`
+			DeviceToken    string       `json:"device_token"`
+			Proxy          ProxyBinding `json:"proxy"`
+			ProxyURL       string       `json:"proxy_url"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
 		}
 		a = Auth{
-			AccessToken:  f.AccessToken,
-			RefreshToken: f.RefreshToken,
-			ExpiresAt:    f.ExpiresAt,
-			Domain:       f.Domain,
-			realm:        f.Realm,
-			UID:          f.UID,
-			EnterpriseID: f.EnterpriseID,
-			Nickname:     f.Nickname,
-			DeviceToken:  f.DeviceToken,
+			AccessToken:        f.AccessToken,
+			RefreshToken:       f.RefreshToken,
+			ExpiresAt:          expiresAtSeconds(f.ExpiresAt),
+			Domain:             f.Domain,
+			realm:              f.Realm,
+			UID:                f.UID,
+			EnterpriseID:       f.EnterpriseID,
+			Nickname:           f.Nickname,
+			DepartmentFullName: deref(f.Department),
+			DepartmentSet:      f.Department != nil,
+			AccountType:        f.Type,
+			OneIDAccountID:     f.OneIDAccountID,
+			IDP:                f.IDP,
+			TokenType:          f.TokenType,
+			DeviceToken:        f.DeviceToken,
+			proxy:              f.Proxy,
+			proxyURL:           strings.TrimSpace(f.ProxyURL),
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -367,18 +503,24 @@ func Parse(raw []byte) (*Auth, error) {
 	return &a, nil
 }
 
-// SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。
-// 全程持 a.mu：防止与 RefreshToken 修改 token 字段并发，杜绝写回半更新。
-// 防御：accessToken 为空时拒绝写回，避免误用空凭证覆盖有效文件。
-func (a *Auth) SaveAtomic() error {
+// deref 取指针的值，nil 为空串。
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// Document 返回凭证的嵌套形文档，与 SaveAtomic 写进 auth 文件的内容一致（面板导出用，
+// Parse 原样读回）。加锁读取：keepalive 刷新会在 a.mu 内改写 token 字段。
+func (a *Auth) Document() map[string]any {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if strings.TrimSpace(a.AccessToken) == "" {
-		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
-	}
-	if a.FilePath == "" {
-		return fmt.Errorf("no FilePath set")
-	}
+	return a.documentLocked()
+}
+
+// documentLocked Document 的无锁实现，仅限已持 a.mu 的调用方。
+func (a *Auth) documentLocked() map[string]any {
 	doc := map[string]any{
 		"auth": map[string]any{
 			"accessToken":  a.AccessToken,
@@ -393,12 +535,44 @@ func (a *Auth) SaveAtomic() error {
 			"nickname":     a.Nickname,
 		},
 	}
+	// 部门全名与官方核对身份用的字段：有这个键才写，个人号没有部门全名这个键。
+	account, authDoc := doc["account"].(map[string]any), doc["auth"].(map[string]any)
+	if a.DepartmentSet || a.DepartmentFullName != "" {
+		account["departmentFullName"] = a.DepartmentFullName
+	}
+	for k, v := range map[string]*string{"type": a.AccountType, "oneidAccountId": a.OneIDAccountID, "idp": a.IDP} {
+		if v != nil {
+			account[k] = *v
+		}
+	}
+	if a.TokenType != nil {
+		authDoc["tokenType"] = *a.TokenType
+	}
 	// DeviceToken 非空才写回顶层 device_token：避免在无该字段的旧文件里引入空键
 	// （保持与插件 OAuth 输出形状一致，插件读取忽略未知键）。
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
 	}
-	raw, err := json.MarshalIndent(doc, "", "  ")
+	// 绑了代理才写 proxy；proxy_url 只是导入时的线索，不写回（认出的代理已记在 proxy 里）。
+	if !a.proxy.Empty() {
+		doc["proxy"] = a.proxy
+	}
+	return doc
+}
+
+// SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。
+// 全程持 a.mu：防止与 RefreshToken 修改 token 字段并发，杜绝写回半更新。
+// 防御：accessToken 为空时拒绝写回，避免误用空凭证覆盖有效文件。
+func (a *Auth) SaveAtomic() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if strings.TrimSpace(a.AccessToken) == "" {
+		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
+	}
+	if a.FilePath == "" {
+		return fmt.Errorf("no FilePath set")
+	}
+	raw, err := json.MarshalIndent(a.documentLocked(), "", "  ")
 	if err != nil {
 		return err
 	}

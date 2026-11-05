@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package credithist 积分历史：把「每次真实查到的余额」与上一次比对，变动即留痕。
 //
 // 为什么需要：签到 / 活跃上报 / 猫猫旅行 / 成长任务都会让余额增加，但上游只在少数

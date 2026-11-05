@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // anthropic.go Anthropic Messages API 兼容层：POST /v1/messages。
 //
 // 为什么需要它：Claude Code、cc-switch、以及任何用 @anthropic-ai/sdk 的工具，
@@ -18,10 +22,15 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 )
@@ -663,7 +672,7 @@ func (h *Handler) withAuthAnthropic(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // anthropicMessages 处理 POST /v1/messages。
-func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) anthropicMessagesSelfImpl(w http.ResponseWriter, r *http.Request) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, anthropicBodyLimit))
 	if err != nil {
 		writeMessagesError(w, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
@@ -756,4 +765,28 @@ func estimateTokensText(s string) int {
 		n = 1
 	}
 	return n
+}
+
+// randomHex 生成 n 字节随机数的十六进制串（长度 2n）。给不上随机数时退化为
+// 计数器与纳秒时间混合的伪随机，保证 ID 仍然唯一可辨。
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%0*x", n*2, uint64(time.Now().UnixNano())^atomic.AddUint64(&idSeq, 1))
+	}
+	return hex.EncodeToString(b)
+}
+
+// idSeq 熵源故障时的兜底计数器（正常路径不使用）。
+var idSeq uint64
+
+// writeMessagesError 按 Anthropic 错误形态写出（与 OpenAI 形态分开，客户端各自解析）。
+func writeMessagesError(w http.ResponseWriter, status int, errType, msg string) {
+	writeJSON(w, status, map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    errType,
+			"message": msg,
+		},
+	})
 }

@@ -1,9 +1,14 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package upstream
 
 import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -48,7 +53,7 @@ func TestUserAgentDefaultEmptyKeepsClientUA(t *testing.T) {
 			call: func(c *Client) error {
 				return c.ReportChatActivity(&auth.Auth{AccessToken: "at", UID: "u1"}, "cid", "")
 			},
-			wantUA: "WorkBuddy/5.8.3",
+			wantUA: billingUAWorkBuddy,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -102,7 +107,8 @@ func TestUserAgentOverrideAllOutbound(t *testing.T) {
 		if got := r.Header.Get("User-Agent"); got != ua {
 			t.Errorf("Refresh UA = %q want %q", got, ua)
 		}
-		return jsonResp(200, `{"code":0,"data":{"accessToken":"nat","refreshToken":"nrt"}}`), nil
+		// 同一个响应体同时应答刷新与刷新后的取账号（uid 与账号一致）。
+		return jsonResp(200, `{"code":0,"data":{"accessToken":"nat","refreshToken":"nrt","uid":"u1"}}`), nil
 	})
 	if err := c.RefreshToken(a); err != nil {
 		t.Errorf("refresh: %v", err)
@@ -133,18 +139,12 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
-			switch {
-			case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
-				if got := r.Header.Get("User-Agent"); got != "FetchAgent/2" {
-					t.Errorf("personal/models UA = %q want FetchAgent/2", got)
-				}
-			case strings.HasSuffix(r.URL.Path, "/v3/config"):
-				if got := r.Header.Get("User-Agent"); got != codeBuddyIDEUA {
-					t.Errorf("v3/config UA = %q want %s", got, codeBuddyIDEUA)
-				}
-				return jsonResp(200, `{"code":0,"data":{"models":[]}}`), nil
-			default:
+			// 个人号只拉 /v3/config，配置的 UA 同样生效。
+			if !strings.HasSuffix(r.URL.Path, "/v3/config") {
 				t.Errorf("path=%s", r.URL.Path)
+			}
+			if got := r.Header.Get("User-Agent"); got != "FetchAgent/2" {
+				t.Errorf("v3/config UA = %q want FetchAgent/2", got)
 			}
 			return jsonResp(200, `{"code":0,"data":{"models":[{"id":"glm-5.2","name":"GLM","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":[]},"disabled":false}],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
 		})},
@@ -159,12 +159,13 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 
 // --- A 段：UA 对齐官方 WorkBuddy 三段式 ---
 
+// 国内版桌面端 5.9.3 内置 CLI 2.165.0；国内版后台服务的 UA 两段同名，与 CLI 的一样。
 const (
-	defaultUAString      = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
+	defaultUAString      = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
 	explicitString       = "MyCustomAgent/3.1"
-	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.161.0"
-	billingUAWorkBuddy   = "WorkBuddy/5.8.3"
-	billingUACustomVer   = "WorkBuddy/6.0.0"
+	clientVerUAString    = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.165.0"
+	billingUAWorkBuddy   = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
+	billingUACustomVer   = "WorkBuddy/6.0.0 WorkBuddy/6.0.0 CLI/2.165.0"
 	billingUAAgentString = "BillingAgent/1"
 )
 
@@ -206,7 +207,7 @@ func TestUserAgentExplicitOverride(t *testing.T) {
 			if got := r.Header.Get("User-Agent"); got != explicitString {
 				t.Errorf("UA = %q want %q (path=%s)", got, explicitString, r.URL.Path)
 			}
-			return jsonResp(200, `{"code":0,"data":{"accessToken":"nat","refreshToken":"nrt"}}`), nil
+			return jsonResp(200, `{"code":0,"data":{"accessToken":"nat","refreshToken":"nrt","uid":"u1"}}`), nil
 		})},
 		ChatHTTP:      &http.Client{Transport: uaCaptureTransport{ua: new(string)}},
 		ChatBaseCN:    "https://chat.example",
@@ -249,15 +250,15 @@ func TestUserAgentClientVersionOverride(t *testing.T) {
 	}
 }
 
-// TestBillingUA_WhenClientNameSet billing/checkin 路径：client_name 非空时用单段
-// `WorkBuddy/<clientVersion>`（不带 CLI 段，对齐官方 banner/check-in 显式头组）。
+// TestBillingUA_WhenClientNameSet 积分查询（后台服务的 AuthService）：client_name 非空时是 axios 的默认 UA，
+// 不随 client_version 变；显式 user_agent 仍优先。
 func TestBillingUA_WhenClientNameSet(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	// 默认 client_version → WorkBuddy/5.8.3
+	// 默认 client_version → 5.9.3
 	c := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
-			if got := r.Header.Get("User-Agent"); got != billingUAWorkBuddy {
-				t.Errorf("billing UA = %q want %q (path=%s)", got, billingUAWorkBuddy, r.URL.Path)
+			if got := r.Header.Get("User-Agent"); got != axiosUserAgent {
+				t.Errorf("billing UA = %q want %q (path=%s)", got, axiosUserAgent, r.URL.Path)
 			}
 			return jsonResp(200, `{"code":0,"data":{"response":{"data":{"accounts":[{"PackageName":"x","CycleCapacitySize":100,"CycleCapacityUsed":0}]}}}}`), nil
 		})},
@@ -268,11 +269,11 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 	if _, _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
-	// 自定义 client_version → WorkBuddy/6.0.0
+	// 自定义 client_version → 6.0.0
 	c2 := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
-			if got := r.Header.Get("User-Agent"); got != billingUACustomVer {
-				t.Errorf("billing UA = %q want %q", got, billingUACustomVer)
+			if got := r.Header.Get("User-Agent"); got != axiosUserAgent {
+				t.Errorf("billing UA = %q want %q", got, axiosUserAgent)
 			}
 			return jsonResp(200, `{"code":0,"data":{"response":{"data":{"accounts":[{"PackageName":"x","CycleCapacitySize":100,"CycleCapacityUsed":0}]}}}}`), nil
 		})},
@@ -284,7 +285,7 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 	if _, _, err := c2.UserResource(a); err != nil {
 		t.Errorf("userResource v2: %v", err)
 	}
-	// 显式 user_agent 仍优先于 billingUA
+	// 显式 user_agent 仍优先于后台服务的默认 UA
 	c3 := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
 			if got := r.Header.Get("User-Agent"); got != billingUAAgentString {
@@ -302,15 +303,20 @@ func TestBillingUA_WhenClientNameSet(t *testing.T) {
 	}
 }
 
-// TestBillingUA_WhenClientNameEmpty client_name 空 = 默认对齐官方桌面端：
-// billing UA 单段 WorkBuddy/<clientVersion>；显式 client_name="SaaS" 才不设 UA。
+// TestBillingUA_WhenClientNameEmpty client_name 空 = 默认对齐官方桌面端：积分查询是 axios 的默认 UA，
+// 后台服务经请求框架的请求是三段式；显式 client_name="SaaS" 时两样都不设 UA。
 func TestBillingUA_WhenClientNameEmpty(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	var ua string
+	var (
+		mu sync.Mutex // 积分的三个接口并发请求
+		ua string
+	)
 	const fullResp = `{"code":0,"data":{"response":{"data":{"accounts":[{"PackageName":"x","CycleCapacitySize":100,"CycleCapacityUsed":0}]}}}}`
 	c := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+			mu.Lock()
 			ua = r.Header.Get("User-Agent")
+			mu.Unlock()
 			return jsonResp(200, fullResp), nil
 		})},
 		ChatBaseCN:    "https://chat.example",
@@ -320,16 +326,22 @@ func TestBillingUA_WhenClientNameEmpty(t *testing.T) {
 	if _, _, err := c.UserResource(a); err != nil {
 		t.Errorf("userResource: %v", err)
 	}
-	if ua != "WorkBuddy/6.0.0" {
-		t.Errorf("billing UA = %q want WorkBuddy/6.0.0 (default desktop fingerprint)", ua)
+	if ua != axiosUserAgent {
+		t.Errorf("billing UA = %q want %s (default desktop fingerprint)", ua, axiosUserAgent)
 	}
-	if got := c.billingUA(); got != "WorkBuddy/6.0.0" {
-		t.Errorf("billingUA() = %q want WorkBuddy/6.0.0", got)
+	if got := c.daemonUserAgent(a); got != billingUACustomVer {
+		t.Errorf("daemonUserAgent() = %q want %s", got, billingUACustomVer)
 	}
 	// 显式 SaaS 还原旧行为（不设 UA）。
 	c.ClientName = "SaaS"
-	if got := c.billingUA(); got != "" {
-		t.Errorf("billingUA() SaaS = %q want empty", got)
+	if got := c.daemonUserAgent(a); got != "" {
+		t.Errorf("daemonUserAgent() SaaS = %q want empty", got)
+	}
+	if _, _, err := c.UserResource(a); err != nil {
+		t.Errorf("userResource SaaS: %v", err)
+	}
+	if ua != "" {
+		t.Errorf("billing UA SaaS = %q want empty", ua)
 	}
 }
 

@@ -1,201 +1,235 @@
-// search.go 联网搜索接口：/agenttool/v1/search。
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
+// search.go 联网搜索：POST {入口}/agenttool/v1/search。网关怎么选号、对外有哪些入口见 server/search.go。
 //
-// 上游契约（对齐官方客户端 WebSearchTool，实测 2026-10）：
-//   - POST {chatBase}/agenttool/v1/search，超时 20s
-//   - 请求体 {"query":..., "type":"text2text", "max_results":N}
-//   - 响应为**扁平结构**（非 {code,msg,data} 信封）：
-//     {query, type, provider, results[{title,url,snippet,site?,favicon?}],
-//     total_results, response_time_ms}
-//   - 业务错误才带 code/msg（如 code=15003 unsupported search type/provider），
-//     且通常同时伴随 HTTP 4xx
-//
-// 为什么不能复用 doJSON：doJSON 解的是 {code,msg,data} 统一信封并只返回 data；
-// 搜索成功响应没有 data 包裹，直接套信封会拿到空 data。故单独实现 doSearch，
-// 但错误分类与 doJSON 保持同一口径（复用 Classify/Error），不引入第二套判定。
+// 依据：国内版桌面端 5.9.3 内置 CLI 2.165.0 的 WebSearch 工具（cli/dist/codebuddy-lite-wb.mjs 的
+// performWebSearch、buildRequestBody），读安装包确认，见 docs/official-client.md「联网搜索」：
+//   - 地址是产品入口（和对话同一个）加 /agenttool/v1/search，20 秒超时。工具用 Node 内置的 fetch 直接发，
+//     不经 axios 请求框架，也不经 OpenAI SDK，请求头是工具自己的一份清单（见 searchHeaders）。
+//   - 请求体 {"query","type":"text2text","max_results":5}，有白名单时加 allowed_domains，限了时间时加
+//     freshness；黑名单不单独发，拼在 query 末尾：` (-site:a -site:b)`。
+//   - 回应是扁平的 {provider, results[{title,url,snippet,site?,favicon?}], total_results, response_time_ms}，
+//     不套 {code,msg,data}；HTTP 不是 2xx、或者 code 不是 0 都算失败。
+//   - 拿到结果后去掉链接不是 http/https 的条目、图标不是 http/https 的去掉图标（官方 filterUnsafeResults；
+//     它另查一份本地的恶意域名库，网关没有这份库）。
 package upstream
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 const (
-	// searchPath 搜索端点路径。官方 CLI 同名常量 WEB_SEARCH_API_PATH。
-	// 与 chat 共用同一 endpoint（官方 product.endpoint 同时承载 /v2/chat/completions
-	// 与 /agenttool/v1/search），故 base 复用 chatBase。
 	searchPath = "/agenttool/v1/search"
-
-	// searchTimeout 搜索请求整体超时，对齐官方 WEB_SEARCH_TIMEOUT_MS（2e4）。
-	// 必须显式设置：搜索是同步 JSON 请求（非流式），上游 hang 时若无超时会一直占用
-	// 在途租约，把账号池名额耗光。
+	// searchTimeout 同官方 WEB_SEARCH_TIMEOUT_MS。
 	searchTimeout = 20 * time.Second
-
-	// SearchDefaultMaxResults 默认返回条数 = 官方硬编码值（buildRequestBody 固定 5）。
-	SearchDefaultMaxResults = 5
-
-	// SearchMaxResultsCap 服务端实际返回上限（实测约 10）。
-	// 请求值超过该上限不会报错、也不会多返回，只是被服务端截断——故在入口收敛，
-	// 避免把无效配置透传给上游并给调用方「配了就该生效」的错觉。
-	SearchMaxResultsCap = 10
-
-	// SearchMinQueryLen 官方 zod schema 的 query.min(2)。
-	SearchMinQueryLen = 2
+	// searchMaxResults 官方 buildRequestBody 写死 5 条，不让调用方改。
+	searchMaxResults = 5
 )
 
-// SearchResult 单条搜索结果。
-// site / favicon 是上游可选字段（官方客户端同样按「有才带」处理）。
+// searchFreshness 官方入参 freshness 的取值：d、d1–d30、m、m1–m12、y、y1–y5。
+var searchFreshness = regexp.MustCompile(`^(?:d(?:[1-9]|[12]\d|30)?|m(?:[1-9]|1[0-2])?|y[1-5]?)$`)
+
+// SearchQuery 一次联网搜索的参数，同官方 WebSearch 工具的入参。
+type SearchQuery struct {
+	Query          string
+	AllowedDomains []string // 只要这些域名的结果
+	BlockedDomains []string // 不要这些域名的结果
+	Freshness      string   // 时间范围，空 = 不限
+}
+
+// Check 照官方 validateParams 校验入参：query 去掉空白后不能为空、至少 2 个字，freshness 按官方的格式。
+func (q SearchQuery) Check() error {
+	if strings.TrimSpace(q.Query) == "" {
+		return errors.New("the 'query' parameter cannot be empty")
+	}
+	if utf8.RuneCountInString(q.Query) < 2 {
+		return errors.New("the 'query' parameter must be at least 2 characters long")
+	}
+	if q.Freshness != "" && !searchFreshness.MatchString(q.Freshness) {
+		return errors.New("freshness must be d or d1-d30, m or m1-m12, or y or y1-y5")
+	}
+	return nil
+}
+
+// SearchResult 一条搜索结果。
 type SearchResult struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
-	Snippet string `json:"snippet,omitempty"`
+	Snippet string `json:"snippet"`
 	Site    string `json:"site,omitempty"`
 	Favicon string `json:"favicon,omitempty"`
 }
 
-// SearchOutcome 一次搜索的完整结果，字段名与上游响应一致，便于直接透出。
+// SearchOutcome 一次搜索的结果。
 type SearchOutcome struct {
-	Query          string         `json:"query"`
-	Results        []SearchResult `json:"results"`
-	TotalResults   int            `json:"total_results"`
-	Provider       string         `json:"provider,omitempty"`
-	ResponseTimeMs int64          `json:"response_time_ms,omitempty"`
+	Provider       string
+	Results        []SearchResult
+	TotalResults   int
+	ResponseTimeMs int64
+	// Filtered 上游给了结果、但都因链接不是 http/https 被去掉了（官方这时说「没有安全的结果」）。
+	Filtered bool
 }
 
-// SearchHeaders 搜索请求头。
-//
-// 复用 ChatHeaders 的桌面端全套头族（UA 三段式 / Origin / Referer /
-// X-CodeBuddy-Request / X-Machine-ID / X-Session-ID / Accept-Language /
-// Authorization / X-User-Id / 企业与域头 / X-Agent-Purpose + X-IDE-* + X-Product /
-// X-Device-Token / 会话头族 X-Conversation-* + X-Request-ID + X-Root-Request-ID + B3），
-// 再按官方 WebSearchTool 的差异覆盖四处：
-//   - Accept：搜索是非流式 JSON，官方为 application/json
-//     （ChatHeaders 为 chat 流式设成 event-stream，必须覆盖）
-//   - Content-Type：官方搜索为 application/json;charset=UTF-8
-//     （CommonHeaders 的 chat 形态是不带 charset 的 application/json）
-//   - X-Agent-Intent：官方固定 "craft"（搜索请求不携带会话 mode）
-//   - X-Agent-Runtime：官方 2.166.0 起必发，无 runtime 时回落 "other"
-//
-// 为什么整体复用 ChatHeaders 而不是照抄官方 WebSearchTool 的精简头清单：
-// 官方 CLI 的搜索头就是它**同一个客户端**的通用头（CLI 的 chat 与搜索共用
-// `CLI/<ver>` UA、同一套会话头族），搜索并没有独立的头族。本项目出站身份是
-// WorkBuddy 桌面端，chat 一直用 ChatHeaders 那套；若搜索另发一套精简头，上游会看到
-// 「同一账号同一时段存在两种不同客户端指纹」，反而更像异常。故搜索 = 桌面端头族
-// + 搜索特有的三项覆盖。
-func (c *Client) SearchHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
-	c.ChatHeaders(req, a, clientIP, meta)
-	req.Header.Set("Accept", "application/json")
-	// 官方搜索 Content-Type 带 charset（MediaType.APPLICATION_JSON_UTF8）。
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-	req.Header.Set("X-Agent-Intent", "craft")
-	req.Header.Set("X-Agent-Runtime", "other")
+// searchBody 出站请求体。用结构体保持官方的字段顺序（query → type → max_results → allowed_domains → freshness）。
+type searchBody struct {
+	Query          string   `json:"query"`
+	Type           string   `json:"type"`
+	MaxResults     int      `json:"max_results"`
+	AllowedDomains []string `json:"allowed_domains,omitempty"`
+	Freshness      string   `json:"freshness,omitempty"`
 }
 
-// ClampSearchMaxResults 把调用方给的条数收敛到 [1, SearchMaxResultsCap]；
-// <=0 视为未指定，回落官方默认值。
-func ClampSearchMaxResults(n int) int {
-	if n <= 0 {
-		return SearchDefaultMaxResults
+// Search 用 a 搜一次。meta 只用 ConversationID 和 ConversationRequestID：会话 id 为空时新生成一个
+// （同 ChatHeaders），轮次 id 原样发（官方没有时发空值）。HTTP 不是 2xx 或回应带了非 0 的 code 时返回
+// *Error，传输出错、回应读不了返回普通 error。不选号、不换号，那些在 server 里做。
+func (c *Client) Search(ctx context.Context, a *auth.Auth, q SearchQuery, meta ChatMeta) (*SearchOutcome, error) {
+	query := q.Query
+	if len(q.BlockedDomains) > 0 {
+		sites := make([]string, len(q.BlockedDomains))
+		for i, d := range q.BlockedDomains {
+			sites[i] = "-site:" + d
+		}
+		query += " (" + strings.Join(sites, " ") + ")"
 	}
-	if n > SearchMaxResultsCap {
-		return SearchMaxResultsCap
-	}
-	return n
-}
-
-// searchRequestBody 出站搜索请求体。
-//
-// 用 struct 而不是 map：Go 的 map 序列化会按键名排序（max_results, query, type），
-// 而官方 buildRequestBody 的字段顺序是 query → type → max_results。虽然 JSON 语义上
-// 顺序无关，但保持与真实客户端逐字节同形，便于抓包比对与可能的 body 指纹风控。
-type searchRequestBody struct {
-	Query      string `json:"query"`
-	Type       string `json:"type"`
-	MaxResults int    `json:"max_results"`
-}
-
-// Search 对指定账号执行一次联网搜索。
-//
-// 只做「一次上游调用 + 结果解析」，不涉及选号/轮转/冷却——那些属于 handler 的职责
-// （与 chat 一致：upstream 层不感知账号池）。
-//
-// 返回的 error 在 HTTP 非 2xx 或业务 code != 0 时是 *Error（带 Kind，供 handler
-// 决定是否罚号），其余（序列化/读体失败）是普通 error（传输层故障不罚号）。
-func (c *Client) Search(ctx context.Context, a *auth.Auth, query string, maxResults int, meta ChatMeta) (*SearchOutcome, error) {
-	query = strings.TrimSpace(query)
-	if len(query) < SearchMinQueryLen {
-		return nil, &Error{Kind: ErrClient, Msg: fmt.Sprintf("search query must be at least %d characters", SearchMinQueryLen)}
-	}
-	body, err := json.Marshal(searchRequestBody{
-		Query:      query,
-		Type:       "text2text", // 官方硬编码；服务端只接受小写该值
-		MaxResults: ClampSearchMaxResults(maxResults),
+	// JSON.stringify 不转义 <、>、&，Go 默认会转成 < 这类写法：关掉，和官方逐字节一样。
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(searchBody{
+		Query: query, Type: "text2text", MaxResults: searchMaxResults,
+		AllowedDomains: q.AllowedDomains, Freshness: q.Freshness,
 	})
-	if err != nil {
-		return nil, err
-	}
+	body := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+
 	ctx, cancel := context.WithTimeout(ctx, searchTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatBase(a)+searchPath, bytes.NewReader(body))
+	req, err := newAccountRequest(ctx, a, http.MethodPost, c.chatBase(a)+searchPath, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	c.SearchHeaders(req, a, "", meta)
-	return c.doSearch(req)
-}
-
-// doSearch 发搜索请求并解析扁平响应。
-//
-// 错误处理与 doJSON 同口径：
-//   - HTTP >= 400 → Classify 出 Kind，包成 *Error
-//   - 2xx 但 code != 0 → 业务错误（ErrNone 时兜底 ErrClient），同样包成 *Error
-//   - 读体失败 → 普通 error（半截 body 不参与账号惩罚）
-func (c *Client) doSearch(req *http.Request) (*SearchOutcome, error) {
-	resp, err := c.HTTP.Do(req)
+	if meta.ConversationID == "" {
+		meta.ConversationID = session.NewUUIDv7()
+	}
+	c.searchHeaders(req, a, meta)
+	resp, err := doDecoded(c.HTTP, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("search: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return nil, fmt.Errorf("search: read body: %w", err)
 	}
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &Error{Kind: Classify(resp.StatusCode, string(raw)), Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+	}
+	var env struct {
+		Code           int            `json:"code"`
+		Provider       string         `json:"provider"`
+		Results        []SearchResult `json:"results"`
+		TotalResults   int            `json:"total_results"`
+		ResponseTimeMs int64          `json:"response_time_ms"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("search: parse response: %w (body: %s)", err, truncate(string(raw), 120))
+	}
+	if env.Code != 0 {
+		// 业务错误：状态码是 2xx 时按回应体认（余额、限流这些业务码 Classify 照样认得），认不出算 ErrClient。
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
-	}
-	// 成功响应没有 data 包裹：code/msg 与结果字段同级，用嵌入结构一次性解出。
-	var parsed struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-		SearchOutcome
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
-	}
-	if parsed.Code != 0 {
-		kind := Classify(resp.StatusCode, envelopeErrorBody(parsed.Code, parsed.Msg))
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode,
-			Msg: fmt.Sprintf("code=%d msg=%s", parsed.Code, truncate(parsed.Msg, 160))}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
 	}
-	out := parsed.SearchOutcome
-	// results 恒输出为数组（nil 会让 JSON 变成 null，调用方还要判空）。
-	if out.Results == nil {
-		out.Results = []SearchResult{}
+	return safeSearchResults(env.Provider, env.Results, env.TotalResults, env.ResponseTimeMs), nil
+}
+
+// safeSearchResults 照官方整理结果：标题为空写 Untitled；链接不是 http/https 的条目去掉（链接为空的留着），
+// 图标不是 http/https 的只去掉图标；去掉过条目时总数改成剩下的条数。
+func safeSearchResults(provider string, results []SearchResult, total int, ms int64) *SearchOutcome {
+	out := &SearchOutcome{Provider: provider, Results: []SearchResult{}, TotalResults: total, ResponseTimeMs: ms}
+	for _, r := range results {
+		if r.Title == "" {
+			r.Title = "Untitled"
+		}
+		if r.URL != "" && !httpURL(r.URL) {
+			continue
+		}
+		if r.Favicon != "" && !httpURL(r.Favicon) {
+			r.Favicon = ""
+		}
+		out.Results = append(out.Results, r)
 	}
-	// 上游个别情况下 total_results 缺省，用实际条数兜底，避免对外出现 0 条却有条目的矛盾。
-	if out.TotalResults == 0 && len(out.Results) > 0 {
+	if len(out.Results) != len(results) {
 		out.TotalResults = len(out.Results)
+		out.Filtered = len(out.Results) == 0
 	}
-	return &out, nil
+	return out
+}
+
+// httpURL 链接能解析、是 http 或 https、有主机名。
+func httpURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != ""
+}
+
+// searchHeaders 官方 WebSearch 工具的请求头。和对话不同：没有 X-Domain、企业头、X-Agent-Type、
+// X-Private-Data、X-Agent-Purpose、X-Stainless-*、链路头，也不带设备令牌（官方只加在模型请求上）；
+// UA 是 `CLI/<桌面端版本>`（工具自己拼的，不是请求框架那个三段的）。
+//   - X-Agent-Intent 取会话的模式，桌面端没设时是 craft；X-Agent-Runtime 同对话（见 agentRuntime）。
+//   - 会话 id、轮次 id 同这一轮的对话；X-Conversation-Message-ID 与 X-Request-ID 是同一个新生成的
+//     去连字符 UUID v7。
+//   - X-Department-Info 总是带，账号没有部门全名时是空值。官方另在腾讯内网版（IOA）上加企业头、
+//     在专家会话里加专家头，SaaS 的普通搜索都没有。
+//   - Accept-Language、Sec-Fetch-Mode、Accept-Encoding 是 Node 内置 fetch 自己补的（同网页登录码请求）。
+//
+// upstream.user_agent 照样整体覆盖 UA；client_name 配成 SaaS 时不带 X-IDE-*，同对话。
+func (c *Client) searchHeaders(req *http.Request, a *auth.Auth, meta ChatMeta) {
+	v := c.clientVersion(a)
+	ua := "CLI/" + v
+	if c.UserAgent != "" {
+		ua = c.UserAgent
+	}
+	h := req.Header
+	h.Set("Accept", "application/json")
+	h.Set("Content-Type", "application/json;charset=UTF-8")
+	h.Set("X-Requested-With", "XMLHttpRequest")
+	h.Set("User-Agent", ua)
+	if at := a.AccessTokenValue(); at != "" {
+		h.Set("Authorization", "Bearer "+at)
+	}
+	h.Set("X-Agent-Intent", "craft")
+	h.Set("X-Agent-Runtime", agentRuntime)
+	h.Set("X-Conversation-ID", meta.ConversationID)
+	h.Set("X-Conversation-Request-ID", meta.ConversationRequestID)
+	id := session.NewUUIDv7Hex()
+	h.Set("X-Conversation-Message-ID", id)
+	h.Set("X-Request-ID", id)
+	h.Set("X-Product", deploymentType)
+	if name := c.attributionClientName(); name != "SaaS" {
+		h.Set("X-IDE-Type", name)
+		h.Set("X-IDE-Name", name)
+		h.Set("X-IDE-Version", v)
+	}
+	h.Set("X-User-Id", a.UID)
+	h.Set("X-Department-Info", a.DepartmentValue())
+	h.Set("Accept-Language", "*")
+	h.Set("Sec-Fetch-Mode", "cors")
+	h.Set("Accept-Encoding", acceptEncodingNodeFetch)
 }

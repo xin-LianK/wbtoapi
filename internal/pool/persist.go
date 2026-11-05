@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // 持久化：本地 state.json 落盘/加载、Redis 快照镜像（StoreSnapshotter）、
 // 后台 flusher、择新恢复（RestoreFromSnapshot）。
 package pool
@@ -7,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -126,6 +131,7 @@ func (p *Pool) load() {
 	if json.Unmarshal(raw, &sf) != nil {
 		return
 	}
+	p.groups = sf.Groups
 	p.applyAccountsLocked(sf.Accounts)
 	p.restoreSchedulingLocked(sf.Scheduling)
 }
@@ -150,6 +156,11 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			creditsEarliestRemaining: s.CreditsEarliestRemaining,
 			disabled:                 s.Disabled,
 			paused:                   s.Paused,
+			note:                     s.Note,
+			liveness:                 s.Liveness,
+			blockedModels:            s.BlockedModels,
+			groups:                   s.Groups,
+			priority:                 s.Priority,
 			reason:                   s.Reason,
 			until:                    s.Until,
 			coolKind:                 s.CoolKind,
@@ -197,6 +208,13 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		// 模型级独立冷却（6004 重置墙钟 / 11102 负缓存）：惰性过滤已过期条目。
 		if len(s.ModelCooldowns) > 0 {
 			for m, mc := range s.ModelCooldowns {
+				if strings.HasPrefix(mc.Reason, "11158") {
+					// 1.12.0 及以前 11158 也按到期避让记在这里，迁到不接的模型名单（一直屏蔽）。
+					if e.refusedBy(m) == nil {
+						e.blockedModels = append(e.blockedModels, BlockedModel{Model: m, Auto: true, Reason: mc.Reason, At: now})
+					}
+					continue
+				}
 				if mc.Until.IsZero() || !now.Before(mc.Until) {
 					continue
 				}
@@ -216,7 +234,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 				if e.modelCost == nil {
 					e.modelCost = map[string]modelCostEntry{}
 				}
-				e.modelCost[m] = modelCostEntry{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+				e.modelCost[m] = modelCostEntry(mc)
 			}
 		}
 		p.byUID[uid] = e
@@ -234,6 +252,7 @@ func (p *Pool) adoptSnapshot(s snapshot) {
 }
 func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.byUID = map[string]*entry{}
+	p.groups = s.Groups
 	p.applyAccountsLocked(s.Accounts)
 	p.restoreSchedulingLocked(s.Scheduling)
 }
@@ -290,13 +309,18 @@ func (p *Pool) notePersistFail(err error) {
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。
 func (p *Pool) stateOverviewLocked() stateFile {
 	now := time.Now()
-	sf := stateFile{Accounts: map[string]stateAccount{}, Scheduling: p.scheduling}
+	sf := stateFile{Accounts: map[string]stateAccount{}, Scheduling: p.scheduling, Groups: p.groups}
 	for uid, e := range p.byUID {
 		s := stateAccount{
 			Credits:                  e.credits,
 			CreditsTotal:             e.creditsTotal,
 			Disabled:                 e.disabled,
 			Paused:                   e.paused,
+			Note:                     e.note,
+			Liveness:                 e.liveness,
+			BlockedModels:            e.blockedModels,
+			Groups:                   e.groups,
+			Priority:                 e.priority,
 			Reason:                   e.reason,
 			Until:                    e.until,
 			CoolKind:                 e.coolKind,
@@ -346,7 +370,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 				if s.ModelCosts == nil {
 					s.ModelCosts = map[string]stateModelCost{}
 				}
-				s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+				s.ModelCosts[m] = stateModelCost(mc)
 			}
 		}
 		sf.Accounts[uid] = s

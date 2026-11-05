@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // autotask.go 面板「一键完成」任务的动作实现。
 //
 // 设计依据：上游 scripts/task_*.py 实测结论 + 2026-09-12 桌面指纹协议逆向
@@ -141,6 +145,33 @@ var autoActions = []autoAction{
 		TaskCode: "Expert_lighthouse",
 		Desc:     "真实轻量云专家召唤+使用链（chat 链带 has_expert，已验证：两账号点亮）",
 		run:      runExpertLighthouse,
+	},
+	// 「体验某位专家」类任务（2026-10 官方新上），照 expert_5 的判据做；2026-10-28 生产实测都点亮
+	// （四个 expert_use_* 在 1.6.0 上，WorkBuddy_Valorant 改成按名字搜索后在 1.7.0 上）。
+	{
+		TaskCode: "WorkBuddy_Valorant",
+		Desc:     "在专家页搜「无畏契约拼豆专家」→ 召唤 + 真实对话一次（生产实测点亮）",
+		run:      runExpertTask(expertTaskTarget{Name: "无畏契约拼豆专家"}),
+	},
+	{
+		TaskCode: "expert_use_maidehao",
+		Desc:     "召唤「中国电商运营专家」+ 真实对话一次（生产实测点亮）",
+		run:      runExpertTask(expertTaskTarget{ID: "ex_GDl31WahyIH0", Name: "中国电商运营专家"}),
+	},
+	{
+		TaskCode: "expert_use_douyinyin",
+		Desc:     "召唤「抖音策略师」+ 真实对话一次（生产实测点亮）",
+		run:      runExpertTask(expertTaskTarget{ID: "ex_FbY5nlWTqDod", Name: "抖音策略师"}),
+	},
+	{
+		TaskCode: "expert_use_shangjia_xuanchuan",
+		Desc:     "召唤「商家宣传页与海报设计师」+ 真实对话一次（生产实测点亮）",
+		run:      runExpertTask(expertTaskTarget{ID: "ex_Weo3x2EZuSDm", Name: "商家宣传页与海报设计师"}),
+	},
+	{
+		TaskCode: "expert_use_bowangwang",
+		Desc:     "召唤「直播电商教练」+ 真实对话一次（生产实测点亮）",
+		run:      runExpertTask(expertTaskTarget{ID: "ex_WZY136wV5aMt", Name: "直播电商教练"}),
 	},
 	{
 		TaskCode: "WorkBuddy_Valorant",
@@ -434,6 +465,17 @@ var mpActionGap = 2 * time.Second
 // sleep gap + 0~10s 抖动；首条也等（上一轮残留进度被回滚后立即重报同样无效）。
 var mpChatEventGap = 45 * time.Second
 
+// mpChatEventJitter 叠加在 mpChatEventGap 上的随机抖动上限。
+var mpChatEventJitter = 10 * time.Second
+
+// randDuration 返回 [0, limit) 内的随机时长；limit<=0 时为 0。
+func randDuration(limit time.Duration) time.Duration {
+	if limit <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(limit)))
+}
+
 // runMPMiniChatTask growth 域小程序限定任务通用闭环：
 // mp 查询 → accept（带登记回读验证）→ mini chat 事件上报（withActivityId 决定
 // 是否带开学季 activityId：school_season 必带，Sequential_Tasks_1 不带——服务端按
@@ -476,8 +518,8 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 	// 连发会被上游反作弊判无效（见 mpChatEventGap 注释），宁可慢不可白报。
 	need := target - t.Current
 	for i := int64(0); i < need; i++ {
-		time.Sleep(mpChatEventGap + time.Duration(rand.Int64N(int64(10*time.Second))))
-		conv := upstream.NewEventID()
+		time.Sleep(mpChatEventGap + randDuration(mpChatEventJitter))
+		conv := upstream.NewConversationID()
 		var ev map[string]any
 		if withActivityId {
 			ev = upstream.SchoolSeasonChatEvent(conv)
@@ -614,7 +656,7 @@ func (p *Panel) runSequentialEventTask(a *auth.Auth, code string, primary, fallb
 func runSequentialAutomation(p *Panel, a *auth.Auth) (string, error) {
 	return p.runSequentialEventTask(a, "Sequential_Tasks_4",
 		func() error {
-			return p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopAutomationCreateEvent("每日提醒"))
+			return p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopAutomationCreateEvent(automationTaskName))
 		}, nil)
 }
 
@@ -624,11 +666,10 @@ func runSequentialAutomation(p *Panel, a *auth.Auth) (string, error) {
 func runSequentialModelChat(p *Panel, a *auth.Auth) (string, error) {
 	return p.runSequentialEventTask(a, "Sequential_Tasks_5",
 		func() error {
-			conv := upstream.NewEventID()
-			return p.cfg.Upstream.ReportMPEvent(a, upstream.MiniChatModelEvent(conv, "glm-5.2", "GLM-5.2"))
+			return p.cfg.Upstream.ReportMPEvent(a, upstream.MiniChatModelEvent(upstream.NewConversationID(), "glm-5.2", "GLM-5.2"))
 		},
 		func() error {
-			return p.cfg.Upstream.ReportChatActivityModel(a, upstream.NewEventID(), "", "glm-5.2", "GLM-5.2")
+			return p.cfg.Upstream.ReportChatActivityModel(a, upstream.NewConversationID(), "", "glm-5.2", "GLM-5.2")
 		})
 }
 
@@ -638,10 +679,12 @@ func runSequentialModelChat(p *Panel, a *auth.Auth) (string, error) {
 func runSequentialPlaybook(p *Panel, a *auth.Auth) (string, error) {
 	return p.runSequentialEventTask(a, "Sequential_Tasks_7",
 		func() error {
-			conv := upstream.NewEventID()
-			req := upstream.NewEventID()
+			pc, err := p.cfg.Upstream.PickPlaybookCase(a)
+			if err != nil {
+				return fmt.Errorf("灵感案例: %w", err)
+			}
 			return p.cfg.Upstream.ReportDesktopEvent(a,
-				upstream.DesktopPlaybookPromptSequence(conv, req, "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")...)
+				upstream.DesktopPlaybookPromptSequence(upstream.NewConversationID(), upstream.NewRequestID(), pc)...)
 		},
 		func() error {
 			return p.cfg.Upstream.ReportMPEvent(a, upstream.MiniPlaybookEvents("pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")...)
@@ -775,6 +818,15 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skipped": true, "message": "该任务已领取过奖励"})
 		return
 	}
+	// 先接受：上游不给 not_accepted 的任务记进度。任务中心队列和「一键完成可自动任务」都先批量
+	// 接受，单个任务这里此前漏了。小程序任务的动作自己按小程序口径接受。失败不阻塞，动作照跑。
+	if !isMP && !before.Locked && before.AcceptStatus != "accepted" && before.AcceptStatus != "completed" {
+		if err := p.cfg.Upstream.AcceptTasks(a, []string{act.TaskCode}); err != nil {
+			log.Printf("panel: accept %s uid=%s: %v（继续执行动作）", act.TaskCode, uid, err)
+		} else {
+			time.Sleep(reportGap)
+		}
+	}
 	msg, err := act.run(p, a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "执行失败: "+err.Error())
@@ -879,8 +931,7 @@ func runChat5(p *Panel, a *auth.Auth) (string, error) {
 		return "进度已达标，无需上报", nil
 	}
 	for i := int64(0); i < need; i++ {
-		cid := upstream.NewEventID()
-		if err := p.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
+		if err := p.cfg.Upstream.ReportChatActivity(a, upstream.NewConversationID(), ""); err != nil {
 			return fmt.Sprintf("上报第 %d/%d 条失败: %v", i+1, need, err), nil
 		}
 		if i < need-1 {
@@ -892,7 +943,7 @@ func runChat5(p *Panel, a *auth.Auth) (string, error) {
 
 // runFirstBuddy 领养：report（解锁前置）→ agreement → first。
 func runFirstBuddy(p *Panel, a *auth.Auth) (string, error) {
-	if err := p.cfg.Upstream.ReportChatActivity(a, upstream.NewEventID(), ""); err != nil {
+	if err := p.cfg.Upstream.ReportChatActivity(a, upstream.NewConversationID(), ""); err != nil {
 		return "", fmt.Errorf("前置上报: %w", err)
 	}
 	time.Sleep(reportGap) // 给上游事件处理留时间（脚本实测口径）
@@ -920,11 +971,14 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	body, _ := json.Marshal(map[string]any{
 		"model": modelID,
 		"messages": []map[string]any{
-			{"role": "user", "content": "hi，请回复一句话"},
+			// 和夜间对话同一句：对话活跃上报的 inputLength 固定按它的长度 12。
+			{"role": "user", "content": "1+1等于几？直接回答。"},
 		},
 		"stream": true,
 	})
-	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body, "", upstream.ChatMeta{})
+	// 上报和这次对话用同一个会话 id、轮次 id。
+	conv, req := upstream.NewConversationID(), upstream.NewRequestID()
+	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body, "", upstream.ChatMeta{ConversationID: conv, ConversationRequestID: req})
 	if err != nil {
 		return "", fmt.Errorf("对话请求: %w", err)
 	}
@@ -937,7 +991,7 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	rc.Close()
 	time.Sleep(reportGap)
 	// 3. 对齐模型的上报（触发进度）
-	if err := p.cfg.Upstream.ReportChatActivityModel(a, upstream.NewEventID(), "", modelID, modelName); err != nil {
+	if err := p.cfg.Upstream.ReportChatActivityModel(a, conv, req, modelID, modelName); err != nil {
 		return "对话已完成，但进度上报失败：" + err.Error(), nil
 	}
 	return "已完成 glm-5.2 对话并上报", nil
@@ -950,11 +1004,7 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 // （紫川/人杰2 两账号无桌面客户端登录状态下 3 秒内 0/1 → 1/1）。
 // Hp_Appearance 的纯 API set 不计分（需客户端在主题下活跃），区别对待。
 func runRichMeow(p *Panel, a *auth.Auth) (string, error) {
-	ms := time.Now().UnixMilli()
-	conv := upstream.NewEventID()
-	req := upstream.NewEventID()
-	msg := fmt.Sprintf("req-%d-user", ms)
-	events := upstream.DesktopChatSequence(conv, req, msg, "fast-model", "fast-model")
+	events := upstream.DesktopChatSequence(upstream.NewConversationID(), upstream.NewRequestID(), upstream.NewRequestID(), "fast-model", "fast-model")
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 		return "", err
 	}
@@ -974,12 +1024,16 @@ func runBuddyApp(p *Panel, a *auth.Auth) (string, error) {
 	return "已上报 buddyapp 进入五连事件（同时覆盖 Buddy_App 与 Buddy_App_QQ）", nil
 }
 
+// automationTaskName 定时任务创建事件的任务名。官方是用户在表单里填的名字，网关取一个普通用户会起的
+// 名字（典型值），不带网关自己的名字。
+const automationTaskName = "每日资讯简报"
+
 // runAutomationCreate 完成 automation_1（设置自动化任务）。
 // 2026-09-12 两账号实测：automated_task_create_suc 事件纯 API 上报即点亮，
 // 无需真实创建定时任务。
 func runAutomationCreate(p *Panel, a *auth.Auth) (string, error) {
 	if err := p.cfg.Upstream.ReportDesktopEvent(a,
-		upstream.DesktopAutomationCreateEvent("每日提醒")); err != nil {
+		upstream.DesktopAutomationCreateEvent(automationTaskName)); err != nil {
 		return "", err
 	}
 	return "已上报定时任务创建事件", nil
@@ -1000,8 +1054,11 @@ func runLibraryRead(p *Panel, a *auth.Auth) (string, error) {
 // runBlackCat 完成 black_cat（夜猫子，夜间 23:00–08:00 计数）。
 // 判据 = 夜间窗口内 glm-5.2 真实对话 + chat 事件上报（WorkBuddy-Daily 实测口径）。
 // 窗口外不做（提示等排程）；网关 blackcat_hours（默认 23 点）排程会自动补足。
+// nightNow runBlackCat 判断夜间窗口用的时钟（测试里固定）。
+var nightNow = time.Now
+
 func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
-	if !upstream.InNightWindow(time.Now()) {
+	if !upstream.InNightWindow(nightNow()) {
 		return "当前不在 23:00–08:00 计数窗口，行为不计分；网关会在每日 23 点自动补足", nil
 	}
 	need, err := p.cfg.Upstream.BlackcatNeed(a)
@@ -1025,11 +1082,11 @@ func runBlackCat(p *Panel, a *auth.Auth) (string, error) {
 // id）。此前的 skill_request_send/skill_installed/skill_action 全是错误方向。
 // 人杰2 实测 0/1 → 1/1 点亮。
 func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
-	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, "")
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, "", false, false)
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	msgID := "msg-" + req[len(req)-8:]
+	msgID := upstream.NewRequestID()
 	events := upstream.DesktopChatSequence(conv, req, msgID, "fast-model", "fast-model")
 	for _, ev := range events {
 		if ev["eventCode"] == "chat_message_response" {
@@ -1037,12 +1094,14 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 		}
 	}
 	events = append(events, upstream.DesktopEvent{
-		"eventCode":      "skill_info",
-		"id":             "润泽小馆·日报撰写",
-		"skillId":        "skill_2097350077599879168",
-		"skillVersion":   "1.0.0",
-		"toolStatus":     "success",
-		"fileCount":      56,
+		"eventCode":    "skill_info",
+		"id":           "润泽小馆·日报撰写",
+		"skillId":      "skill_2097350077599879168",
+		"skillVersion": "1.0.0",
+		"toolStatus":   "success",
+		// 官方是产品配置里的技能条数（内置的加装上的）：5.8.3 安装包内置 48 个，加上这个技能共 49。
+		// 抓包样本是 56，推断是那台机器多装了别的技能。
+		"fileCount":      49,
 		"source":         "workbuddy-desktop",
 		"conversationId": conv, "requestId": req, "messageId": msgID,
 		"requestModelId": "fast-model", "requestModelName": "fast-model",
@@ -1054,11 +1113,6 @@ func runSkillFresh(p *Panel, a *auth.Auth) (string, error) {
 	return "已上报真实对话 + skill_info 技能加载事件", nil
 }
 
-// runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
-// 2026-09-12 判据（真实样本 Sunny row 868）：与 expert_5 同构，但两处差异——
-// chat 链的 agent_task_created 需带 has_expert:true + expert_id（我们默认 false），
-// expert_actual_use 的 mode 为 "LOCAL"（非 craft）。id 固定为轻量云专家
-// ex_2cvvUZQhDyeJ；requestId 必须是真实 chat 的服务端 id。紫川/人杰2 实测点亮。
 // runExpertExperience 专家体验类任务的公共链路（Expert_lighthouse /
 // WorkBuddy_Valorant 共用）：召唤链 → 带 X-Expert-Id 的真实对话拿服务端
 // requestId → agent_task_created 补专家字段 → expert_actual_use(mode=LOCAL)
@@ -1068,25 +1122,20 @@ func runExpertExperience(p *Panel, a *auth.Auth, exp upstream.MarketExpert, labe
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(exp)...); err != nil {
 		return "", fmt.Errorf("召唤链: %w", err)
 	}
-	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, exp.ExpertID)
+	summonedAt := time.Now()
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, exp.ExpertID, exp.ExpertType == "team", exp.Protected())
 	if err != nil {
 		return "", fmt.Errorf("真实对话: %w", err)
 	}
-	suffix := req
-	if len(suffix) > 8 {
-		suffix = suffix[len(suffix)-8:]
-	}
-	events := upstream.DesktopChatSequence(conv, req, "msg-"+suffix, "fast-model", "fast-model")
+	msgID := upstream.NewRequestID()
+	events := upstream.DesktopExpertChatSequence(exp, conv, req, msgID)
 	for _, ev := range events {
 		if ev["eventCode"] == "agent_task_created" {
-			ev["has_expert"] = true
-			ev["expert_id"] = exp.ExpertID
-			ev["expert_name"] = exp.DisplayNameZH
-			ev["expert_industry_id"] = ""
+			ev["expert_industry_id"] = "" // 同下面 actual_use 的 type
 		}
 	}
-	events = append(events, upstream.DesktopExpertActualUseLocal(exp, conv, req))
-	// 对齐真实样本细节：专家体验类 actual_use 的 type 为空、cost=0。
+	events = append(events, upstream.DesktopExpertActualUseLocal(exp, conv, req, msgID, summonedAt))
+	// 对齐真实样本细节：轻量云专家 actual_use 的 type 为空、cost=0。
 	events[len(events)-1]["type"] = ""
 	events[len(events)-1]["cost"] = 0
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
@@ -1108,6 +1157,11 @@ func (p *Panel) resolveMarketExpert(a *auth.Auth, fallback upstream.MarketExpert
 	return fallback
 }
 
+// runExpertLighthouse 完成 Expert_lighthouse（体验「腾讯轻量云」专家）。
+// 2026-09-12 判据（真实样本 Sunny row 868）：与 expert_5 同构，但两处差异——
+// chat 链的 agent_task_created 需带 has_expert:true + expert_id（我们默认 false），
+// expert_actual_use 的 mode 为 "LOCAL"（非 craft）。id 固定为轻量云专家
+// ex_2cvvUZQhDyeJ；requestId 必须是真实 chat 的服务端 id。紫川/人杰2 实测点亮。
 func runExpertLighthouse(p *Panel, a *auth.Auth) (string, error) {
 	lh := p.resolveMarketExpert(a, upstream.MarketExpert{
 		ExpertID: "ex_2cvvUZQhDyeJ", ExpertType: "agent",
@@ -1132,16 +1186,39 @@ func runExpertValorant(p *Panel, a *auth.Auth) (string, error) {
 // 事件 {action:"apply",source:"settings_close",id:<resourceKey>,...}（客户端在
 // 主题生效状态下离开设置页时上报）——早期"纯 API set 不计分"的结论不准确，
 // 真相是当时只调了 appearance/set 没发事件。组合：set API 留痕 + 事件上报。
+//
+// 1.1.2 起照官方 5.8.3 的外观设置页走：打开时拉主题列表，选中后 set，离开时上报。事件字段
+// 照 buildSkinApplyPayload：vipLevel、series 取主题列表里这个主题的值，type 是账号的版本档
+// （editionType）。官方版本档查不到时不上报（canUse 为假），网关同样报错不上报。
+// appearanceGap 设置主题与上报皮肤生效事件之间的间隔。
+var appearanceGap = 2 * time.Second
+
 func runAppearance(p *Panel, a *auth.Auth) (string, error) {
 	const themeKey = "theme-tkmw7j" // 和平精英激战金秋（Hp_Appearance 判据主题）
+	themes, err := p.cfg.Upstream.AppearanceThemes(a)
+	if err != nil {
+		return "", fmt.Errorf("主题列表: %w", err)
+	}
+	var theme *upstream.AppearanceTheme
+	for i := range themes {
+		if themes[i].ID == themeKey {
+			theme = &themes[i]
+			break
+		}
+	}
+	if theme == nil {
+		// 10-20 生产查到它限时到 2026-11-02，下架后客户端里选不到。
+		return "", fmt.Errorf("主题列表里没有 %s（可能已下架）", themeKey)
+	}
+	edition, err := p.cfg.Upstream.AccountEdition(a)
+	if err != nil {
+		return "", fmt.Errorf("账号版本: %w", err)
+	}
 	if err := p.cfg.Upstream.SetAppearanceTheme(a, themeKey); err != nil {
 		return "", fmt.Errorf("设置主题: %w", err)
 	}
-	time.Sleep(2 * time.Second)
-	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopEvent{
-		"eventCode": "appearance_skin_apply", "action": "apply", "source": "settings_close",
-		"id": themeKey, "vipLevel": 0, "series": "", "type": "unknown",
-	}); err != nil {
+	time.Sleep(appearanceGap)
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopAppearanceApplyEvent(*theme, edition)); err != nil {
 		return "", err
 	}
 	return "已设置主题并上报皮肤生效事件", nil
@@ -1149,17 +1226,23 @@ func runAppearance(p *Panel, a *auth.Auth) (string, error) {
 
 // runTemplateUse 完成 template_5（使用 5 个模板创建任务）。
 // 2026-09-12 三账号实测：agent_task_created_with_template + template_used 事件组
-// （JOIN chat 链）一次上报 5 组即 5/5 点亮。template_id 服务端不校验真实性。
+// （JOIN chat 链）一次上报 5 组即 5/5 点亮。template_id 服务端不校验真实性，1.1.2 起仍照官方首页
+// 现拉模板列表，取工作模式下前 5 个按钮的真实 id 和名字。
+// templateUseGap 相邻两组模板事件之间的间隔。
+var templateUseGap = 300 * time.Millisecond
+
 func runTemplateUse(p *Panel, a *auth.Auth) (string, error) {
-	templates := [][2]string{{"1", "深度研究"}, {"2", "周报生成"}, {"3", "竞品分析"}, {"4", "活动策划"}, {"5", "代码评审"}}
-	for i, tp := range templates {
-		conv := upstream.NewEventID()
-		req := upstream.NewEventID()
-		events := upstream.DesktopTemplateUseSequence(conv, req, tp[0], tp[1])
+	scenes, err := p.cfg.Upstream.PickWorkingScenes(a, 5)
+	if err != nil {
+		return "", fmt.Errorf("首页模板: %w", err)
+	}
+	for i, sc := range scenes {
+		conv, req := upstream.NewConversationID(), upstream.NewRequestID()
+		events := upstream.DesktopTemplateUseSequence(conv, req, sc)
 		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 			return fmt.Sprintf("第 %d 组模板事件上报失败: %v", i+1, err), nil
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(templateUseGap)
 	}
 	return "已上报 template_used ×5", nil
 }
@@ -1167,21 +1250,22 @@ func runTemplateUse(p *Panel, a *auth.Auth) (string, error) {
 // runPlaybookPrompt 完成 playbook_prompt（灵感案例 Dialog 中发送 Prompt）。
 // 判据是 playbook_prompt_send（Dialog 发送）而非卡片曝光/点击——asar 逆向确认。
 func runPlaybookPrompt(p *Panel, a *auth.Auth) (string, error) {
-	conv := upstream.NewEventID()
-	req := upstream.NewEventID()
-	events := upstream.DesktopPlaybookPromptSequence(conv, req, "pm-gtm-launch-plan", "新产品上市 GTM 发布计划一页纸")
+	// 案例从官方静态站点现拉（同桌面端发现页），事件里的类型、分类、提示词长度是它的真实值。
+	pc, err := p.cfg.Upstream.PickPlaybookCase(a)
+	if err != nil {
+		return "", fmt.Errorf("灵感案例: %w", err)
+	}
+	events := upstream.DesktopPlaybookPromptSequence(upstream.NewConversationID(), upstream.NewRequestID(), pc)
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 		return "", err
 	}
-	return "已上报 playbook_cta_click + playbook_prompt_send", nil
+	return "已上报 playbook_cta_click + playbook_prompt_send（案例 " + pc.Title + "）", nil
 }
 
 // runCreateCanvas 完成 create_canvas（设计创意模式创建画布，+300 分）。
 // 判据是 wbx_design_canvas_task_create/open（Ardot create_design 工具完成遥测）。
 func runCreateCanvas(p *Panel, a *auth.Auth) (string, error) {
-	conv := upstream.NewEventID()
-	req := upstream.NewEventID()
-	events := upstream.DesktopDesignCanvasSequence(conv, req)
+	events := upstream.DesktopDesignCanvasSequence(upstream.NewConversationID(), upstream.NewRequestID())
 	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
 		return "", err
 	}
@@ -1189,7 +1273,7 @@ func runCreateCanvas(p *Panel, a *auth.Auth) (string, error) {
 }
 
 // expertSummonGap 专家召唤链的间隔（真实使用节奏，v11 实测 8s 成功率 100%）。
-const expertSummonGap = 6 * time.Second
+var expertSummonGap = 6 * time.Second
 
 // runExpertUse 完成 expert_5（使用 5 个平台专家）。
 // 2026-09-12 三账号实测公式：真实专家列表（id 必须真实存在）→ 召唤链
@@ -1218,22 +1302,7 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 		if ok >= count {
 			break
 		}
-		// 召唤链（web_element_click + summon_click + summoned）。
-		summonEvents := upstream.DesktopExpertSummonSequence(e)
-		if err := p.cfg.Upstream.ReportDesktopEvent(a, summonEvents...); err != nil {
-			fail++
-			continue
-		}
-		// 真实 chat（带 X-Expert-Id）→ 服务端 requestId。
-		conv, req, cerr := p.cfg.Upstream.DesktopChatWithExpert(a, e.ExpertID)
-		if cerr != nil {
-			fail++
-			continue
-		}
-		// 使用事件（JOIN 服务端 requestId）+ chat 链。
-		events := append(upstream.DesktopChatSequence(conv, req, "msg-"+req[len(req)-8:], "fast-model", "fast-model"),
-			upstream.DesktopExpertActualUseEvent(e, conv, req))
-		if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		if err := p.summonAndUseExpert(a, e); err != nil {
 			fail++
 			continue
 		}
@@ -1244,6 +1313,118 @@ func runExpertBatch(p *Panel, a *auth.Auth, expertType string, count int) (strin
 	}
 	_ = fail
 	return fmt.Sprintf("已对 %d 位真实专家完成召唤+使用链（类型 %s）", ok, expertType), nil
+}
+
+// summonAndUseExpert 召唤一位专家并真实使用一次：召唤链（web_element_click + summon_click +
+// summoned）→ 带 X-Expert-Id 的真实 chat 拿服务端 requestId → 带专家的 chat 链 + 使用事件
+// （JOIN 服务端 requestId）。expert_5、Expert_team_use_3 和「体验某位专家」类任务共用。
+func (p *Panel) summonAndUseExpert(a *auth.Auth, e upstream.MarketExpert) error {
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSummonSequence(e)...); err != nil {
+		return fmt.Errorf("召唤链: %w", err)
+	}
+	summonedAt := time.Now()
+	conv, req, err := p.cfg.Upstream.DesktopChatWithExpert(a, e.ExpertID, e.ExpertType == "team", e.Protected())
+	if err != nil {
+		return fmt.Errorf("真实对话: %w", err)
+	}
+	msgID := upstream.NewRequestID()
+	events := append(upstream.DesktopExpertChatSequence(e, conv, req, msgID),
+		upstream.DesktopExpertActualUseEvent(e, conv, req, msgID, summonedAt))
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, events...); err != nil {
+		return fmt.Errorf("使用事件: %w", err)
+	}
+	return nil
+}
+
+// expertTaskTarget 「体验某位专家」类任务指定的专家。
+type expertTaskTarget struct {
+	ID   string // 任务跳转链接 deeplink 里的 expertId；空表示跳转链接只到专家页，按名字找
+	Name string // 任务标题「」里的专家名
+}
+
+// expertTaskSearchPages 跳转链接带 id 时，在专家列表里找这位专家最多看几页。
+const expertTaskSearchPages = 5
+
+// runExpertTask 完成「体验某位专家」类任务（2026-10 官方新上，任务说明都是「在专家页搜索并
+// 召唤「某专家」，完成一次对话」）：找到这位专家后走 expert_5 那条召唤 + 使用链。
+//
+// 跳转链接带 id 的在列表里按 id 找，拿服务端的版本号和分类，找不到就用 id 和任务里的名字照样
+// 做（2026-10-28 生产实测四个 expert_use_* 都点亮）；只到专家页的（WorkBuddy_Valorant）照任务
+// 说明在专家页搜名字（见 searchTaskExpert），找不到就报错，不召唤别的专家。
+func runExpertTask(target expertTaskTarget) func(p *Panel, a *auth.Auth) (string, error) {
+	return func(p *Panel, a *auth.Auth) (string, error) {
+		e, err := p.findTaskExpert(a, target)
+		if err != nil {
+			return "", err
+		}
+		if err := p.summonAndUseExpert(a, e); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("已召唤「%s」并完成一次真实对话", target.Name), nil
+	}
+}
+
+// findTaskExpert 找任务指定的专家。带 id 的在专家列表（单专家，按推荐排序）里逐页找，最多看
+// expertTaskSearchPages 页，某页不满一页就是最后一页；只有名字的在专家页搜。
+func (p *Panel) findTaskExpert(a *auth.Auth, target expertTaskTarget) (upstream.MarketExpert, error) {
+	if target.ID == "" {
+		return p.searchTaskExpert(a, target.Name)
+	}
+	for page := 1; page <= expertTaskSearchPages; page++ {
+		experts, err := p.cfg.Upstream.MarketExpertListPage(a, "agent", page)
+		if err != nil {
+			break
+		}
+		for _, e := range experts {
+			if e.ExpertID == target.ID {
+				return e, nil
+			}
+		}
+		if len(experts) < upstream.MarketExpertPageSize {
+			break
+		}
+	}
+	// id 来自任务本身，列表里没翻到也照样能召唤；版本号缺省 1.0.0、分类缺省 all（同列表缺字段时）。
+	return upstream.MarketExpert{ExpertID: target.ID, ExpertType: "agent", DisplayNameZH: target.Name, ProfessionZH: target.Name}, nil
+}
+
+// searchTaskExpert 照任务说明「在专家页搜索」：在专家页的单专家页签搜这个名字，报 expert_search，
+// 隔一会儿再召唤；没搜到再不分单专家和专家团搜一次（官方对话框里选专家时的搜法）。名字或职业名
+// 和任务里的一致才算，两次都没有就报错，不召唤别的专家。
+//
+// 2026-10-28 生产上按推荐排序翻了 5 页没找到「无畏契约拼豆专家」，网关当时也只认响应里的
+// experts、不认 items。改成搜索后，同日升级 1.7.0 在两个国内版号上实测搜得到、任务点亮；
+// 上面两个原因哪个起作用、是哪一次搜索搜到的，没有单独确认。
+func (p *Panel) searchTaskExpert(a *auth.Auth, name string) (upstream.MarketExpert, error) {
+	experts, err := p.cfg.Upstream.MarketExpertSearch(a, "agent", name)
+	if err != nil {
+		return upstream.MarketExpert{}, fmt.Errorf("搜索专家: %w", err)
+	}
+	if err := p.cfg.Upstream.ReportDesktopEvent(a, upstream.DesktopExpertSearchEvent(name, len(experts))); err != nil {
+		return upstream.MarketExpert{}, fmt.Errorf("搜索事件: %w", err)
+	}
+	e, ok := expertNamed(experts, name)
+	if !ok {
+		all, err := p.cfg.Upstream.MarketExpertSearch(a, "", name)
+		if err != nil {
+			return upstream.MarketExpert{}, fmt.Errorf("搜索专家: %w", err)
+		}
+		if e, ok = expertNamed(all, name); !ok {
+			return upstream.MarketExpert{}, fmt.Errorf("在专家页搜「%s」没有找到（活动可能已结束），未召唤其他专家", name)
+		}
+	}
+	time.Sleep(expertSummonGap)
+	return e, nil
+}
+
+// expertNamed 按名字认专家：显示名或职业名去掉两边空白后和 name 相同。
+func expertNamed(experts []upstream.MarketExpert, name string) (upstream.MarketExpert, bool) {
+	for _, e := range experts {
+		if strings.TrimSpace(e.DisplayNameZH) == name || strings.TrimSpace(e.ProfessionZH) == name {
+			return e, true
+		}
+	}
+	return upstream.MarketExpert{}, false
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,12 +1505,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		if before.Claimed || before.Current >= before.Target && before.Target > 0 {
 			item["status"] = "skipped"
 			msg := "已完成（" + taskProgressText(before) + "）"
-			// 达标未领：先补领再跳过（issue #174）。经真实对话等链路点亮的
-			// 任务不经过任何自动动作，若这里只 skip，奖永远没人领（积分卡在
-			// 半路）。claim 幂等（重复领返回 already_claimed → 0 分 0 能），
-			// 宁可多试一轮也不漏领；判据用 progress（Current>=Target），不
-			// 依赖 accept_status=="completed"（回读会短暂转 completed 后回滚，
-			// 据此领奖会误领）。
+			// 已达标还没领：先补领再跳过（上游 #174）。靠真实对话点亮的任务不经过自动动作，
+			// 这里只跳过的话奖就一直没人领。判据用进度，不看 accept_status=="completed"
+			// （回读时会短暂变成 completed 再回滚，按它领会领错）。
 			if !before.Claimed {
 				credit, energy, cerr := claimTaskReward(p, a, act.TaskCode)
 				switch {
@@ -1390,6 +1568,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 	return out
 }
 
+// autoAllTimeout 一键完成的 HTTP 等待上限；超时后流水线仍在后台跑完。
+var autoAllTimeout = 5 * time.Minute
+
 // accountTaskAutoAll 一键完成该账号全部可自动任务。
 func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
@@ -1411,7 +1592,7 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 用 context 兜底超时（多项任务串联 + 每项含真实对话，可能耗时较长）。
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), autoAllTimeout)
 	defer cancel()
 	done := make(chan []map[string]any, 1)
 	go func() {

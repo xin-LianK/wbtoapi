@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // hint.go 网关错误附加说明字段（error.gateway_hint）的单一事实来源。
 //
 // 纪律（任务书 gateway-hint）：
@@ -52,6 +56,14 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 动作一致（等待窗口过去再试，换号/立刻重试无意义）。
 		return "upstream edge gateway blocked the request (WAF 403 or openresty/APISIX 401 page); check egress IP or retry after the block window"
 	case ErrSoftRate:
+		switch code := BizCode(msg); {
+		case isTransientRateCode(code):
+			return "upstream model is busy; retry in a few seconds or switch model"
+		case isCraftRateCode(code):
+			return "usage limit of this model reached at upstream; switch model or retry after reset"
+		case code == codeConversationLimitExceed:
+			return "too many active sessions on the upstream account; retry shortly"
+		}
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
 		// 11140 账号限制是终态：该号已禁用、轮转已停止，措辞不能再写「网关会换号」
@@ -73,9 +85,13 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrHardCredit:
 		return "account credits exhausted at upstream; waiting for daily check-in to restore"
 	case ErrUpstreamBusy:
-		// 6021 queue.full：渠道级容量满载。措辞明确「不是账号问题、换号无意义」，
-		// 指引客户端等待后重试（SDK 指数退避天然适配）。
+		// 6021 容量排队满：措辞明确「不是账号问题、换号无意义」，指引客户端等待后重试。
 		return "upstream capacity is full (queue.full); this is a channel-level issue, not an account problem; retry after a short wait"
+	case ErrQueueWaiting:
+		// 6020：网关已经在号上排过队了（等满 pool.in_flight_wait、上游说排队过期，或客户端断开），才会回到客户端。
+		return "upstream queued this request for capacity (6020) and no slot came up in time; this is not an account problem; retry after a short wait"
+	case ErrQueueUserLimit:
+		return "this upstream account has too many requests waiting in the capacity queue (6022); the gateway tried other accounts; retry after a short wait"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:
@@ -116,12 +132,12 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
-// FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
+// FrameKind 从 SSE error 帧 payload 判定 ErrKind：帧 JSON 里带码表内的业务码（6004 模型级
+// 限流、14003 模型繁忙、额度用完等，见 bizcode.go）优先；其余取帧内 error.message 走
 // Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
 func FrameKind(payload string) ErrKind {
-	if IsModelRateLimit(payload) {
-		return ErrSoftRate
+	if k := codeKind(BizCode(payload)); k != ErrNone {
+		return k
 	}
 	var f struct {
 		Error struct {

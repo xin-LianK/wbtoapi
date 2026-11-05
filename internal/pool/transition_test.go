@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package pool
 
 import (
@@ -112,7 +116,8 @@ func TestTransitionSessionDeadDisableClearsCooling(t *testing.T) {
 		t.Fatal("precondition: 应处于软冷却")
 	}
 
-	if p.NoteSessionDead("u1") || p.NoteSessionDead("u1") || !p.NoteSessionDead("u1") {
+	first, second, third := p.NoteSessionDead("u1"), p.NoteSessionDead("u1"), p.NoteSessionDead("u1")
+	if first || second || !third {
 		t.Fatal("第 3 次 NoteSessionDead 应达阈值禁用")
 	}
 	st, _ := p.Status("u1")

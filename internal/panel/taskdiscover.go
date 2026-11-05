@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // taskdiscover.go 成长任务的「自动发现」与「事件链族自动跑」。
 //
 // 解决的问题：任务码完全由服务端下发，本地没有预置清单。此前发现新任务的唯一
@@ -7,12 +11,12 @@
 //
 // 本文件做两件事：
 //
-//	1. 发现：周期拉两个口径（默认 + 小程序）的任务列表，把**上游有、本地没实现**的
-//	   码记进 data/task-discover.json，首次出现打日志，面板可查。
-//	2. 自动跑：命中 eventChainActions 族前缀的码（判据只是「事件到没到」、runner
-//	   不读 TaskCode）直接在 autoActionFor 里回落到现有 runner，于是不用改代码就能
-//	   进队列跑。需要业务参数的族（Model_chat_* / Expert_* / Sequential_*）**故意
-//	   不收录**，只在面板里列出来等人补映射——漏跑只是少拿分，跑错是错误上报。
+//  1. 发现：周期拉两个口径（默认 + 小程序）的任务列表，把**上游有、本地没实现**的
+//     码记进 data/task-discover.json，首次出现打日志，面板可查。
+//  2. 自动跑：命中 eventChainActions 族前缀的码（判据只是「事件到没到」、runner
+//     不读 TaskCode）直接在 autoActionFor 里回落到现有 runner，于是不用改代码就能
+//     进队列跑。需要业务参数的族（Model_chat_* / Expert_* / Sequential_*）**故意
+//     不收录**，只在面板里列出来等人补映射——漏跑只是少拿分，跑错是错误上报。
 //
 // 防无限重跑：族码连续 discoverStuckLimit 轮进度不动就判为「跑了也不动」，停止
 // 自动跑并在面板说明原因。否则一个判据不符的码会被每轮扫描反复入队，日志刷屏。
@@ -48,14 +52,14 @@ var discoverAutoRun atomic.Bool
 type DiscoveredTask struct {
 	Code        string    `json:"code"`
 	Title       string    `json:"title,omitempty"`
-	Family      string    `json:"family,omitempty"`      // 命中的事件链族；空 = 需人工实现
-	Implemented bool      `json:"implemented"`           // 精确白名单或已登记 mp 码
-	Auto        bool      `json:"auto"`                  // 当前是否会被自动执行
-	Source      string    `json:"source,omitempty"`      // default | miniprogram
-	Credit      int64     `json:"credit,omitempty"`      // 奖励积分
-	Target      int64     `json:"target,omitempty"`      // 目标进度
-	Current     int64     `json:"current,omitempty"`     // 观察到的最好进度
-	Stuck       int       `json:"stuck,omitempty"`       // 连续无进展轮数
+	Family      string    `json:"family,omitempty"`  // 命中的事件链族；空 = 需人工实现
+	Implemented bool      `json:"implemented"`       // 精确白名单或已登记 mp 码
+	Auto        bool      `json:"auto"`              // 当前是否会被自动执行
+	Source      string    `json:"source,omitempty"`  // default | miniprogram
+	Credit      int64     `json:"credit,omitempty"`  // 奖励积分
+	Target      int64     `json:"target,omitempty"`  // 目标进度
+	Current     int64     `json:"current,omitempty"` // 观察到的最好进度
+	Stuck       int       `json:"stuck,omitempty"`   // 连续无进展轮数
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 	Note        string    `json:"note,omitempty"`

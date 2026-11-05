@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // global_register.go 国际版（global realm）新账号注册激活与地区完善。
 //
 // 背景（ANALYSIS-workbuddy-client-reverse.md）：新 global 账号需先完成注册地区
@@ -16,6 +20,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,10 +29,6 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
-
-// globalWebUA 国际版 web 端 UA（注册完善页走 web 指纹，非桌面端 CLI 指纹）。
-const globalWebUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-	"(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 // GlobalCountry 可选注册地区（对应 get-country-code 的 list 元素）。
 type GlobalCountry struct {
@@ -47,8 +48,8 @@ func (c *Client) globalRegisterBase() string {
 	return defaultGlobalBase
 }
 
-// globalRegisterReq 注册链路通用请求构造：web 指纹 UA + Origin/Referer 同域 + Bearer。
-func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.Request, error) {
+// globalRegisterReq 注册链路通用请求构造：web 指纹 UA + Origin/Referer 同域 + 号的 Bearer。
+func (c *Client) globalRegisterReq(a *auth.Auth, method, url string, body any) (*http.Request, error) {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -57,17 +58,18 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 		}
 		rdr = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequest(method, url, rdr)
+	req, err := newAccountRequest(context.Background(), a, method, url, rdr)
 	if err != nil {
 		return nil, err
 	}
 	base := c.globalRegisterBase()
-	req.Header.Set("User-Agent", globalWebUA)
+	req.Header.Set("User-Agent", c.webUserAgent())
 	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Encoding", acceptEncodingChrome)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", base)
 	req.Header.Set("Referer", base+"/")
-	if token != "" {
+	if token := a.AccessTokenValue(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return req, nil
@@ -75,7 +77,7 @@ func (c *Client) globalRegisterReq(method, url, token string, body any) (*http.R
 
 // globalRegisterJSON 发注册链路请求并解外层信封（code/msg）。
 func (c *Client) globalRegisterJSON(req *http.Request) (code int, msg string, raw json.RawMessage, err error) {
-	resp, err := c.HTTP.Do(req)
+	resp, err := doDecoded(c.HTTP, req)
 	if err != nil {
 		return 0, "", nil, err
 	}
@@ -98,7 +100,7 @@ func (c *Client) GlobalFetchCountries(a *auth.Auth, intlOnly bool) ([]GlobalCoun
 	if a == nil || a.Realm() != "global" {
 		return nil, fmt.Errorf("fetch countries: only global accounts")
 	}
-	req, err := c.globalRegisterReq(http.MethodPost, c.globalRegisterBase()+"/billing/area/get-country-code", a.AccessTokenValue(), map[string]any{"filterForbidden": 1})
+	req, err := c.globalRegisterReq(a, http.MethodPost, c.globalRegisterBase()+"/billing/area/get-country-code", map[string]any{"filterForbidden": 1})
 	if err != nil {
 		return nil, err
 	}
@@ -149,9 +151,8 @@ func (c *Client) GlobalRegisterStatus(a *auth.Auth) (activated bool, needsRegion
 	if a == nil || a.Realm() != "global" {
 		return false, false, "", fmt.Errorf("register status: only global accounts")
 	}
-	req, err := c.globalRegisterReq(http.MethodGet,
-		c.globalRegisterBase()+"/auth/realms/copilot/overseas/user/register?userId="+a.UID,
-		a.AccessTokenValue(), nil)
+	req, err := c.globalRegisterReq(a, http.MethodGet,
+		c.globalRegisterBase()+"/auth/realms/copilot/overseas/user/register?userId="+a.UID, nil)
 	if err != nil {
 		return false, false, "", err
 	}
@@ -180,8 +181,8 @@ func (c *Client) GlobalSubmitRegion(a *auth.Auth, country GlobalCountry) error {
 		"countryFullName": []string{country.EnName},
 		"countryName":     []string{country.IOS2},
 	}
-	req, err := c.globalRegisterReq(http.MethodPost, c.globalRegisterBase()+"/console/login/account",
-		a.AccessTokenValue(), map[string]any{"attributes": attrs})
+	req, err := c.globalRegisterReq(a, http.MethodPost, c.globalRegisterBase()+"/console/login/account",
+		map[string]any{"attributes": attrs})
 	if err != nil {
 		return err
 	}
@@ -221,7 +222,7 @@ func (c *Client) GlobalCompleteRegistration(a *auth.Auth) (activated bool, err e
 		return false, fmt.Errorf("submit region: %w", err)
 	}
 	// 重新激活验证。
-	activated, needsRegion, msg, err = c.GlobalRegisterStatus(a)
+	activated, _, msg, err = c.GlobalRegisterStatus(a)
 	if err != nil {
 		return false, err
 	}

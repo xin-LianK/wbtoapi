@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package backup 本地备份：把凭证、状态与配置打成一个 tar.gz。
 //
 // 为什么不做「PostgreSQL 异地镜像」：个人自用场景真正会丢数据的方式只有三种——

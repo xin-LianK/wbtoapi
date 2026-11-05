@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+# SPDX-License-Identifier: AGPL-3.0-only
+# 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 # login.sh — WorkBuddy CN OAuth 登录 → 落盘 auth 文件
 #
 # 用法:
-#   ./login.sh
+#   ./login.sh [--realm=global] [--pool=池名]
+#
+#   参数原样交给 cmd/login。用了代理池（data/proxies.json，--proxies 改路径）时，登录请求走 --pool 选的池
+#   （不写 = 这个域的默认池，--pool=- = 不绑）里分到的代理，新号绑在它上面；账号原来就有凭证文件的沿用
+#   文件里原来的绑定。
 #
 # 流程:
 #   1. POST /v2/plugin/auth/state 拿授权 URL（无 PKCE，state 由服务端签发）
 #   2. 你在浏览器打开 URL 完成登录
-#   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到 → 落盘 auths/workbuddy-<uid>.json
+#   3. 回到这里按 y → poll 拿 token+uid+nickname → 签到（绑了代理的号不在这里签，交给网关走代理签）
+#      → 落盘 auths/workbuddy-<uid>.json
 #   4. 重启 workbuddy2api 容器加载新账号
 set -euo pipefail
 
@@ -28,7 +37,7 @@ echo "  WorkBuddy OAuth 登录"
 echo "============================================================"
 echo ""
 
-AUTH_URL=$("$LOGIN_BIN" url)
+AUTH_URL=$("$LOGIN_BIN" "$@" url)
 
 echo "请在浏览器中打开以下链接完成登录："
 echo ""
@@ -51,7 +60,7 @@ fi
 echo ""
 echo "正在获取 token..."
 
-RESULT=$("$LOGIN_BIN" poll) || {
+RESULT=$("$LOGIN_BIN" "$@" poll) || {
     echo ""
     echo "获取 token 失败。可能原因："
     echo "  - 登录还没完成就按了 y（重新运行 ./login.sh 再试）"
@@ -66,6 +75,8 @@ DOMAIN=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin
 USER_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uid',''))")
 ENT_ID=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('enterprise_id',''))")
 NICKNAME=$(echo "$RESULT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('nickname',''))")
+# 部门全名与官方刷新时核对身份用的字段：poll 输出里有才写
+EXTRA=$(echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({k: d[k] for k in ('department_full_name','account_type','oneid_account_id','idp','token_type') if k in d}))")
 
 if [[ -z "$USER_ID" ]]; then
     echo "无法获取 uid，请检查 token 是否有效"
@@ -74,7 +85,19 @@ fi
 
 EXPIRES_AT=$(( $(date +%s) + EXPIRES_IN ))
 
+# ─── 代理绑定：登录走了代理池里的代理时 poll 输出带 proxy；账号原来就有凭证文件的沿用文件里原来的绑定
+# （同面板登录：重新登录只是换凭证）───
+AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"
+PROXY=$(echo "$RESULT" | python3 -c "import json,sys; p=json.load(sys.stdin).get('proxy'); print(json.dumps(p) if p else '')")
+if [[ -f "$AUTH_FILE" ]]; then
+    PROXY=$(python3 -c "import json,sys; p=json.load(open(sys.argv[1])).get('proxy'); print(json.dumps(p) if p else '')" "$AUTH_FILE")
+fi
+
 # ─── 签到（CN：POST codebuddy.cn/v2/billing/meter/daily-checkin，幂等不阻塞）───
+# 绑了代理的号不在这里签：这一步从本机直接发，会让号的请求从本机 IP 出去；交给网关的定时签到走号的代理。
+if [[ -n "$PROXY" ]]; then
+    echo "签到: 号绑了代理，交给网关的定时签到（走号的代理）"
+else
 # OAuth 返回字段一律通过环境变量传入 Python，并用带引号 heredoc：
 # 昵称/domain/token 等值可含引号或换行，拼进 Python 源码会造成注入。
 WB2A_LOGIN_TOKEN="$TOKEN" \
@@ -118,9 +141,9 @@ except urllib.error.HTTPError as e:
 except Exception as e:
     print(f"签到: {e}")
 PYEOF
+fi
 
 # ─── 落盘 auth 文件（与 internal/auth 读取格式一致）─────────────────
-AUTH_FILE="$AUTH_DIR/workbuddy-${USER_ID}.json"
 if [[ -f "$AUTH_FILE" ]]; then
     echo "账号已存在（uid=${USER_ID}），将覆盖更新凭证"
     ACTION="覆盖"
@@ -135,6 +158,8 @@ WB2A_LOGIN_DOMAIN="$DOMAIN" \
 WB2A_LOGIN_USER_ID="$USER_ID" \
 WB2A_LOGIN_ENT_ID="$ENT_ID" \
 WB2A_LOGIN_NICKNAME="$NICKNAME" \
+WB2A_LOGIN_EXTRA="$EXTRA" \
+WB2A_LOGIN_PROXY="$PROXY" \
 WB2A_LOGIN_AUTH_FILE="$AUTH_FILE" \
 WB2A_LOGIN_ACTION="$ACTION" \
 python3 - <<'PYEOF'
@@ -153,6 +178,17 @@ auth = {
         "domain": os.environ["WB2A_LOGIN_DOMAIN"],
     },
 }
+# 部门全名（企业号才有，官方请求头 X-Department-Info 的值）与官方刷新时核对身份用的字段
+extra = json.loads(os.environ["WB2A_LOGIN_EXTRA"])
+for src, dst in (("department_full_name", "departmentFullName"), ("account_type", "type"),
+                 ("oneid_account_id", "oneidAccountId"), ("idp", "idp")):
+    if src in extra:
+        auth["account"][dst] = extra[src]
+if "token_type" in extra:
+    auth["auth"]["tokenType"] = extra["token_type"]
+# 号绑的代理（代理池，见 docs/proxy.md）
+if os.environ["WB2A_LOGIN_PROXY"]:
+    auth["proxy"] = json.loads(os.environ["WB2A_LOGIN_PROXY"])
 with open(os.environ["WB2A_LOGIN_AUTH_FILE"], "w") as f:
     json.dump(auth, f, indent=1)
 print(f"已保存（{os.environ['WB2A_LOGIN_ACTION']}）: {os.environ['WB2A_LOGIN_AUTH_FILE']}")

@@ -1,0 +1,181 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
+// 从 Go 端 internal/panel/frontend_test.go 平移过来的两个用例（断言值原样保留）。
+import { describe, expect, it } from 'vitest'
+import {
+  expiryBatches, expiryReminder, pkAccountColorMap, pkDetailGroups, pkDetailLimit, snapshotPackageAccounts, sortExpiryRows, summarizeCreditDays,
+} from './packages'
+import type { Account, PackageAccount } from './types'
+
+describe('pkDetailGroups', () => {
+  it('同到期时间按面额降序；其余未用完包与零/负余额包分别聚合', () => {
+    const input = [
+      { id: 'small-late', size: 100, remain: 1, expires_at: 400 },
+      { id: 'zero-early-b', size: 200, remain: 0, expires_at: 200 },
+      { id: 'small-early', size: 100, remain: 2, expires_at: 200 },
+      { id: 'large-unknown', size: 300, remain: 3, end_time: '' },
+      { id: 'zero-early-a', size: 200, remain: -1, expires_at: 200 },
+      { id: 'small-unknown', size: 100, remain: 1, end_time: '' },
+      { id: 'large-early', size: 300, remain: 4, expires_at: 200 },
+      { id: 'zero-late', size: 300, remain: 0, expires_at: 300 },
+    ]
+    const before = input.map((p) => p.id).join(',')
+    const out = pkDetailGroups(input, 2)
+    expect(out.visible.map((p) => p.id)).toEqual(['large-early', 'small-early'])
+    expect(out.rest.map((p) => p.id)).toEqual(['small-late', 'large-unknown', 'small-unknown'])
+    expect(out.used.map((p) => p.id)).toEqual(['zero-early-b', 'zero-early-a', 'zero-late'])
+    expect(out.restSize).toBe(500)
+    expect(out.restRemain).toBe(5)
+    expect(out.usedSize).toBe(700)
+    expect(pkDetailLimit({})).toBe(5)
+    expect(pkDetailLimit({ panel: { package_detail_limit: 7 } })).toBe(7)
+    // 不改动入参顺序
+    expect(input.map((p) => p.id).join(',')).toBe(before)
+  })
+})
+
+describe('summarizeCreditDays', () => {
+  it('精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表', () => {
+    const day = 86400000, now = 100000
+    const out = summarizeCreditDays([
+      { uid: 'a', remain: 100, packages: [
+        { name: 'soon-a', remain: 30, expires_at: now + day },
+        { name: 'later', remain: 70, expires_at: now + 7 * day },
+      ] },
+      { uid: 'b', remain: 55, packages: [
+        { name: 'soon-b', remain: 20, expires_at: now + day },
+        { name: 'unknown', remain: 5, end_time: '' },
+      ] },
+      { uid: 'err', remain: 0, error: 'offline' },
+    ], now)
+    expect(out.rows.map((r) => ({ days: r.days, credits: r.credits }))).toEqual([
+      { days: 1, credits: 50 },
+      { days: 7, credits: 70 },
+    ])
+    expect(out.accountCount).toBe(3)
+    expect(out.unavailable).toBe(1)
+    expect(pkAccountColorMap([{ uid: 'b' }, { uid: 'a' }]).get('a')).toBe('var(--viz-1)')
+    expect(pkAccountColorMap([{ uid: 'a' }, { uid: 'b' }]).get('b')).toBe('var(--viz-2)')
+  })
+})
+
+describe('分类色', () => {
+  it('按 UID 排序占用 8 个固定槽位，第 9 个起归入「其他」，不循环复用', () => {
+    const list = Array.from({ length: 10 }, (_, i) => ({ uid: 'u' + i }))
+    const colors = pkAccountColorMap(list)
+    expect(colors.get('u0')).toBe('var(--viz-1)')
+    expect(colors.get('u7')).toBe('var(--viz-8)')
+    expect(colors.get('u8')).toBe('var(--viz-other)')
+    expect(colors.get('u9')).toBe('var(--viz-other)')
+    expect(new Set([...colors.values()].filter((c) => c !== 'var(--viz-other)')).size).toBe(8)
+    // 查询失败的账号不占槽位
+    expect(pkAccountColorMap([{ uid: 'x', error: 'offline' }, { uid: 'y' }]).get('y')).toBe('var(--viz-1)')
+  })
+})
+
+describe('pkDetailGroups 按面额排序', () => {
+  it('面额降序，同面额按到期升序、无到期垫底；折叠组同一规则', () => {
+    const out = pkDetailGroups([
+      { id: 'small-early', size: 100, remain: 2, expires_at: 200 },
+      { id: 'large-unknown', size: 300, remain: 3, end_time: '' },
+      { id: 'large-late', size: 300, remain: 1, expires_at: 400 },
+      { id: 'large-early', size: 300, remain: 4, expires_at: 200 },
+      { id: 'zero-small', size: 50, remain: 0, expires_at: 100 },
+      { id: 'zero-large', size: 500, remain: 0, expires_at: 300 },
+    ], 2, 'size_desc')
+    expect(out.visible.map((p) => p.id)).toEqual(['large-early', 'large-late'])
+    expect(out.rest.map((p) => p.id)).toEqual(['large-unknown', 'small-early'])
+    expect(out.used.map((p) => p.id)).toEqual(['zero-large', 'zero-small'])
+  })
+})
+
+describe('积分到期提醒', () => {
+  // 北京时间 2026-10-05 10:00
+  const now = Date.parse('2026-10-05T10:00:00+08:00')
+  const at = (s: string) => Date.parse(s + '+08:00')
+
+  it('按北京时间到期日聚合、按自然日算剩余天数；跳过无余额、无到期、已过期的包', () => {
+    const bs = expiryBatches([
+      { remain: 30, expires_at: at('2026-10-08T23:59:59') },
+      { remain: 20, expires_at: at('2026-10-08T00:00:01') },
+      { remain: 10, end_time: '2026-10-05T23:00:00+08:00' },
+      { remain: 99, expires_at: at('2026-10-05T09:00:00') },
+      { remain: 0, expires_at: at('2026-10-06T00:00:00') },
+      { remain: 5, end_time: '' },
+      { remain: 40, expires_at: at('2026-10-20T12:00:00') },
+    ], now)
+    expect(bs).toEqual([
+      { date: '2026-10-05', days: 0, remain: 10 },
+      { date: '2026-10-08', days: 3, remain: 50 },
+      { date: '2026-10-20', days: 15, remain: 40 },
+    ])
+  })
+
+  it('日均需耗 = 最近一批 ÷ 距到期天数（向上取整，今天到期按 1 天）；7 天内合计与随后批次', () => {
+    const r = expiryReminder([
+      { remain: 100, expires_at: at('2026-10-08T12:00:00') },
+      { remain: 7, expires_at: at('2026-10-12T12:00:00') },
+      { remain: 3, expires_at: at('2026-10-13T12:00:00') },
+      { remain: 1, expires_at: at('2026-10-14T12:00:00') },
+      { remain: 1, expires_at: at('2026-10-15T12:00:00') },
+    ], now)!
+    expect(r.first).toEqual({ date: '2026-10-08', days: 3, remain: 100 })
+    expect(r.daily).toBe(34)
+    expect(r.week).toBe(107)
+    expect(r.next.map((b) => b.date)).toEqual(['2026-10-12', '2026-10-13', '2026-10-14'])
+    expect(r.count).toBe(5)
+    expect(expiryReminder([{ remain: 9, expires_at: at('2026-10-05T20:00:00') }], now)!.daily).toBe(9)
+    expect(expiryReminder([{ remain: 9, end_time: '' }], now)).toBeNull()
+  })
+})
+
+// 从上游 internal/panel/frontend_test.go 的 TestAppJSExpirySortedByExpiry 平移（期望值原样保留）。
+describe('sortExpiryRows', () => {
+  it('按最近到期升序、不分域；没有会到期积分的与查询失败的排最后', () => {
+    const now = Date.now()
+    const day = (n: number) => {
+      const d = new Date(now)
+      d.setHours(0, 0, 0, 0)
+      d.setDate(d.getDate() + n)
+      const p = (x: number) => String(x).padStart(2, '0')
+      return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' 00:00:00'
+    }
+    const pack = (days: number, remain: number) => ({ end_time: day(days), remain })
+    // 模拟后端顺序：余额降序 → 国内高余额在前且到期最晚，国际版最少且最快到期
+    const list = [
+      { uid: 'a', nickname: 'cn-late', realm: 'cn', packages: [pack(16, 900)] },
+      { uid: 'b', nickname: 'cn-mid', realm: 'cn', packages: [pack(12, 700)] },
+      { uid: 'c', nickname: 'gl-soon', realm: 'global', packages: [pack(2, 500)] },
+      { uid: 'd', nickname: 'no-expiry', realm: 'cn', packages: [pack(-3, 100)] },
+      { uid: 'e', nickname: 'broken', realm: 'cn', error: 'offline' },
+    ] as PackageAccount[]
+    expect(sortExpiryRows(list, now).map((x) => x.a.nickname)).toEqual(['gl-soon', 'cn-mid', 'cn-late', 'no-expiry', 'broken'])
+  })
+})
+
+// 从上游 internal/panel/frontend_test.go 的 TestAppJSExpirySnapshotRenders 平移（期望值原样保留）。
+describe('snapshotPackageAccounts', () => {
+  it('只有总览的最早到期快照也能排出到期提醒：2 天的在前，30 天其次，没有到期信息的最后', () => {
+    const now = Date.now()
+    const day = (n: number) => {
+      const d = new Date(now)
+      d.setHours(0, 0, 0, 0)
+      d.setDate(d.getDate() + n)
+      return d.toISOString()
+    }
+    // 总览形状：没有 packages 数组，只有到期快照字段
+    const list = [
+      { uid: 'aaaaaaaa-1', nickname: '秋', credits: 4099, credits_earliest_expiry: day(2), credits_earliest_remaining: 499 },
+      { uid: 'bbbbbbbb-2', nickname: '秋千易', credits: 3243, credits_earliest_expiry: day(30), credits_earliest_remaining: 43 },
+      { uid: 'cccccccc-3', nickname: '长期包', credits: 900, credits_earliest_expiry: undefined, credits_earliest_remaining: 0 },
+    ] as Account[]
+    const rows = sortExpiryRows(snapshotPackageAccounts(list), now)
+    expect(rows.map((x) => x.a.nickname)).toEqual(['秋', '秋千易', '长期包'])
+    expect(rows.map((x) => x.r?.first.remain ?? null)).toEqual([499, 43, null])
+    // Go 端 time.Time 零值也当作没有到期信息
+    const zero = snapshotPackageAccounts([{ uid: 'z', credits_earliest_expiry: '0001-01-01T00:00:00Z', credits_earliest_remaining: 5 } as Account])
+    expect(zero[0].packages).toEqual([])
+  })
+})

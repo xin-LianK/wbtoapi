@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+# SPDX-License-Identifier: AGPL-3.0-only
+# 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 """上游形态快照：静态提取（解包）与抓包导入，输出同一份 schema，支持跨版本 diff。
 
 设计依据见 MAINTENANCE.md §5。核心判断是**解包给全集、抓包给实例**：

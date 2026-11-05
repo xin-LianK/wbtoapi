@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 /* mobile.js — 手机端（≤760px）联动逻辑：抽屉开合 + 宽表卡片化的字段名标签。
  *
  * 本文件是本仓库自有文件，上游不维护（同步上游时不参与冲突）。

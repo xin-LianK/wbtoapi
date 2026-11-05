@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package httpauth 网关与面板共用的 Bearer 鉴权原语。
 //
 // 单独成包的原因：server（/v1/*、/status）与 panel（/panel/api/*）两处鉴权
@@ -56,6 +60,28 @@ func VerifyAPIKey(r *http.Request, key string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(digest(tok), digest(key)) == 1
+}
+
+// Token 取出请求带的密钥：Authorization: Bearer <密钥>；xAPIKey 为 true 时，没带 Authorization 头
+// 再认 x-api-key（Anthropic SDK 的默认头，Claude Code 设 ANTHROPIC_API_KEY 时只发它）。带了
+// Authorization 却不是 Bearer 时当作没带密钥，不再看 x-api-key。
+func Token(r *http.Request, xAPIKey bool) string {
+	authz := r.Header.Get("Authorization")
+	if authz == "" {
+		if xAPIKey {
+			return r.Header.Get("X-Api-Key")
+		}
+		return ""
+	}
+	if !strings.HasPrefix(authz, bearerPrefix) {
+		return ""
+	}
+	return authz[len(bearerPrefix):]
+}
+
+// Equal 常量时间比较两个密钥，口径同 VerifyBearer（先摘要再比较）。
+func Equal(a, b string) bool {
+	return subtle.ConstantTimeCompare(digest(a), digest(b)) == 1
 }
 
 // digest 返回 s 的 SHA-256（定长 32 字节，供常量时间比较）。

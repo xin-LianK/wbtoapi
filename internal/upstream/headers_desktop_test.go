@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package upstream
 
 import (
@@ -7,7 +11,7 @@ import (
 	"testing"
 )
 
-// TestDesktopProfileHeaders 锁定 WorkBuddy 桌面端（5.8.3）的真实出站头形态。
+// TestDesktopProfileHeaders 锁定 WorkBuddy 桌面端（国内版 5.9.3）的真实出站头形态。
 //
 // 依据：2026-10-21 从 C:\Program Files\WorkBuddy\resources\app.asar 提取的
 // buildVlmGatewayHeaders + applyGatewayHeaders + applyTraceHeaders，
@@ -24,7 +28,8 @@ func TestDesktopProfileHeaders(t *testing.T) {
 		"X-IDE-Name": "WorkBuddy",
 		// buildVlmGatewayHeaders: X-IDE-Version = appVersion（真实版本）;
 		// applyGatewayHeaders 的 "0.0.0" 只是兜底表，不能当默认值用。
-		"X-IDE-Version":   defaultClientVersion,
+		// testAuth() 无 Domain = 国内号，取 CN 内置版本。
+		"X-IDE-Version":   defaultClientVersionCN,
 		"X-Private-Data":  "true",
 		"X-Agent-Intent":  "craft",
 		"X-Agent-Purpose": "conversation",

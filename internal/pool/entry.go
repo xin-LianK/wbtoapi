@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package pool 账号池：单一状态机（健康/冷却/熔断/连败降权）+ 在途租约 + 最早到期优先/加权挑选 + state.json 持久化。
 package pool
 
@@ -8,16 +12,12 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// degradeReason 连败降权（issue #114）写 reason 的固定文案：与冷却域的
-// reason（"429 rate limit" / "waf 403 block" / "余额不足"）共用一个字段，
-// 运维在 /status 一处即可看到「为什么被降权/冷却」，不新增台账字段。
-const degradeReason = "consecutive failures"
-
 type CoolKind int
 
 const (
-	CoolHard CoolKind = iota // 余额不足 → 冷却到次日 04:00（等签到恢复）
-	CoolSoft                 // 429 → 短冷却
+	CoolHard  CoolKind = iota // 余额不足 → 冷却到次日 04:00（等签到恢复）
+	CoolSoft                  // 429 → 短冷却
+	CoolPause                 // 风控波：同域短时间内多个号被 11140 限制 → 整域暂停（见 wave.go）
 )
 
 func (k CoolKind) String() string {
@@ -26,6 +26,8 @@ func (k CoolKind) String() string {
 		return "hard_credit"
 	case CoolSoft:
 		return "soft_rate"
+	case CoolPause:
+		return "restriction_wave"
 	}
 	return "unknown"
 }
@@ -69,8 +71,10 @@ type ExpiryBucket struct {
 
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID          string `json:"uid"`
-	Nickname     string `json:"nickname,omitempty"`
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	// Note 面板里给账号写的备注（只在面板上显示，不发给上游）；空 = 没写。
+	Note         string `json:"note,omitempty"`
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
@@ -111,11 +115,21 @@ type Status struct {
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。
-	Paused          bool      `json:"paused,omitempty"`
+	Paused bool `json:"paused,omitempty"`
+	// ProxyBlocked 代理池拦着这个号的原因（见 entry.proxyBlocked）；空为没拦。拦着的号不参与选号，
+	// 定时任务也跳过。
+	ProxyBlocked    string    `json:"proxy_blocked,omitempty"`
 	SuccessCount    int64     `json:"success_count,omitempty"`
 	ErrTotal        int64     `json:"err_total,omitempty"`
 	LastSuccessTime time.Time `json:"last_success,omitempty"`
-	LastErrTime     time.Time `json:"last_err,omitempty"`
+	// LastLiveness 最近一次测活的结果；没测过为 nil。
+	LastLiveness *LivenessResult `json:"last_liveness,omitempty"`
+	// BlockedModels 号不接的模型（上游拒绝后自动加的、面板手动加的）。
+	BlockedModels []BlockedModel `json:"blocked_models,omitempty"`
+	// Groups 号所在的分组 id；Priority 优先级，越小越先用，默认 0。
+	Groups      []string  `json:"groups,omitempty"`
+	Priority    int       `json:"priority"`
+	LastErrTime time.Time `json:"last_err,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
 	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
 	CheckinDone bool       `json:"checkin_done,omitempty"`
@@ -159,7 +173,7 @@ type ModelCostStatus struct {
 // RateLimitedModel 单个被限流模型的台账行（issue #36）。
 type RateLimitedModel struct {
 	Model string `json:"model"`
-	// Kind 区分限流与模型不可用：6004 是 rate_limit，11102 是 model_unavailable。
+	// Kind 区分限流与模型不可用：6000–6008 按模型限额与 14003 模型繁忙是 rate_limit，11102 是 model_unavailable。
 	Kind string `json:"kind"`
 	// Until 冷却到期时刻 = 该模型的独立冷却截止（modelCooldowns[m].Until，截断后），
 	// 多模型限流时不再等于 Status.Until（账号级）。
@@ -231,8 +245,20 @@ type entry struct {
 	// paused 暂停选号：与 disabled 正交。置位后退出选号候选（healthy 判否），
 	// 但保号任务遍历只按 Disabled 过滤，故 paused 号天然继续参与签到 / 活跃上报 /
 	// 保活 / 余额刷新。持久化（state.json），跨重启不丢。
-	paused   bool
+	paused bool
+	// proxyBlocked 代理池拦住这个号的原因（号的代理不通或到期、在等代理、开着「只许走号的代理」却没绑，
+	// 见 internal/proxies）：非空时不参与选号、不测活，定时任务也跳过（看 Status.ProxyBlocked），不罚号。
+	// 运行态，由代理池推送（SetProxyBlocked），不持久化：重启后代理池登记号时重新推一遍。
+	proxyBlocked string
+	note         string // 面板备注（Status.Note），持久化
+	// blockedModels 号不接的模型（见 blockedmodels.go），持久化。
+	blockedModels []BlockedModel
+	// groups 号所在的分组 id，priority 号的优先级（越小越先用，见 groups.go），都持久化。
+	groups   []string
+	priority int
 	reason   string
+	// liveness 最近一次测活的结果（Status.LastLiveness），持久化；nil = 没测过。
+	liveness *LivenessResult
 	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
@@ -282,6 +308,8 @@ type entry struct {
 	modelCost map[string]modelCostEntry
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
+	// rpm 最近 60 秒占到名额的时刻（每号每分钟请求数上限，见 rpm.go），运行态，不持久化。
+	rpm rpmCounter
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
@@ -299,11 +327,16 @@ func (e *entry) modelCostOf(model string, now time.Time) (modelCostEntry, bool) 
 	return mc, true
 }
 
+// excluded 报告账号是不是根本不参与选号：禁用、暂停选号、被代理池拦着（与冷却熔断无关）。
+func (e *entry) excluded() bool {
+	return e.disabled || e.paused || e.proxyBlocked != ""
+}
+
 // healthy 报告账号当前是否可选（未禁用、未处于任一冷却/熔断/连败降权期）。
 // 连败降权与冷却/熔断同入本判定（取更长者不叠加：三个截止是并列的或门，
 // 只要任一未到期即不可选，天然「并存取更远者」——不需要显式比较长短）。
 func (e *entry) healthy(now time.Time) bool {
-	if e.disabled || e.paused {
+	if e.excluded() {
 		return false
 	}
 	if !e.until.IsZero() && now.Before(e.until) {
@@ -324,7 +357,7 @@ func (e *entry) healthy(now time.Time) bool {
 // healthyForModel 与 ServableNow 共用本谓词，保证 chat 选号与探活口径一致。
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
-	if e.disabled || e.paused || !e.until.IsZero() || !e.degradeUntil.IsZero() || !e.breakerUntil.IsZero() {
+	if e.excluded() || !e.until.IsZero() || !e.degradeUntil.IsZero() || !e.breakerUntil.IsZero() {
 		return false
 	}
 	for _, mc := range e.modelCooldowns {
@@ -358,12 +391,15 @@ func (e *entry) modelCooled(now time.Time, reqModel string) bool {
 // 任意多个模型同时限流：被 B 限流的账号对 A 请求仍可选（A 不在 modelCooldowns 拦截
 // 且账号级 healthy 成立）。空 reqModel / 未记录模型 → 等价 healthy。
 func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
-	if e.disabled || e.paused {
+	if e.excluded() {
 		return false
 	}
 	if e.modelCooled(now, reqModel) {
 		// 该模型在 6004 独立冷却中 → 不可选。
 		return false
+	}
+	if e.refusedBy(reqModel) != nil {
+		return false // 号的名单里不接这个模型
 	}
 	// 账号级冷却/熔断先判；若未冷却则由账号级健康决定。
 	return e.healthy(now)
@@ -449,10 +485,18 @@ type stateAccount struct {
 	CreditsTotal int64     `json:"credits_total,omitempty"`
 	Disabled     bool      `json:"disabled"`
 	Paused       bool      `json:"paused,omitempty"`
+	Note         string    `json:"note,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
 	Until        time.Time `json:"until,omitempty"`
-	CoolKind     CoolKind  `json:"cool_kind"`
-	SuccessCount int64     `json:"success_count,omitempty"`
+	// Liveness 最近一次测活的结果（entry.liveness 同源）。
+	Liveness *LivenessResult `json:"liveness,omitempty"`
+	// BlockedModels 号不接的模型（entry.blockedModels 同源）。
+	BlockedModels []BlockedModel `json:"blocked_models,omitempty"`
+	// Groups / Priority 号所在的分组与优先级（entry.groups / entry.priority 同源）。
+	Groups       []string `json:"groups,omitempty"`
+	Priority     int      `json:"priority,omitempty"`
+	CoolKind     CoolKind `json:"cool_kind"`
+	SuccessCount int64    `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
 	ErrTotal    int64     `json:"err_total,omitempty"`
@@ -527,6 +571,8 @@ type stateModelCost struct {
 type stateFile struct {
 	Accounts   map[string]stateAccount   `json:"accounts"`
 	Scheduling map[string]scheduleCursor `json:"scheduling,omitempty"`
+	// Groups 账号分组（见 groups.go）；号在哪些组记在各号的 groups 里。
+	Groups []Group `json:"groups,omitempty"`
 }
 
 // flushInterval 后台落盘周期。
@@ -572,6 +618,7 @@ const sessionDeadReason = "12153 session dead"
 //   - 上游文案撞词（业务错误里夹带 "account disabled"/"限制使用" 之类字样）；
 //   - 临时风控（同一出口 IP/同一请求形态被误判，账号本身健康）；
 //   - 上游改文案（本地规则猜错语义）。
+//
 // 这类禁用**不能自愈**（没人会去重登一个其实没被封的号），所以必须让运维在面板
 // 上一眼看出「这是本地判的，可能误判」，并提供一键解封（Revive）。
 //

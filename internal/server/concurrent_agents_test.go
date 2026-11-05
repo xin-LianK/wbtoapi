@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // concurrent_agents_test.go 多 agent 并发的容量实证。
 //
 // 场景：5 个账号、max_in_flight=3、3 个 agent 同时发起请求。验证两点——

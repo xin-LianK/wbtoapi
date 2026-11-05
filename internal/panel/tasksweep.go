@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // tasksweep.go 周期幂等「补领清扫」。
 //
 // 职责单一——只 accept 尚未接受的任务、只 claim 已达标未领的任务，**不跑任何

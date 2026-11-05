@@ -1,9 +1,14 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package panel 内嵌式 Web 管理面板：账号池总览、单号运维（解冻/禁用/签到/
 // 刷新余额/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
 // 签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
 //
 // 设计约束：
-//   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
+//   - 前端源码在 web/（React + HeroUI），构建产物 dist/ 不进版本库，构建时 go:embed 进二进制、
+//     与二进制同体部署；没构建前端也能编译，只是页面显示构建指引（见 index.go）；
 //   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
 //     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
@@ -12,6 +17,8 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -20,16 +27,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/backup"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/changelog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/credithist"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logarchive"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxies"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/selfupdate"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/update"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
@@ -41,9 +55,19 @@ type Config struct {
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	APIKey    string               // 管理员密钥，空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	Keys      *apikeys.Store       // 客户端密钥（nil = 密钥接口返回 501）
 	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	Version   string               // 网关版本号（语义化版本，不带 v）
+
+	// Changelog 内嵌的更新日志原文（docs/CHANGELOG.md），「本次更新」弹窗从这里取条目。
+	Changelog string
+	// UpdateURL 更新检查读取的远端更新日志地址；空 = GitHub 上 main 分支的 docs/CHANGELOG.md（测试可替换）。
+	UpdateURL string
+	// SelfUpdater 一键更新（下载新版到数据目录并原地重启，internal/selfupdate）；
+	// nil = 面板不提供一键更新。与 Updater（版本检查 internal/update）是两件事：
+	// 前者换二进制，后者只查是否有新版并透出更新日志。
+	SelfUpdater *selfupdate.Updater
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -67,6 +91,13 @@ type Config struct {
 	// CreditHistory 积分变动账本（nil = 积分历史接口返回 501）。只读展示：
 	// 留痕由余额查询路径（upstream.Client 的余额观察者）写入。
 	CreditHistory *credithist.Ledger
+	// TaskLog / SystemLog 运行日志里任务、系统两个频道的留存归档：每行入环后按频道落盘，
+	// 按时间范围查历史、日志留存的占用与清空都读这里（nil = 这个频道不落盘）。
+	TaskLog   *logarchive.Store
+	SystemLog *logarchive.Store
+	// CreditLog 积分获取流水的留存（签到、领奖等领到的积分逐笔落盘，见 upstream.Earning）：
+	// 积分获取页、日志留存的占用与清空读这里（nil = 积分获取接口返回 501）。
+	CreditLog *logarchive.Store
 
 	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
@@ -92,6 +123,8 @@ type Config struct {
 
 	// chatEndpoint 聊天测试台的转发目标（真实 chat 流水线），经 SetChatEndpoint 注入。
 	chatEndpoint http.Handler
+	// Proxies 代理池（按号代理，见 proxies.go）。nil = 代理接口返回 501，加号、删号、导出凭证照旧不碰代理。
+	Proxies *proxies.Registry
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -117,6 +150,15 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// assets 前端产物（dist/ 之内）。默认是 go:embed 的那份，测试可替换成合成的文件系统。
+	// gzipped 是按文件名缓存的压缩结果（index.go）。
+	assets  fs.FS
+	gzipped sync.Map
+
+	// releases 内嵌更新日志的解析结果；upd 后台更新检查的最近结果（update.go）。
+	releases []changelog.Release
+	upd      updateState
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -151,7 +193,11 @@ const loginTTL = 15 * time.Minute
 // loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
 type loginSession struct {
 	created time.Time
-	realm   string // "cn" / "global"，缺省 cn
+	realm   string              // "cn" / "global"，缺省 cn
+	trace   upstream.LoginTrace // 这次登录的链路（发起授权时生成，轮询、取账号沿用）
+	// pool 选的代理池（空 = 默认池，proxies.NoPool = 不绑）；hold、proxy 登录在池里占的位子和代理
+	// （登录请求走这个代理，新号也绑在它上面）。没装代理池时都为空。
+	pool, hold, proxy string
 }
 
 // New 构建面板。
@@ -160,11 +206,16 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		started: time.Now(),
-		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		cfg:      cfg,
+		mux:      http.NewServeMux(),
+		started:  time.Now(),
+		logs:     NewRing(500),
+		logins:   map[string]loginSession{},
+		assets:   embeddedDist(),
+		releases: changelog.Parse(cfg.Changelog),
+	}
+	if cfg.TaskLog != nil || cfg.SystemLog != nil {
+		p.logs.SetSink(p.archiveLogLine)
 	}
 	p.routes()
 	return p
@@ -175,32 +226,56 @@ func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
-	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
-	p.mux.HandleFunc("GET /panel/mobile.css", p.mobileStyle)
-	p.mux.HandleFunc("GET /panel/mobile.js", p.mobileScript)
+	for _, name := range rootFiles {
+		p.mux.HandleFunc("GET /panel/"+name, p.rootFile(name))
+	}
+	p.mux.HandleFunc("GET /panel/assets/{file}", p.asset)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
+	p.mux.HandleFunc("GET /panel/api/version", p.withAuth(p.version))
+	p.mux.HandleFunc("POST /panel/api/version/check", p.withAuth(p.versionCheck))
+	p.mux.HandleFunc("POST /panel/api/update", p.withAuth(p.selfUpdate))
+	p.mux.HandleFunc("POST /panel/api/update/rollback", p.withAuth(p.selfUpdateRollback))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
+	p.mux.HandleFunc("GET /panel/api/logs/archive", p.withAuth(p.logsArchive))
+	p.mux.HandleFunc("GET /panel/api/log_storage", p.withAuth(p.logStorage))
+	p.mux.HandleFunc("POST /panel/api/log_storage/{kind}/clear", p.withAuth(p.logStorageClear))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
+	p.mux.HandleFunc("GET /panel/api/credit_log", p.withAuth(p.creditLog))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
-	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
+	p.mux.HandleFunc("POST /panel/api/import", p.withAuth(p.importAccounts))
+	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importAccounts)) // 旧路径，外部脚本可能还在用
+	p.mux.HandleFunc("POST /panel/api/accounts/export", p.withAuth(p.accountsExport))
+	p.mux.HandleFunc("POST /panel/api/accounts/batch", p.withAuth(p.accountsBatch))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountAction("revive")))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountAction("disable")))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountAction("pause")))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountAction("resume")))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/note", p.withAuth(p.accountNote))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/blocked_models", p.withAuth(p.accountBlockedModels))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/groups", p.withAuth(p.accountGroups))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/priority", p.withAuth(p.accountPriority))
+	p.mux.HandleFunc("GET /panel/api/groups", p.withAuth(p.groupsList))
+	p.mux.HandleFunc("POST /panel/api/groups", p.withAuth(p.groupCreate))
+	p.mux.HandleFunc("POST /panel/api/groups/{id}", p.withAuth(p.groupUpdate))
+	p.mux.HandleFunc("POST /panel/api/groups/{id}/delete", p.withAuth(p.groupDelete))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountAction("remove")))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/liveness", p.withAuth(p.accountLiveness))
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/compensation/claim", p.withAuth(p.accountCompensationClaim))
+	p.mux.HandleFunc("GET /panel/api/compensation", p.withAuth(p.compensationStatus))
+	p.mux.HandleFunc("POST /panel/api/compensation/claim_all", p.withAuth(p.compensationClaimAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
@@ -209,6 +284,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
+	p.mux.HandleFunc("POST /panel/api/liveness_all", p.withAuth(p.livenessAll))
 	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
 	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.withAuth(p.keepaliveAll))
 	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
@@ -217,10 +293,15 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
+	p.mux.HandleFunc("GET /panel/api/keys", p.withAuth(p.keysList))
+	p.mux.HandleFunc("POST /panel/api/keys", p.withAuth(p.keyCreate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}", p.withAuth(p.keyUpdate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/regenerate", p.withAuth(p.keyRegenerate))
+	p.mux.HandleFunc("POST /panel/api/keys/{id}/delete", p.withAuth(p.keyDelete))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
-	p.mux.HandleFunc("GET /panel/api/compensation", p.withAuth(p.compensation))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/compensation", p.withAuth(p.accountCompensationClaim))
-	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationAll))
+	// 兼容旧脚本体：领取全部补偿的别名路径（新前端用 /compensation/claim_all）。
+	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationClaimAll))
 	// 告警通知（测试投递）与本地备份。
 	p.mux.HandleFunc("POST /panel/api/notify/test", p.withAuth(p.notifyTest))
 	p.mux.HandleFunc("GET /panel/api/notify/status", p.withAuth(p.notifyStatus))
@@ -231,6 +312,21 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/update/check", p.withAuth(p.updateCheck))
 	// 聊天测试台（走真实 chat 流水线，SSE 直通）。
 	p.mux.HandleFunc("POST /panel/api/playground", p.withAuth(p.playground))
+	p.mux.HandleFunc("GET /panel/api/proxies", p.withAuth(p.proxiesList))
+	p.mux.HandleFunc("POST /panel/api/proxies/preview", p.withAuth(p.proxiesPreview))
+	p.mux.HandleFunc("POST /panel/api/proxies/import", p.withAuth(p.proxiesImport))
+	p.mux.HandleFunc("GET /panel/api/proxies/export", p.withAuth(p.proxiesExport))
+	p.mux.HandleFunc("POST /panel/api/proxies/test_all", p.withAuth(p.proxiesTestAll))
+	p.mux.HandleFunc("POST /panel/api/proxies/delete", p.withAuth(p.proxiesDelete))
+	p.mux.HandleFunc("POST /panel/api/proxies/delete_unavailable", p.withAuth(p.proxiesDeleteUnavailable))
+	p.mux.HandleFunc("POST /panel/api/proxies/settings", p.withAuth(p.proxiesSettings))
+	p.mux.HandleFunc("POST /panel/api/proxies/bind", p.withAuth(p.proxiesBind))
+	p.mux.HandleFunc("POST /panel/api/proxies/{id}", p.withAuth(p.proxyUpdate))
+	p.mux.HandleFunc("POST /panel/api/proxies/{id}/test", p.withAuth(p.proxyTest))
+	p.mux.HandleFunc("POST /panel/api/proxy_pools", p.withAuth(p.proxyPoolCreate))
+	p.mux.HandleFunc("POST /panel/api/proxy_pools/{id}", p.withAuth(p.proxyPoolUpdate))
+	p.mux.HandleFunc("POST /panel/api/proxy_pools/{id}/delete", p.withAuth(p.proxyPoolDelete))
+	p.mux.HandleFunc("POST /panel/api/proxy_pools/{id}/rebalance", p.withAuth(p.proxyPoolRebalance))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -289,8 +385,8 @@ func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
 // overview 总览：池计数 + 每账号状态 + 面板元信息。
 func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	// 用 WithPaused 而不是 CountsDetailed：后者把暂停号并进 disabled（/status 的
-	// 「不可用」口径），而概况卡片要分开展示（issue #125）。
-	total, healthy, cooling, disabled, paused, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
+	// 「不可用」口径），而概况卡片要分开展示（issue #125）；被代理池拦着的号也单独计（proxy_blocked）。
+	total, healthy, cooling, disabled, paused, proxyBlocked, inFlightFull := p.cfg.Pool.CountsDetailedWithPaused()
 	sticky := 0
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
@@ -306,6 +402,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"cooling":         cooling,
 		"disabled":        disabled,
 		"paused":          paused,
+		"proxy_blocked":   proxyBlocked,
 		"in_flight_full":  inFlightFull,
 		"accounts":        p.cfg.Pool.List(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
@@ -313,8 +410,10 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"model_locks": p.cfg.Pool.ModelLockView(),
 		// 到期提醒快照的节奏与年龄：界面轮询是 5 秒级，但卡片数据只随余额后台刷新
 		// 更新（默认每 5 分钟）——把这两个数透出，前端才能如实标注「x 分钟前更新」。
-		"balance_refresh_sec":    p.balanceRefreshSec(),
-		"balance_refreshed_at":   p.balanceRefreshedAt(),
+		"balance_refresh_sec":  p.balanceRefreshSec(),
+		"balance_refreshed_at": p.balanceRefreshedAt(),
+		// proxies 代理池的概况（总览的提醒、账号池卡片上的代理），没装代理池时为 null。
+		"proxies": p.proxyOverview(),
 	})
 }
 
@@ -332,6 +431,21 @@ func (p *Panel) balanceRefreshedAt() time.Time {
 		return time.Time{}
 	}
 	return p.cfg.Scheduler.BalanceRefreshedAt()
+}
+
+// proxyOverview 总览里代理池的部分：有没有用代理池、要提醒的数、每个号的代理情况。
+func (p *Panel) proxyOverview() map[string]any {
+	if p.cfg.Proxies == nil {
+		return nil
+	}
+	v := p.cfg.Proxies.View()
+	return map[string]any{
+		"pools":         len(v.Pools),
+		"proxies":       len(v.Proxies),
+		"require_bound": v.Settings.RequireBound,
+		"warnings":      v.Warnings,
+		"accounts":      p.cfg.Proxies.AccountViews(),
+	}
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
@@ -373,6 +487,7 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		Model:     q.Get("model"),
 		ClientIP:  q.Get("client_ip"),
 		UserAgent: q.Get("user_agent"),
+		APIKey:    q.Get("api_key"),
 		From:      parseTimeParam(q.Get("from")),
 		To:        parseTimeParam(q.Get("to")),
 	})
@@ -461,8 +576,9 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
-	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+	// 优先用个人号拉：域目录要个人号视角，企业号的名单各自单独记。
+	if uid := p.cfg.Pool.CatalogUIDForRealm("cn"); uid != "" {
+		if acct := p.cfg.Pool.AuthByUID(uid); acct != nil {
 			infos, err := p.cfg.Upstream.FetchModels(acct)
 			if err != nil {
 				fetchErrs = append(fetchErrs, "cn: "+err.Error())
@@ -472,6 +588,13 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	// 企业专属模型：只有池里企业号自己的目录里有，请求只派给这些企业号。
+	for _, mi := range p.cfg.Upstream.EnterpriseOnlyModels("cn") {
+		entry := panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP)
+		entry["enterprise_only"] = true
+		entry["is_default"] = false // 企业目录的默认模型不是池子的默认，免得出现两个默认（与 /v1/models 一致）
+		out = append(out, entry)
 	}
 
 	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
@@ -597,52 +720,39 @@ func (p *Panel) modelProbes(w http.ResponseWriter, r *http.Request) {
 // 账号运维
 // ---------------------------------------------------------------------------
 
-// accountRevive 手动复活：清禁用 + 冷却 + 熔断（运维口径无条件恢复）。
-func (p *Panel) accountRevive(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if _, ok := p.cfg.Pool.Status(uid); !ok {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	p.cfg.Pool.Revive(uid)
-	log.Printf("panel: revive uid=%s（人工清除禁用/冷却/熔断）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
+// noteMaxRunes 账号备注最长几个字。
+const noteMaxRunes = 40
 
-// accountDisable 人工禁用（不再参与选号，需面板 revive 或重登恢复）。
-func (p *Panel) accountDisable(w http.ResponseWriter, r *http.Request) {
+// accountNote 改账号备注（只在面板上显示）：请求体 {"note": "..."}，去掉首尾空白后存进号池状态，空串清除。
+func (p *Panel) accountNote(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
-	if _, ok := p.cfg.Pool.Status(uid); !ok {
+	var body struct {
+		Note *string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Note == nil {
+		writeErr(w, http.StatusBadRequest, "请求体要有 note 字段")
+		return
+	}
+	note := strings.TrimSpace(*body.Note)
+	if strings.IndexFunc(note, unicode.IsControl) >= 0 {
+		writeErr(w, http.StatusBadRequest, "备注不能有换行或控制字符")
+		return
+	}
+	if utf8.RuneCountInString(note) > noteMaxRunes {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("备注最多 %d 个字", noteMaxRunes))
+		return
+	}
+	if !p.cfg.Pool.SetNote(uid, note) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	p.cfg.Pool.Disable(uid, "manual disable (panel)")
-	log.Printf("panel: disable uid=%s（人工禁用）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// accountPause 暂停选号：账号退出选号候选，但**照常参与**签到 / 活跃上报 / 保活 /
-// 余额刷新。与 disable 的区别：不写 reason、不清冷却域、不重置计数——账号是「临时
-// 让位」而非「判死」，点「恢复选号」即可立刻回到池子（无需重登或解冻）。
-func (p *Panel) accountPause(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.cfg.Pool.Pause(uid) {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
+	// 备注是使用者随手写的，可能有手机号之类，日志里不记内容。
+	if note == "" {
+		log.Printf("panel: note uid=%s 清除了备注", uid)
+	} else {
+		log.Printf("panel: note uid=%s 改了备注", uid)
 	}
-	log.Printf("panel: pause uid=%s（暂停选号，保号任务照常）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// accountResume 解除暂停选号（幂等，对未暂停账号为空操作）。
-func (p *Panel) accountResume(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	if !p.cfg.Pool.Resume(uid) {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	log.Printf("panel: resume uid=%s（恢复参与选号）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "note": note})
 }
 
 // accountCheckin 单号签到：DailyCheckin + 余额查询解冻（已签到等业务错误不阻塞余额刷新），
@@ -658,9 +768,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	checkinDone := false
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
 	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
-	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
+	// 国际版没有签到活动（10-19 生产：上游 400 code 10001「签到活动未开启或已过期」），同样只刷新余额。
+	// 前端对企业号、国际版号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
 	if a.IsEnterprise() {
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
+	} else if a.IsGlobal() {
+		checkinMsg = "国际版没有签到活动（已跳过签到，仅刷新余额）"
 	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
 		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。
@@ -724,29 +837,6 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 
-// accountRemove 移除账号：先出池（立即落盘 state），再删 auth 文件。
-func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
-	uid := r.PathValue("uid")
-	a := p.cfg.Pool.Remove(uid)
-	if a == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
-		return
-	}
-	fileMsg := ""
-	if a.FilePath != "" {
-		if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
-			fileMsg = err.Error()
-		}
-	}
-	if fileMsg != "" {
-		log.Printf("panel: remove uid=%s（auth 文件删除失败: %s）", uid, fileMsg)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "file_error": fileMsg})
-		return
-	}
-	log.Printf("panel: remove uid=%s（已出池并删除凭证文件）", uid)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
 // ---------------------------------------------------------------------------
 // 批量任务
 // ---------------------------------------------------------------------------
@@ -807,74 +897,6 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	p.syncNicknames()
 	log.Printf("panel: 手动全量余额刷新完成")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
-}
-
-// compensation 查询全部账号的补偿活动状态（**只读**，不发起任何领取）。
-//
-// 与 balanceAll 同构：同步等待而非「触发后盲刷」——账号量小（个位数），
-// 面板拿到响应即可直接渲染横幅，不用再轮询。
-func (p *Panel) compensation(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":       true,
-		"accounts": p.cfg.Scheduler.CompensationStatusAll(),
-	})
-}
-
-// accountCompensationClaim 单号领取补偿：查状态 → 待领才领（幂等）。
-// 领完顺带刷一次余额，面板上的积分数字立即反映到账。
-func (p *Panel) accountCompensationClaim(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	uid := r.PathValue("uid")
-	res, err := p.cfg.Scheduler.ClaimCompensationFor(uid)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if res.Claimed {
-		p.refreshCreditsQuiet(uid)
-	}
-	// ok 反映「是否拿到确定结论」：error 非空即 false。注意前端 api() 只看
-	// HTTP 状态码，这个字段是给日志/调用方看的，真正的分流依据是 result.error。
-	writeJSON(w, http.StatusOK, map[string]any{"ok": res.Error == "", "result": res})
-}
-
-// compensationAll 手动全量领取补偿（逐号查状态后领取；无待领的号静默跳过）。
-func (p *Panel) compensationAll(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Scheduler == nil {
-		writeErr(w, http.StatusNotImplemented, "scheduler not available")
-		return
-	}
-	results := p.cfg.Scheduler.ClaimCompensationNow()
-	for _, res := range results {
-		if res.Claimed {
-			p.refreshCreditsQuiet(res.UID)
-		}
-	}
-	summary := scheduler.SummarizeCompensation(results)
-	log.Printf("panel: 手动全量补偿领取完成 合计=%d 领取=%d(+%dc) 跳过=%d 失败=%d",
-		summary.Total, summary.Claimed, summary.Credit, summary.Skipped, summary.Errored)
-	// ok=false 表示有账号没拿到确定结论；前端据此提示「查询失败」而不是
-	// 「没有待领补偿」——两者语义完全相反，不能混。
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      summary.OK(),
-		"summary": summary,
-		"results": results,
-	})
-}
-
-// b2i bool → int（汇总计数用）。
-func b2i(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // refreshCreditsQuiet 领取成功后刷新该号余额，失败不影响领取结果回传。
@@ -981,12 +1003,34 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// 昵称仅用于展示，取自池快照（不含任何凭证）。
-	nicks := p.nicknames()
+	nicks := map[string]string{}
+	for _, s := range p.cfg.Pool.List() {
+		if s.Nickname != "" {
+			nicks[s.UID] = s.Nickname
+		}
+	}
+	// key：只看这个密钥（客户端密钥的 id、admin；- 表示没开鉴权和旧数据）。
+	if v, ok := q["key"]; ok && len(v) > 0 && v[0] != "" {
+		win.KeySet = true
+		if v[0] != "-" {
+			win.Key = v[0]
+		}
+	}
 	var currentRate func(realm, model string) string
 	if p.cfg.Upstream != nil {
 		currentRate = p.cfg.Upstream.ModelRate
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(win, nicks, currentRate))
+	snap := p.cfg.Usage.SnapshotWindow(win, nicks, currentRate)
+	names := map[string]string{}
+	if p.cfg.Keys != nil {
+		for _, k := range p.cfg.Keys.List(time.Now()) {
+			names[k.ID] = k.Name
+		}
+	}
+	for i := range snap.ByKey {
+		snap.ByKey[i].Extra = keyLabel(snap.ByKey[i].Key, names)
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 // parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调

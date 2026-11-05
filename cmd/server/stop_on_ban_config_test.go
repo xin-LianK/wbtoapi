@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // stop_on_ban_config_test.go pool.stop_on_ban 配置测试：缺省 true（账号被封禁即
 // 终止本次请求的轮转），显式 false 才退回旧行为（禁用当事号后继续换号）。
 package main

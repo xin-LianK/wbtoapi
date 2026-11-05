@@ -1,0 +1,337 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
+// 积分构成：一个账号的余额是若干积分包之和。包按来源命名（「国内运营裂变包」「拉新权益包」
+// 「个人体验版」…），面额从 6 到 1500 不等，且按次发放。所以两个任务完成度完全一致的账号，
+// 余额可能差上千——差别只在包里。这里把逐包明细摊开，并给每个来源一个稳定配色，跨账号对比时同色即同类。
+// （纯函数从旧版 app.js 平移，口径不变，见 packages.test.ts）
+import { accountName } from './accounts'
+import type { Account, CreditPackage, PackageAccount } from './types'
+
+// 分类色：8 个固定槽位（CSS 变量，明暗两套，定义和校验说明见 index.css），按顺序分配、不循环复用，
+// 第 9 个起一律用「其他」灰——循环复用会让两个不同的账号/来源同色，读者分不清。
+export const VIZ_SLOTS = Array.from({ length: 8 }, (_, i) => `var(--viz-${i + 1})`)
+export const VIZ_OTHER = 'var(--viz-other)'
+
+export const pkColor = (i: number) => (i >= 0 && i < VIZ_SLOTS.length ? VIZ_SLOTS[i] : VIZ_OTHER)
+
+/** 按 UID 稳定分配账号颜色：排序后分配，账号刷新/重排不会换色 */
+export function pkAccountColorMap(list: Pick<PackageAccount, 'uid' | 'error'>[] | null | undefined): Map<string, string> {
+  const uids = (list || []).filter((a) => a && !a.error && a.uid).map((a) => String(a.uid)).sort()
+  const colors = new Map<string, string>()
+  uids.forEach((uid, i) => colors.set(uid, pkColor(i)))
+  return colors
+}
+
+export interface SourceGroup {
+  key: string
+  name: string
+  code: string
+  n: number
+  remain: number
+  size: number
+  used: number
+  minEnd: string
+  minCreated: string
+}
+
+/** 把包按来源归并，得到「来源 → 面额/余额/个数」。两个号的差异一定体现在某几个来源的面额上。 */
+export function pkBySource(packs: CreditPackage[]): SourceGroup[] {
+  const m = new Map<string, SourceGroup>()
+  for (const p of packs) {
+    // 分组键用 code + name：上游给「首登赠送」和普通活动包用了同一个 PackageName 和同一个 PackageCode，
+    // 只按 name 会把两类混成一类，那正是当初「两个号为何差 1500」看不出来的原因。
+    const k = pkSourceKey(p)
+    const e = m.get(k) || {
+      key: k, name: p.name || '(未命名)', code: p.package_code || '',
+      n: 0, remain: 0, size: 0, used: 0, minEnd: '', minCreated: '',
+    }
+    e.n += 1
+    e.remain += Number(p.remain || 0)
+    e.size += Number(p.size || 0)
+    e.used += Number(p.used || 0)
+    const t = (p.end_time || '').slice(0, 10)
+    if (t && (!e.minEnd || t < e.minEnd)) e.minEnd = t
+    const c = (p.created_at || '').slice(0, 10)
+    if (c && (!e.minCreated || c < e.minCreated)) e.minCreated = c
+    m.set(k, e)
+  }
+  return [...m.values()].sort((a, b) => b.size - a.size)
+}
+
+export const pkSourceKey = (p: CreditPackage) => (p.package_code || '') + '|' + (p.name || '(未命名)')
+
+export const PK_DEFAULT_DETAIL_LIMIT = 5
+
+export function pkDetailLimitValue(raw: unknown): number {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : PK_DEFAULT_DETAIL_LIMIT
+}
+
+export function pkDetailLimit(cfg: { panel?: { package_detail_limit?: unknown } } | null | undefined): number {
+  return pkDetailLimitValue(cfg?.panel?.package_detail_limit)
+}
+
+export const PK_DAY_MS = 24 * 3600 * 1000
+
+/** 包的到期时刻（毫秒）：优先 expires_at，其次 end_time（无时区按北京时间） */
+export function pkExpiryMs(p: Partial<CreditPackage> | null | undefined): number | null {
+  const raw = Number(p?.expires_at)
+  if (Number.isFinite(raw) && raw > 0) return raw
+  const text = String(p?.end_time || '').trim()
+  if (!text) return null
+  let iso = text.includes('T') ? text : text.replace(' ', 'T')
+  if (!/(?:Z|[+-]\d\d:\d\d)$/.test(iso)) iso += '+08:00'
+  const parsed = Date.parse(iso)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * 逐包明细的排序规则：end_asc 到期升序（默认，快过期的在前，提醒优先消耗；没有到期时间的包统一垫底，
+ * 同到期按面额降序）；size_desc 面额降序（看「钱从哪来」，同面额按到期升序）。
+ */
+export type PkSortMode = 'end_asc' | 'size_desc'
+export const PK_SORT_OPTIONS: { id: PkSortMode; label: string }[] = [
+  { id: 'end_asc', label: '按到期时间' },
+  { id: 'size_desc', label: '按面额大小' },
+]
+
+function pkDetailCompare(a: Partial<CreditPackage>, b: Partial<CreditPackage>, mode: PkSortMode): number {
+  const sizeOf = (p: Partial<CreditPackage>) => {
+    const n = Number(p?.size)
+    return Number.isFinite(n) ? n : 0
+  }
+  if (mode === 'size_desc') {
+    const d = sizeOf(b) - sizeOf(a)
+    if (d !== 0) return d
+  }
+  const ea = pkExpiryMs(a), eb = pkExpiryMs(b)
+  if (ea == null && eb != null) return 1
+  if (ea != null && eb == null) return -1
+  if (ea != null && eb != null && ea !== eb) return ea - eb
+  return sizeOf(b) - sizeOf(a)
+}
+
+export interface DetailGroups<P> {
+  visible: P[]
+  rest: P[]
+  used: P[]
+  restSize: number
+  restRemain: number
+  usedSize: number
+}
+
+/** 单账号逐包明细：正余额包按排序规则挑出默认展示项，其余正余额包与已用完包分别折叠（折叠组内同一规则） */
+export function pkDetailGroups<P extends Partial<CreditPackage>>(packs: P[] | null | undefined, limit: unknown, mode: PkSortMode = 'end_asc'): DetailGroups<P> {
+  const active: P[] = [], used: P[] = []
+  let usedSize = 0, restSize = 0, restRemain = 0
+  for (const p of packs || []) {
+    if (Number(p?.remain) > 0) {
+      active.push(p)
+      continue
+    }
+    used.push(p)
+    const size = Number(p?.size)
+    if (Number.isFinite(size)) usedSize += size
+  }
+  const cmp = (a: P, b: P) => pkDetailCompare(a, b, mode)
+  active.sort(cmp)
+  used.sort(cmp)
+  const visible = active.slice(0, pkDetailLimitValue(limit))
+  const rest = active.slice(visible.length)
+  for (const p of rest) {
+    const size = Number(p?.size)
+    if (Number.isFinite(size)) restSize += size
+    const remain = Number(p?.remain)
+    if (Number.isFinite(remain)) restRemain += remain
+  }
+  return { visible, rest, used, restSize, restRemain, usedSize }
+}
+
+/** 越快到期颜色越深：1 天内不透明度 0.25，30 天及以上 1 */
+export function pkCreditOpacity(days: number | null | undefined): number {
+  if (days == null || !Number.isFinite(Number(days))) return 1
+  return 0.25 + (0.75 * Math.max(0, Math.min(29, Number(days) - 1))) / 29
+}
+
+export function pkExpiryText(expiresAt: number | null, now = Date.now()): string {
+  if (!expiresAt) return '无到期时间'
+  const diff = expiresAt - now
+  if (diff <= 0) return '已到期'
+  const minutes = Math.max(1, Math.ceil(diff / 60000))
+  if (minutes < 60) return '剩余 ' + minutes + ' 分钟'
+  const hours = Math.ceil(diff / 3600000)
+  if (hours < 24) return '剩余 ' + hours + ' 小时'
+  return '剩余 ' + Math.ceil(diff / PK_DAY_MS) + ' 天'
+}
+
+export function pkExpiryDateTime(expiresAt: number | null): string {
+  if (!expiresAt) return '—'
+  return new Date(expiresAt).toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
+export interface CreditSegment {
+  amount: number
+  expiresAt: number | null
+  days: number | null
+  source: string
+  uid: string
+  accountName: string
+}
+
+type SegmentAccount = Pick<PackageAccount, 'uid' | 'remain'> & { nickname?: string; note?: string; packages?: Partial<CreditPackage>[] | null; error?: string }
+
+/** 账号余额按包拆成到期段：以账号总余额为上限逐包计入（上游偶有重复记录，避免膨胀），按到期先后排序 */
+export function pkAccountSegments(a: SegmentAccount, now: number): CreditSegment[] {
+  let balance = Math.max(0, Number(a.remain || 0))
+  const out: CreditSegment[] = []
+  for (const p of a.packages || []) {
+    const remain = Number(p.remain || 0)
+    if (!Number.isFinite(remain) || remain <= 0 || balance <= 0) continue
+    const amount = Math.min(balance, remain)
+    const expiresAt = pkExpiryMs(p)
+    out.push({
+      amount,
+      expiresAt,
+      days: expiresAt == null ? null : Math.max(0, Math.ceil((expiresAt - now) / PK_DAY_MS)),
+      source: p.name || '积分',
+      uid: String(a.uid || ''),
+      accountName: accountName({ ...a, uid: String(a.uid || '') }) || '未命名账号',
+    })
+    balance -= amount
+  }
+  return out.sort((x, y) => {
+    if (x.expiresAt == null && y.expiresAt != null) return 1
+    if (x.expiresAt != null && y.expiresAt == null) return -1
+    return (x.expiresAt || 0) - (y.expiresAt || 0)
+  })
+}
+
+export interface CreditDayRow {
+  days: number
+  credits: number
+  segments: CreditSegment[]
+}
+
+/** 按精确剩余天数逐行聚合（对齐 WorkDaddy）：无有效到期时间的余额不进图表，也不猜测到期日 */
+export function summarizeCreditDays(list: SegmentAccount[] | null | undefined, now: number) {
+  const buckets = new Map<number, CreditDayRow>()
+  let unavailable = 0
+  for (const a of list || []) {
+    if (a.error || !Number.isFinite(Number(a.remain))) {
+      unavailable++
+      continue
+    }
+    for (const segment of pkAccountSegments(a, now)) {
+      if (segment.days == null) continue
+      let row = buckets.get(segment.days)
+      if (!row) {
+        row = { days: segment.days, credits: 0, segments: [] }
+        buckets.set(segment.days, row)
+      }
+      row.credits += segment.amount
+      row.segments.push(segment)
+    }
+  }
+  const rows = [...buckets.values()].sort((a, b) => a.days - b.days)
+  for (const row of rows) {
+    row.segments.sort((a, b) =>
+      (a.expiresAt || Infinity) - (b.expiresAt || Infinity) ||
+      a.accountName.localeCompare(b.accountName) ||
+      a.source.localeCompare(b.source))
+  }
+  return { rows, accountCount: (list || []).length, unavailable }
+}
+
+// ── 积分到期提醒（账号池页卡片）──────────────────────────────────────────
+// 签到 / 任务发的裂变包约一个月失效，只看「剩余积分 ÷ 日消耗」会系统性偏乐观——用不完的部分到期直接蒸发。
+// 所以把「最近要过期的是哪批、有多少、到期前每天至少要消耗多少」顶到首页。上游扣包是 FEFO（按失效时刻先后）。
+
+export interface ExpiryBatch {
+  /** 到期日（北京时间） */
+  date: string
+  /** 距到期的自然日数：今天到期 = 0 */
+  days: number
+  remain: number
+}
+
+const bjDay = (ms: number) => new Date(ms + 8 * 3600_000).toISOString().slice(0, 10)
+
+/** 账号的包按到期日聚合成「到期日 → 该日作废积分」，升序。只算还有余额、有到期时间且还没过期的包 */
+export function expiryBatches(packs: Partial<CreditPackage>[] | null | undefined, now: number): ExpiryBatch[] {
+  const byDay = new Map<string, number>()
+  for (const p of packs || []) {
+    const remain = Number(p?.remain || 0)
+    const at = pkExpiryMs(p)
+    if (!(remain > 0) || at == null || at <= now) continue
+    const day = bjDay(at)
+    byDay.set(day, (byDay.get(day) ?? 0) + remain)
+  }
+  const today = Date.parse(bjDay(now))
+  return [...byDay.entries()]
+    .map(([date, remain]) => ({ date, remain, days: Math.round((Date.parse(date) - today) / PK_DAY_MS) }))
+    .sort((a, b) => a.days - b.days)
+}
+
+export interface ExpiryReminder {
+  first: ExpiryBatch
+  /** 最近一批到期前，日均至少要消耗多少才能用完（今天到期按 1 天算） */
+  daily: number
+  /** 7 天内到期的合计 */
+  week: number
+  /** 随后的 3 批 */
+  next: ExpiryBatch[]
+  /** 批次总数 */
+  count: number
+}
+
+export function expiryReminder(packs: Partial<CreditPackage>[] | null | undefined, now: number): ExpiryReminder | null {
+  const bs = expiryBatches(packs, now)
+  if (!bs.length) return null
+  const first = bs[0]
+  return {
+    first,
+    daily: Math.ceil(first.remain / Math.max(1, first.days)),
+    week: bs.filter((b) => b.days <= 7).reduce((s, b) => s + b.remain, 0),
+    next: bs.slice(1, 4),
+    count: bs.length,
+  }
+}
+
+/**
+ * 到期提醒的行序：最快到期的排前面、不分域（后端按余额降序返回，看上去像按域分组，上游 issue #125），
+ * 同一天到期的余额多的在前；没有会到期积分的其次，查询失败的垫底。
+ */
+export function sortExpiryRows(list: PackageAccount[], now: number) {
+  const rank = (a: PackageAccount, r: ExpiryReminder | null) => (a.error ? 2 : r ? 0 : 1)
+  return list
+    .map((a) => ({ a, r: a.error ? null : expiryReminder(a.packages, now) }))
+    .sort((x, y) => rank(x.a, x.r) - rank(y.a, y.r) || (x.r && y.r ? x.r.first.days - y.r.first.days || y.r.first.remain - x.r.first.remain : 0))
+}
+
+/**
+ * 总览里每个账号只带最早一批到期（credits_earliest_*，后台刷余额时记下），换成逐包明细的形状，
+ * 没点「检查」之前到期提醒先拿它顶上，不查上游（同上游 0ab6690）。只有一批，所以没有随后批次和 7 天合计。
+ */
+export function snapshotPackageAccounts(list: Account[] | null | undefined): PackageAccount[] {
+  return (list || []).map((a) => {
+    const at = Date.parse(a.credits_earliest_expiry || '')
+    const remain = Number(a.credits_earliest_remaining || 0)
+    return {
+      uid: a.uid,
+      nickname: a.nickname || '',
+      realm: a.realm || '',
+      remain: a.credits ?? 0,
+      size: a.credits_total ?? 0,
+      packages: at > 0 && remain > 0 ? [{ name: '', remain, used: 0, size: remain, expires_at: at }] : [],
+    }
+  })
+}
+
+/** 危险度：3 天内（不抓紧就真没了）、7 天内、更远 */
+export const expiryTone = (days: number) => (days <= 3 ? 'danger' : days <= 7 ? 'warning' : 'success')

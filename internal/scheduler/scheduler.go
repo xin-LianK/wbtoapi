@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package scheduler 定时任务：签到 / 活跃上报 / 猫猫旅行 / token keepalive 四类独立排程。
 // 签到成功后重新查余额，余额 > 0 的冷却账号自动解冻。
 package scheduler
@@ -101,6 +105,14 @@ type Scheduler struct {
 
 	// notifier 告警出口（nil = 未配置）。异步投递，绝不阻塞排程主链路。
 	notifier *notify.Notifier
+
+	// 测活（liveness.go）：livenessFn 由 main 在 server 建好后接上；livenessInterval 定时测活间隔
+	// （纳秒，0=暂停），rearmLiveness 是它的重算通知；livenessRunning 保证全部测活和定时测活同时只跑一批。
+	livenessMu       sync.Mutex
+	livenessFn       LivenessFunc
+	livenessInterval atomic.Int64
+	rearmLiveness    chan struct{}
+	livenessRunning  atomic.Bool
 }
 
 // SetNotifier 注入告警出口（main 装配时调用一次；nil = 关闭）。
@@ -131,6 +143,7 @@ func New(cfg Config) *Scheduler {
 		rearmSchedule: make(chan struct{}, 1),
 		rearmBalance:  make(chan struct{}, 1),
 		rearmSweep:    make(chan struct{}, 1),
+		rearmLiveness: make(chan struct{}, 1),
 	}
 }
 
@@ -381,11 +394,14 @@ func (s *Scheduler) waitSlot(ctx context.Context, next time.Time, step time.Dura
 	}
 }
 
+// schedNow 供测试替换（默认 time.Now）：Run 用它计算下一次唤醒时刻。
+var schedNow = time.Now
+
 // Run 主循环，阻塞直到 ctx 取消。
 // Reconfigure 触发 rearmSchedule 时提前唤醒重算（新时点/开关立即生效）。
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
-		next, kinds := s.nextWake(time.Now())
+		next, kinds := s.nextWake(schedNow())
 		if next.IsZero() {
 			// 四类任务全部禁用：不空转，等重排通知（在线改配置重新启用）或退出信号。
 			select {
@@ -481,6 +497,9 @@ func (s *Scheduler) RunCheckinNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
+		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
@@ -594,6 +613,9 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
+		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.AccessTokenValue() == "" {
 			continue
@@ -618,8 +640,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 			}
 		}
 		first = false
-		cid := upstream.NewEventID()
-		if err := s.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
+		if err := s.cfg.Upstream.ReportChatActivity(a, upstream.NewConversationID(), ""); err != nil {
 			log.Printf("activity %s: %v", logfmt.Label(a.UID, a.Nickname), err)
 			continue
 		}
@@ -660,6 +681,9 @@ func (s *Scheduler) RunKeepaliveNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
+		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
@@ -715,6 +739,9 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
+		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil {
 			continue
@@ -736,7 +763,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 				EarliestRemaining: earliestRemaining,
 				ExpiryBuckets:     poolExpiryBuckets(buckets),
 			})
-			}(a, st.UID)
+		}(a, st.UID)
 	}
 	wg.Wait()
 	s.lastBalanceRefresh.Store(time.Now().UnixNano())

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package livecfg 运行期可变配置的并发安全持有者。
 //
 // 背景：进程启动时读入的配置是普通字段（读多写零），但管理面板允许在线改配置，
@@ -20,7 +24,48 @@ type Snapshot struct {
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
-	HiddenModels         map[string]struct{} // 精确隐藏的模型 id（已归一化为 "cn:x"/"global:x" 全量形式）；nil = 不隐藏
+	CrossRealm           string        // 跨域负载均衡（pool.cross_realm）：CrossRealmMerge、CrossRealmCNFirst，空或 CrossRealmOff 为关
+	UpdateCheck          bool          // 面板定时检查新版本（读 GitHub 上的更新日志）
+	ModelRoutes          []ModelRoute  // 模型路由规则：按顺序匹配，只改写模型目录里没有的名字
+	// HiddenModels 不对外的模型，键是带域前缀的全名（cn:x / global:x），见 NormalizeHiddenModels；
+	// nil = 不隐藏。只读共享，不得修改。
+	HiddenModels map[string]struct{}
+}
+
+// pool.cross_realm 的三档（Snapshot.CrossRealm）：不带前缀的模型名怎么在两个域之间分。
+const (
+	CrossRealmOff     = "off"      // 只走国内版
+	CrossRealmMerge   = "merge"    // 两个域都有这个模型时合池选号
+	CrossRealmCNFirst = "cn_first" // 国内版优先：国内版此刻没有能接的号才用国际版
+)
+
+// NormalizeHiddenModels 把 models.hidden 的条目归一成带域前缀的全名集合：带 cn: / global:
+// 前缀的只藏那个域，裸名两个域都藏。精确匹配、区分大小写（前缀规则同 server.resolveModel：
+// 第一个冒号前恰好是 cn 或 global 才算前缀）。没有有效条目时返回 nil。
+func NormalizeHiddenModels(hidden []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(hidden)*2)
+	for _, m := range hidden {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		if prefix, bare, ok := strings.Cut(m, ":"); ok && (prefix == "cn" || prefix == "global") {
+			out[prefix+":"+bare] = struct{}{}
+		} else {
+			out["cn:"+m] = struct{}{}
+			out["global:"+m] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ModelRoute 一条模型路由：客户端发来的模型名匹配 Match（只认 * 通配，不区分大小写）时改用 Target。
+type ModelRoute struct {
+	Match  string `json:"match"`
+	Target string `json:"target"`
 }
 
 // Holder 原子持有当前快照。
@@ -48,31 +93,3 @@ func (h *Holder) Load() Snapshot {
 
 // Store 整体替换快照。
 func (h *Holder) Store(s Snapshot) { h.p.Store(&s) }
-
-// NormalizeHiddenModels 把用户配置的 hidden 条目归一化为精确 id 集合。
-//
-// 条目带合法 "cn:"/"global:" 前缀 → 只隐藏该域；裸名 → 两域都隐藏。
-// 大小写敏感（与 internal/server.resolveModel 的前缀规则对称：取第一个 ":",
-// 前段恰为 "cn"/"global" 才剥离）。返回的 map 只读共享，调用方不得修改。
-func NormalizeHiddenModels(hidden []string) map[string]struct{} {
-	if len(hidden) == 0 {
-		return nil
-	}
-	out := make(map[string]struct{}, len(hidden)*2)
-	for _, m := range hidden {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
-		}
-		if prefix, bare, ok := strings.Cut(m, ":"); ok && (prefix == "cn" || prefix == "global") {
-			out[prefix+":"+bare] = struct{}{}
-		} else {
-			out["cn:"+m] = struct{}{}
-			out["global:"+m] = struct{}{}
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}

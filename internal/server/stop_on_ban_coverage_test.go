@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // stop_on_ban_coverage_test.go 补齐「封号即停轮转」在三处处置路径上的盲区。
 //
 // 已有覆盖（handler_test.go）只打了 chat 的**非流式 HTTP 错误**路径：
@@ -95,7 +99,7 @@ func TestSearchAccountBannedStopsRotation(t *testing.T) {
 	p.SetCredits("x-good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true})
 
-	out, fail := h.runSearch(context.Background(), "golang context cancellation", 3, upstream.ChatMeta{})
+	out, fail := h.runSearch(context.Background(), upstream.SearchQuery{Query: "golang context cancellation"}, "", upstream.ChatMeta{}, newSearchStat(nil, false))
 	if out != nil {
 		t.Fatalf("封禁场景不应返回搜索结果: %+v", out)
 	}
@@ -137,7 +141,7 @@ func TestSearchAccountRestrictedCnStopsRotation(t *testing.T) {
 	p.SetCredits("x-good", 1000, 0)
 	h := NewHandler(Config{Pool: p, Upstream: up, StopOnBan: true})
 
-	_, fail := h.runSearch(context.Background(), "golang context cancellation", 3, upstream.ChatMeta{})
+	_, fail := h.runSearch(context.Background(), upstream.SearchQuery{Query: "golang context cancellation"}, "", upstream.ChatMeta{}, newSearchStat(nil, false))
 	if calls["Bearer at-x-restr"] != 1 || calls["Bearer at-x-good"] != 0 {
 		t.Errorf("calls=%v want x-restr 1 次、x-good 0 次（11140 中文同样停止搜索轮转）", calls)
 	}

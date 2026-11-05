@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // 账号状态机迁移的唯一权威实现。
 //
 // entry 的「可选择性」由四个正交维度决定：禁用(disabled)、账号级冷却(until/coolKind)、
@@ -9,7 +13,8 @@
 // 迁移矩阵（事件 → 动作 → 字段）：
 //
 //	disabled           ← disableLocked（Disable / NoteSessionDead 达阈）
-//	until/coolKind     ← Cooldown(CoolSoft/Hard) / CooldownSoftForModel 无解析分支
+//	until/coolKind     ← Cooldown(CoolSoft/Hard) / CooldownSoftForModel 无解析分支 / NoteRestriction（CoolPause，
+//	                     暂停期内更短的冷却不覆盖它）
 //	modelCooldowns     ← CooldownSoftForModel 有解析分支；被 disableLocked/Cooldown/clearCoolingLocked 清
 //	                     （reviveCoolingLocked 不清——余额恢复不构成限流解除证据）
 //	breakerUntil       ← recordBreakerFailureLocked（Cooldown/NoteError 喂入）；NoteSuccess 清
@@ -49,6 +54,11 @@ func (e *entry) clearCoolingLocked() {
 // 熔断器保留：熔断是「连续 5xx 失败」信号（与授权/会话无关），禁用后再复活时
 // 熔断观测仍有效，不应被禁用覆盖。
 func (p *Pool) disableLocked(e *entry, reason string) {
+	// 人工禁用优先：已经人工禁用的号不被网关的自动禁用改掉原因（测活时人工禁用的号也会回 12153、11140），
+	// 不然之后一次测通就会被当成网关自动加的禁用解除（见 RecoverAfterLiveness）。
+	if e.disabled && e.reason == ManualDisableReason && reason != ManualDisableReason {
+		return
+	}
 	e.clearCoolingLocked()
 	e.disabled = true
 	e.paused = false // 禁用是比暂停更强的终态，二者不叠加（禁用后须 revive 才能复用）

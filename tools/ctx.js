@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // 在解包后的客户端代码里按关键词打印上下文（文件多为压缩单行，grep -C 无用）。
 const fs = require('fs');
 const [file, needle, before = '500', after = '700'] = process.argv.slice(2);

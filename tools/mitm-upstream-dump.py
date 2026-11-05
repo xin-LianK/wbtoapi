@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+# SPDX-License-Identifier: AGPL-3.0-only
+# 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 """mitmproxy 插件：把命中上游主机的请求压成 JSONL（头 + body 前 16KB）。
 
 配合 tools/capture-upstream.sh 使用。只记录业务主机，避免被遥测/本地回环淹没。

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // cross_domain_fallback_test.go 裸模型名跨域回退（issue #135）端到端测试：
 // 开关默认关闭 = 零回归；开启后「首选域选不到号」与「首选域 11102」两条路径都要
 // 回退到另一域；显式 cn:/global: 前缀永不回退。

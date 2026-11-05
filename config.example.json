@@ -8,13 +8,24 @@
     "read_timeout": "300s"
   },
   "panel": {
-    "package_detail_limit": 5
+    "package_detail_limit": 5,
+    "update_check": true
   },
   "logging": {
     "request_archive_enabled": true,
     "request_retention_days": 7,
     "request_archive_max_mb": 100,
-    "request_client_info": true
+    "request_client_info": true,
+    "task_log_enabled": true,
+    "task_log_retention_days": 30,
+    "task_log_max_mb": 20,
+    "system_log_enabled": true,
+    "system_log_retention_days": 30,
+    "system_log_max_mb": 50,
+    "usage_retention_days": 0,
+    "credit_log_enabled": true,
+    "credit_log_retention_days": 0,
+    "credit_log_max_mb": 20
   },
   "cooldown": {
     "soft_rate": "600s",
@@ -59,7 +70,9 @@
     "device_token": "",
     "device_token_file": "",
     "chat_device_token": false,
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "model_optimization": false,
+    "tls_fingerprint": true
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
@@ -110,6 +123,9 @@
     },
     "max_in_flight": 3,
     "max_in_flight_global": 2,
+    "in_flight_wait": "30s",
+    "max_rpm": 0,
+    "max_rpm_global": 0,
     "breaker_threshold": 3,
     "breaker_cooldown": "30m",
     "breaker_cooldown_max": "6h",
@@ -123,7 +139,11 @@
     "cost_explore_interval": "30m",
     "credit_floor": 100,
     "cross_domain_fallback": false,
-    "stop_on_ban": true
+    "stop_on_ban": true,
+    "cross_realm": "off",
+    "restriction_wave_threshold": 2,
+    "restriction_wave_window": "15m",
+    "restriction_wave_pause": "30m"
   },
   "session_sticky": {
     "enabled": true,
@@ -135,5 +155,6 @@
     "min_interval_ms": 120,
     "jitter_ms": 180,
     "per_minute": 90
-  }
+  },
+  "model_routes": []
 }

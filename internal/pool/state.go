@@ -1,9 +1,14 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // 账号状态演进与查询：禁用/12153 连续计数判定、成功与错误入账、复活解冻，
 // 以及状态查询（Status/AvailableUIDs/PickByUID/CountsDetailed/ServableNow/List）。
 package pool
 
 import (
 	"log"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -11,6 +16,9 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 )
+
+// ManualDisableReason 面板上点「禁用」写的原因。测活测通后不解除这种禁用（见 RecoverAfterLiveness）。
+const ManualDisableReason = "manual disable (panel)"
 
 func (p *Pool) Disable(uid, reason string) {
 	p.mu.Lock()
@@ -109,6 +117,35 @@ func (p *Pool) Pause(uid string) bool {
 	}
 	p.pauseLocked(e)
 	return true
+}
+
+// SetNote 改账号的面板备注，空串清除。uid 不存在返回 false。
+func (p *Pool) SetNote(uid, note string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	if e.note != note {
+		e.note = note
+		p.dirty.Store(true)
+	}
+	return true
+}
+
+// SetProxyBlocked 代理池推送号现在为什么不能出站，reason 为空是放开（见 entry.proxyBlocked）。号不在池里
+// 时忽略：代理池在号加进池以后登记它，会再推一遍。放开时叫醒在等空位的请求（多了一个能用的号）。
+func (p *Pool) SetProxyBlocked(uid, reason string) {
+	p.mu.Lock()
+	e, ok := p.byUID[uid]
+	if ok {
+		e.proxyBlocked = reason
+	}
+	p.mu.Unlock()
+	if ok && reason == "" {
+		p.notifySlotFreed()
+	}
 }
 
 // Resume 解除暂停选号（幂等，对未暂停账号为空操作）。uid 不存在返回 false。
@@ -386,7 +423,7 @@ func (p *Pool) AvailableUIDs() []string {
 		if !e.healthy(now) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.busy(e, now) {
 			continue
 		}
 		uids = append(uids, uid)
@@ -404,10 +441,10 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthyForModel(now, model) {
+		if !p.servableFor(e, now, model) {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.busy(e, now) {
 			continue
 		}
 		uids = append(uids, uid)
@@ -428,7 +465,7 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 		return nil
 	}
 	now := time.Now()
-	if !e.healthyForModel(now, model) {
+	if !p.servableFor(e, now, model) {
 		return nil
 	}
 	// 积分保底（粘性路径）：与 pick 的 floorBlocked 同判据——触底 + 收费即拦
@@ -442,7 +479,7 @@ func (p *Pool) PickByUIDForModel(uid, model string) *auth.Auth {
 			logfmt.Label(e.a.UID, e.a.Nickname), model, e.credits, p.creditFloor)
 		return nil
 	}
-	if p.inFlightFull(e) {
+	if p.busy(e, now) {
 		return nil
 	}
 	e.lastUsed = now
@@ -464,7 +501,7 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 	if !e.healthy(now) {
 		return nil
 	}
-	if p.inFlightFull(e) {
+	if p.busy(e, now) {
 		return nil
 	}
 	e.lastUsed = now
@@ -476,29 +513,31 @@ func (p *Pool) PickByUID(uid string) *auth.Auth {
 // CountsDetailed 返回 total/healthy/cooling/disabled/inFlightFull 五类计数。
 // cooling 含常规冷却（until）与熔断期（breakerUntil）。
 // 注意：healthy 口径不含 inFlight 维度（是状态机权威判定，只看 disabled/until/breakerUntil）；
-// inFlightFull 是 healthy 的子集——healthy 里已达在途上限的账号数，供 /status 透出满载度。
+// inFlightFull 是 healthy 的子集——healthy 里已达在途上限或每分钟请求数上限（busy）的账号数，供 /status 透出满载度。
 // 与 ServableNow 的区别见该函数注释。
 // 保持既有语义：paused 并入 disabled（= /status 的「不可用」口径）。监控/脚本只
 // 关心"还能不能用"，这个口径对它们是稳定契约，不因面板展示需要而改变。
-// 面板概况需要分开计数，用 CountsDetailedWithPaused。
+// 面板概况需要分开计数，用 CountsDetailedWithPaused。被代理池拦着的号（等代理、代理不通）算进 cooling：
+// 和冷却一样是暂时不能用。
 func (p *Pool) CountsDetailed() (total, healthy, cooling, disabled, inFlightFull int) {
-	t, h, c, d, pz, f := p.countsDetailedForRealm("")
-	return t, h, c, d + pz, f
+	t, h, c, d, pz, b, f := p.countsDetailedForRealm("")
+	return t, h, c + b, d + pz, f
 }
 
-// CountsDetailedWithPaused 同 CountsDetailed，但 paused 与 disabled 分开返回。
+// CountsDetailedWithPaused 同 CountsDetailed，但 paused 与 disabled 分开返回，被代理池拦着的号也单独
+// 返回（proxyBlocked，不算进 cooling）。
 //
 // 面板概况要回答「禁用几个、暂停几个」——暂停只关选号、照常签到保活，与禁用混成
-// 一个数字会让人误判池子的真实状况（issue #125）。
-func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, inFlightFull int) {
+// 一个数字会让人误判池子的真实状况（issue #125）；被代理拦着的号要换代理才好，和等着解冻的冷却也分开。
+func (p *Pool) CountsDetailedWithPaused() (total, healthy, cooling, disabled, paused, proxyBlocked, inFlightFull int) {
 	return p.countsDetailedForRealm("")
 }
 
 // CountsDetailedForRealm 同 CountsDetailed，但仅统计 Realm()==realm 的账号；
 // realm=="" 不加谓词（= CountsDetailed）。供 /status 按域分组透出。
 func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, disabled, inFlightFull int) {
-	t, h, c, d, pz, f := p.countsDetailedForRealm(realm)
-	return t, h, c, d + pz, f
+	t, h, c, d, pz, b, f := p.countsDetailedForRealm(realm)
+	return t, h, c + b, d + pz, f
 }
 
 // countsDetailedForRealm 是两函数共用的遍历实现；realm=="" 不加谓词。
@@ -507,8 +546,8 @@ func (p *Pool) CountsDetailedForRealm(realm string) (total, healthy, cooling, di
 // paused 单独返回、不并进 disabled：调用方按自己的口径决定合不合并。
 // /status 要的是「还能不能用」（暂停与禁用同样不可选，合并）；面板概况要的是
 // 「禁用几个、暂停几个」（分开，issue #125）。两种口径都合理，所以把选择权
-// 留在调用方，而不是让一个共享函数替所有人做决定。
-func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, paused, inFlightFull int) {
+// 留在调用方，而不是让一个共享函数替所有人做决定。被代理池拦着的号（proxyBlocked）同理单独返回。
+func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, disabled, paused, proxyBlocked, inFlightFull int) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
@@ -524,16 +563,18 @@ func (p *Pool) countsDetailedForRealm(realm string) (total, healthy, cooling, di
 			// 暂停选号：退出选号候选，但照常签到 / 活跃上报 / 保活 / 刷新余额。
 			// 它与「禁用」是两种运维状态，这里分开计；要不要合并由调用方决定。
 			paused++
+		case e.proxyBlocked != "":
+			proxyBlocked++
 		case !e.healthy(now):
 			cooling++
 		default:
 			healthy++
-			if p.inFlightFull(e) {
+			if p.busy(e, now) {
 				inFlightFull++
 			}
 		}
 	}
-	return total, healthy, cooling, disabled, paused, inFlightFull
+	return total, healthy, cooling, disabled, paused, proxyBlocked, inFlightFull
 }
 
 // ServableNow 报告池当前是否可服务：存在至少一个 healthy 且未占满在途名额的账号。
@@ -555,7 +596,7 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.busy(e, now) {
 			continue
 		}
 		// 存在性语义：账号级 healthy，或处于模型级豁免形态（6004 单模型软冷却——
@@ -595,34 +636,36 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Realm:                    e.a.Realm(),
 		Enterprise:               e.a.IsEnterprise(),
 		Nickname:                 e.a.Nickname,
+		Note:                     e.note,
 		Credits:                  e.credits,
 		CreditsTotal:             e.creditsTotal,
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
-		// 拷贝一份：List 返回后 JSON 序列化在锁外进行，不能与 NoteModelCost 的
-		// 原地扣减共享底层数组（数据竞争）。
-		CreditsExpiryBuckets: append([]ExpiryBucket(nil), e.expiryBuckets...),
-		Cooling:              now.Before(e.until) || now.Before(e.breakerUntil),
-		Disabled:             e.disabled,
-		Paused:               e.paused,
-		SuccessCount:         e.successCount,
-		ErrTotal:             e.errTotal,
-		CheckinDone:          e.lastCheckinDay == now.Format("2006-01-02"),
-		TokenUsage:           e.tokenUsage,
-		LastSuccessTime:      e.lastSuccess,
-		LastErrTime:          e.lastErr,
-		Until:                e.until,
-		SoftStreak:           e.softStreak,
-		ModelCosts:           p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:     e.consecutiveFails,
-		DegradeUntil:         e.degradeUntil,
-		InFlight:             int(e.inFlight.Load()),
-		// 在途上限（分母）：global 域分档，见 inFlightLimit。调用方已持 RLock
-		// （List / Status 均持锁），与 SetMaxInFlight 的写竞争已被互斥。
-		InFlightLimit: p.inFlightLimit(e),
-		BreakerFails:  e.fails,
-		BreakerUntil:  e.breakerUntil,
+		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
+		Disabled:                 e.disabled,
+		Paused:                   e.paused,
+		ProxyBlocked:             e.proxyBlocked,
+		SuccessCount:             e.successCount,
+		ErrTotal:                 e.errTotal,
+		CheckinDone:              e.lastCheckinDay == now.Format("2006-01-02"),
+		TokenUsage:               e.tokenUsage,
+		LastSuccessTime:          e.lastSuccess,
+		LastErrTime:              e.lastErr,
+		LastLiveness:             e.liveness,
+		BlockedModels:            slices.Clone(e.blockedModels),
+		Groups:                   slices.Clone(e.groups),
+		Priority:                 e.priority,
+		Until:                    e.until,
+		SoftStreak:               e.softStreak,
+		ModelCosts:               p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails:         e.consecutiveFails,
+		DegradeUntil:             e.degradeUntil,
+		InFlight:                 int(e.inFlight.Load()),
+		InFlightLimit:            p.inFlightLimit(e),
+		CreditsExpiryBuckets:     append([]ExpiryBucket(nil), e.expiryBuckets...),
+		BreakerFails:             e.fails,
+		BreakerUntil:             e.breakerUntil,
 	}
 	// reason 仅在冷却/禁用中透出（issue #171）：软冷却按 until 到期恢复，
 	// 但 until/coolKind/reason 字段按设计不主动清理（NoteSuccess 注释：
@@ -716,7 +759,7 @@ func (p *Pool) rateLimitedModelsLocked(e *entry, now time.Time) []RateLimitedMod
 		mc := e.modelCooldowns[m]
 		if !mc.Until.IsZero() && now.Before(mc.Until) {
 			kind := "rate_limit"
-			if strings.HasPrefix(mc.Reason, "11102") {
+			if modelDenied(mc.Reason) {
 				kind = "model_unavailable"
 			}
 			row := RateLimitedModel{

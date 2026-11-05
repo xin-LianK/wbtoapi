@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // travel.go 猫猫旅行巡检状态机：随旅行时点（travel_hours，默认 09 点）对池内每个可用账号单趟推进一次。
 // 无猫 → 同意协议 + 领养；有猫 → 按 travel/status 分派 派出 / 领奖 / 跳过。
 package scheduler
@@ -50,6 +54,9 @@ func (s *Scheduler) RunTravelNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
+		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
@@ -110,13 +117,13 @@ func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) {
 	log.Printf("travel %s: depart ok location=%d", logfmt.Label(a.UID, a.Nickname), travelLocationID)
 }
 
-// travelClaim 到站领奖（必须带 record_id）。
+// travelClaim 到站领奖（网页发空对象，记录由服务端按当前在途旅行决定）。
 func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
 	if ts.RecordID == 0 {
 		log.Printf("travel %s: claim skipped (arrived but no record_id)", logfmt.Label(a.UID, a.Nickname))
 		return
 	}
-	reward, err := s.cfg.Upstream.TravelClaim(a, ts.RecordID)
+	reward, err := s.cfg.Upstream.TravelClaim(a)
 	if err != nil {
 		log.Printf("travel %s: claim record=%d: %v", logfmt.Label(a.UID, a.Nickname), ts.RecordID, err)
 		return
@@ -136,7 +143,7 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 		return
 	}
 	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径暴露）。
-	if err := s.cfg.Upstream.ReportChatActivity(a, upstream.NewEventID(), ""); err != nil {
+	if err := s.cfg.Upstream.ReportChatActivity(a, upstream.NewConversationID(), ""); err != nil {
 		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
 	} else {
 		time.Sleep(adoptReportGap) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）

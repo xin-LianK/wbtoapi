@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Command headers-dump 打印当前配置下 chat 请求实际会发出的请求头（dry-run，不连上游）。
 //
 // 用途：改完 upstream.client_version / profile / product 之后，不用等上线失败，

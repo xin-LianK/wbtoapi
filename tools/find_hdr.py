@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+# SPDX-License-Identifier: AGPL-3.0-only
+# 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 """在压缩 JS 中定位动态拼接的请求头名。
 
 用法: python find_hdr.py <文件> <关键字> [前后字符数]

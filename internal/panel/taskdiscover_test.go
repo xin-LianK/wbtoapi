@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package panel
 
 import (
@@ -223,11 +227,11 @@ func TestRunTaskDiscoverOnce(t *testing.T) {
 			if isMP {
 				return []map[string]any{
 					sweepTask("Sequential_Tasks_1", 1, 0, "accepted", nil), // 已登记 mp 码 → 已实现
-					sweepTask("mp_only_new", 1, 0, "accepted", nil),       // mp 独有且无族 → 待人工
+					sweepTask("mp_only_new", 1, 0, "accepted", nil),        // mp 独有且无族 → 待人工
 				}
 			}
 			return []map[string]any{
-				sweepTask("chat_5", 5, 0, "accepted", nil),   // 精确白名单 → 已实现
+				sweepTask("chat_5", 5, 0, "accepted", nil),     // 精确白名单 → 已实现
 				sweepTask("template_9", 5, 0, "accepted", nil), // 族 template → 自动跑
 				sweepTask("brand_new_task", 1, 0, "accepted", map[string]any{"reward_credit": 50}),
 			}

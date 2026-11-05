@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package panel
 
 import (
@@ -40,9 +44,9 @@ func TestOverviewIncludesExpiryBuckets(t *testing.T) {
 		t.Fatalf("overview status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		BalanceRefreshSec   int       `json:"balance_refresh_sec"`
-		BalanceRefreshedAt  time.Time `json:"balance_refreshed_at"`
-		Accounts            []struct {
+		BalanceRefreshSec  int       `json:"balance_refresh_sec"`
+		BalanceRefreshedAt time.Time `json:"balance_refreshed_at"`
+		Accounts           []struct {
 			CreditsExpiryBuckets []pool.ExpiryBucket `json:"credits_expiry_buckets"`
 		} `json:"accounts"`
 	}

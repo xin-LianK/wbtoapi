@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // backoff.go 轮转退避与抖动的单一事实来源（WAF 403 修复 P0-2/P0-1 共用）：
 // 指数基数/封顶/抖动比例一处定义，chatCompletions 轮转退避与 WAF 软冷却基数
 // （handler.wafCooldownBase）共用同一 jitterDur，不在 handler 与 upstream 各写一份。
@@ -39,7 +43,8 @@ func jitterDur(d time.Duration) time.Duration {
 
 // backoffAfter 返回第 n 次轮转（0 基：首次失败换号前 n=0）前应等待的退避时长：
 // base·2^n 封顶 rotateBackoffCap，再施加 ±25% 抖动。base 置 0（测试）时恒 0。
-// 用逐次翻倍而非位移：base 调整后无需同步维护移位上限，溢出由封顶比较兜底。
+// 用逐次翻倍而非位移：base 调整后无需同步维护移位上限；只在 d 小于封顶时翻倍，
+// 翻倍后最多是封顶的两倍，不会溢出。
 func backoffAfter(n int) time.Duration {
 	d := rotateBackoffBase
 	if d <= 0 {
@@ -47,9 +52,6 @@ func backoffAfter(n int) time.Duration {
 	}
 	for k := 0; k < n && d < rotateBackoffCap; k++ {
 		d *= 2
-		if d <= 0 { // 翻倍溢出成非正数：直接按封顶处理
-			return jitterDur(rotateBackoffCap)
-		}
 	}
 	if d > rotateBackoffCap {
 		d = rotateBackoffCap

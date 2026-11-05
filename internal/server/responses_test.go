@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package server
 
 import (
@@ -27,7 +31,9 @@ func TestResponsesInputToChat(t *testing.T) {
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
 		}},
 		ToolChoice: json.RawMessage(`"auto"`),
-		Reasoning:  &struct{ Effort string `json:"effort"` }{Effort: "high"},
+		Reasoning: &struct {
+			Effort string `json:"effort"`
+		}{Effort: "high"},
 	}
 
 	out := responsesToChat(req)
@@ -132,10 +138,10 @@ func TestResponsesStreamEvents(t *testing.T) {
 	}
 	events := sseEvents(rec.Body.String())
 	must := map[string]bool{
-		"response.created":          false,
+		"response.created":           false,
 		"response.output_item.added": false,
 		"response.output_text.delta": false,
-		"response.completed":        false,
+		"response.completed":         false,
 	}
 	for _, e := range events {
 		if _, ok := must[e]; ok {

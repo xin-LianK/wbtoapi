@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // tasks.go 面板「积分任务」接口：查询任务进度、接受任务、领取奖励。
 //
 // 上游能力（internal/upstream/tasks.go）的三层薄封装；前端表格展示
@@ -11,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // acceptBatchGap 批量接受的批间节流（对齐脚本 1.05s 口径，避免上游风控）。
@@ -31,6 +36,12 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	// 官方国际版产品配置 UserGrowth:false，没有成长体系；改用 Cookie 后成长任务列表对国际版
+	// 回 401。国际版直接当空列表处理，不发请求。
+	if a.IsGlobal() {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": []upstream.Task{}})
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -89,6 +100,12 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// 官方国际版没有成长体系（UserGrowth:false），列表接口改用 Cookie 后回 401；
+	// 直接当空列表处理，不发请求。
+	if a.IsGlobal() {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": 0, "message": "所有任务均已接受"})
+		return
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -101,10 +118,6 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		codes = append(codes, t.TaskCode)
-	}
-	if len(codes) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": 0, "message": "所有任务均已接受"})
-		return
 	}
 	const batch = 20
 	accepted := 0
@@ -123,6 +136,8 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(acceptBatchGap) // 批间节流（对齐脚本 1.05s 口径）
 	}
 	// 小程序口径任务单独批量接受（默认列表不含 mp 码，accept 也要求 mp 头）。
+	// 默认列表全接受过时也要走这一步，小程序任务可能还没接受。
+	mpPending := 0
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
 		var mpCodes []string
 		for _, t := range mpTasks {
@@ -131,6 +146,7 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 			}
 			mpCodes = append(mpCodes, t.TaskCode)
 		}
+		mpPending = len(mpCodes)
 		if len(mpCodes) > 0 {
 			if err := p.cfg.Upstream.AcceptTasksMP(a, mpCodes); err != nil {
 				log.Printf("panel: mp 批量接受失败 uid=%s err=%v", uid, err)
@@ -140,6 +156,10 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 				time.Sleep(acceptBatchGap)
 			}
 		}
+	}
+	if len(codes) == 0 && mpPending == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accepted": 0, "message": "所有任务均已接受"})
+		return
 	}
 	log.Printf("panel: 全部接受 uid=%s 接受=%d 失败=%d", uid, accepted, len(failed))
 	resp := map[string]any{"ok": true, "accepted": accepted, "failed": failed}

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package upstream
 
 import (
@@ -882,18 +886,12 @@ func TestUserResourceDetailedWithExpirySnapshot(t *testing.T) {
 	now := time.Now().In(softRateResetLoc)
 	soon := now.Add(24 * time.Hour).Truncate(time.Second)
 	later := now.Add(10 * 24 * time.Hour).Truncate(time.Second)
-	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
-		`{"PackageName":"soon-a","CycleCapacitySize":10,"CycleCapacityRemain":10,"CycleCapacityUsed":0,"CycleEndTime":"` + soon.Format(packageEndLayout) + `"},` +
-		`{"PackageName":"soon-b","CycleCapacitySize":15,"CycleCapacityRemain":15,"CycleCapacityUsed":0,"CycleEndTime":"` + soon.Format(packageEndLayout) + `"},` +
-		`{"PackageName":"later","CycleCapacitySize":20,"CycleCapacityRemain":20,"CycleCapacityUsed":0,"CycleEndTime":"` + later.Format(packageEndLayout) + `"},` +
-		`{"PackageName":"unknown","CycleCapacitySize":5,"CycleCapacityRemain":5,"CycleCapacityUsed":0}` +
-		`]}}}}`
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
-			return nil, errors.New("wrong path: " + r.URL.Path)
-		}
-		return jsonResp(200, payload), nil
-	})
+	c := testClient(resourceRT(
+		cyclePkg("soon-a", 10, 10, `"CycleEndTime":"`+soon.Format(packageEndLayout)+`"`),
+		cyclePkg("soon-b", 15, 15, `"CycleEndTime":"`+soon.Format(packageEndLayout)+`"`),
+		cyclePkg("later", 20, 20, `"CycleEndTime":"`+later.Format(packageEndLayout)+`"`),
+		cyclePkg("unknown", 5, 5, ""),
+	))
 
 	remain, total, expiring, earliestAt, earliestRemaining, err := c.UserResourceDetailedWithExpiry(
 		&auth.Auth{AccessToken: "at", UID: "u1"}, 48*time.Hour,
@@ -908,18 +906,33 @@ func TestUserResourceDetailedWithExpirySnapshot(t *testing.T) {
 		t.Fatalf("earliest=%v/%d want %v/25", earliestAt, earliestRemaining, soon)
 	}
 }
+
+// 同一天（北京时间）不同时刻到期的包合成一批；活动包按 DeductionEndTime，不看 CycleEndTime。
+func TestUserResourceDetailedWithExpirySameDay(t *testing.T) {
+	day := time.Now().In(softRateResetLoc).AddDate(0, 0, 3)
+	morning := time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, softRateResetLoc)
+	night := time.Date(day.Year(), day.Month(), day.Day(), 23, 30, 0, 0, softRateResetLoc)
+	c := testClient(resourceRT(
+		// 活动包的 CycleEndTime 是明天，但它按 DeductionEndTime 算，在第 3 天晚上
+		cyclePkg("activity", 30, 30, `"PackageCode":"TCACA_code_007_nzdH5h4Nl0","DeductionEndTime":`+
+			strconv.FormatInt(night.UnixMilli(), 10)+`,"CycleEndTime":"`+day.AddDate(0, 0, -2).Format(packageEndLayout)+`"`),
+		cyclePkg("trial", 40, 40, `"PackageCode":"TCACA_code_039_KRcQj7wUat","CycleEndTime":"`+morning.Format(packageEndLayout)+`"`),
+		cyclePkg("later", 20, 20, `"CycleEndTime":"`+day.AddDate(0, 0, 5).Format(packageEndLayout)+`"`),
+	))
+	_, _, _, earliestAt, earliestRemaining, err := c.UserResourceDetailedWithExpiry(&auth.Auth{AccessToken: "at", UID: "u1"}, 0)
+	if err != nil {
+		t.Fatalf("resource: %v", err)
+	}
+	if earliestRemaining != 70 || !earliestAt.Equal(morning) {
+		t.Fatalf("earliest=%v/%d want %v/70", earliestAt, earliestRemaining, morning)
+	}
+}
 func TestCreditPackagesExpiryTimestamp(t *testing.T) {
 	end := time.Now().In(softRateResetLoc).Add(7 * 24 * time.Hour).Truncate(time.Second)
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
-			return nil, errors.New("wrong path: " + r.URL.Path)
-		}
-		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[`+
-			`{"PackageName":"gift","CycleCapacitySize":100,"CycleCapacityRemain":80,"CycleCapacityUsed":20,"CycleEndTime":"`+
-			end.Format(packageEndLayout)+`"},`+
-			`{"PackageName":"unknown","CycleCapacitySize":10,"CycleCapacityRemain":10,"CycleCapacityUsed":0}`+
-			`]}}}}`), nil
-	})
+	c := testClient(resourceRT(
+		cyclePkg("gift", 100, 80, `"CycleEndTime":"`+end.Format(packageEndLayout)+`"`),
+		cyclePkg("unknown", 10, 10, ""),
+	))
 	packs, remain, size, err := c.CreditPackages(&auth.Auth{AccessToken: "at", UID: "u1"})
 	if err != nil {
 		t.Fatalf("packages: %v", err)

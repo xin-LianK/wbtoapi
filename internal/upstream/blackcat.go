@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // blackcat.go 夜猫子任务（black_cat）+ 新手礼包/补偿 API。
 //
 // 判据（WorkBuddy-Daily 项目实测口径 + 本网关验证）：black_cat 要求在
@@ -40,6 +44,9 @@ func (c *Client) BlackcatNeed(a *auth.Auth) (int64, error) {
 	return 0, nil
 }
 
+// nightChatGap RunNightChats 相邻两次对话之间的间隔。
+var nightChatGap = 4 * time.Second
+
 // RunNightChats 夜猫子：发 need 次 glm-5.2 真实对话（读干流）并上报事件链。
 // 返回成功次数。对话内容极短（1+1），消耗可忽略。
 func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
@@ -50,7 +57,9 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 			"messages": []map[string]any{{"role": "user", "content": "1+1等于几？直接回答。"}},
 			"stream":   true,
 		})
-		rc, status, respBody, err := c.ChatStream(a, body, "", ChatMeta{})
+		// 上报和这次对话用同一个会话 id、轮次 id（官方的上报就是这次对话的）。
+		conv, req := NewConversationID(), NewRequestID()
+		rc, status, respBody, err := c.ChatStream(a, body, "", ChatMeta{ConversationID: conv, ConversationRequestID: req})
 		if err != nil || status >= 400 {
 			if rc != nil {
 				rc.Close()
@@ -59,31 +68,44 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
 		rc.Close()
-		if err := c.ReportChatActivityModel(a, NewEventID(), "", "glm-5.2", "GLM-5.2"); err != nil {
+		if err := c.ReportChatActivityModel(a, conv, req, "glm-5.2", "GLM-5.2"); err != nil {
 			return ok, fmt.Errorf("第 %d 次上报失败: %w", i+1, err)
 		}
 		ok++
-		time.Sleep(4 * time.Second)
+		time.Sleep(nightChatGap)
 	}
 	return ok, nil
 }
 
-// ClaimGift 领取新手礼包（每号一次，已领返回业务错误）。
-func (c *Client) ClaimGift(a *auth.Auth) (int64, error) {
-	data, err := c.billingJSON(a, http.MethodPost, "/billing/meter/claim-gift", map[string]any{})
-	if err != nil {
-		return 0, err
-	}
-	var resp struct {
-		Credit int64 `json:"credit"`
-	}
-	_ = json.Unmarshal(data, &resp)
-	return resp.Credit, nil
-}
+// 新手礼包端点（官网用量页）。网页先查 check-gift-claimed，data.active 为真且 claimed
+// 为假才显示领取按钮；点了才发 claim-gift。两条都没有请求体。
+const (
+	giftCheckPath = "/billing/meter/check-gift-claimed"
+	giftClaimPath = "/billing/meter/claim-gift"
+)
 
-// ClaimCompensation 领取活动补偿（有则领，无则业务错误）。
-func (c *Client) ClaimCompensation(a *auth.Auth) (int64, error) {
-	data, err := c.billingJSON(a, http.MethodPost, "/billing/meter/claim-compensation", map[string]any{})
+// ClaimGift 领取新手礼包（每号一次）。按网页顺序先查状态：未开放不领、已领不领（照旧按
+// “已领”返回错误，调用方只在 err==nil 时记日志）、查询失败返回该错误不领；只有 active 且
+// 未领取才发领取请求。
+func (c *Client) ClaimGift(a *auth.Auth) (int64, error) {
+	data, err := c.webJSON(a, http.MethodPost, giftCheckPath, webPageUsage, nil)
+	if err != nil {
+		return 0, err
+	}
+	var status struct {
+		Active  bool `json:"active"`
+		Claimed bool `json:"claimed"`
+	}
+	if err := json.Unmarshal(data, &status); err != nil {
+		return 0, fmt.Errorf("解析新手礼包状态: %w", err)
+	}
+	if !status.Active {
+		return 0, fmt.Errorf("新手礼包未开放")
+	}
+	if status.Claimed {
+		return 0, fmt.Errorf("新手礼包已领取")
+	}
+	data, err = c.webJSON(a, http.MethodPost, giftClaimPath, webPageUsage, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -91,13 +113,14 @@ func (c *Client) ClaimCompensation(a *auth.Auth) (int64, error) {
 		Credit int64 `json:"credit"`
 	}
 	_ = json.Unmarshal(data, &resp)
+	c.noteEarning(a, EarnGift, "", resp.Credit)
 	return resp.Credit, nil
 }
 
 // HeatmapYesterdayMissed 检查昨日是否漏签（heatmap cell score==0）。
 func (c *Client) HeatmapYesterdayMissed(a *auth.Auth) (bool, error) {
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-	data, err := c.growthJSON(a, http.MethodGet, "/activity/growth/heatmap", nil)
+	data, err := c.webJSON(a, http.MethodGet, "/activity/growth/heatmap", webPageGrowthCenter, nil)
 	if err != nil {
 		return false, err
 	}
@@ -120,7 +143,7 @@ func (c *Client) HeatmapYesterdayMissed(a *auth.Auth) (bool, error) {
 
 // UseMakeupCard 对指定日期使用补签卡（保住连登连续天数；无卡返回业务错误）。
 func (c *Client) UseMakeupCard(a *auth.Auth, date string) error {
-	_, err := c.growthJSON(a, http.MethodPost, "/activity/growth/makeup-cards/use",
+	_, err := c.webJSON(a, http.MethodPost, "/activity/growth/makeup-cards/use", webPageGrowthCenter,
 		map[string]any{"target_date": date})
 	return err
 }

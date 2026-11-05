@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // overview_inflight_test.go 面板「在途/上限」的接线测试。
 //
 // 背景：账号表的在途列原来只有分子，运维看不出「这个号还剩几个名额」。5 个号跑

@@ -1,22 +1,36 @@
 name: go-binaries
 
-# 可运行二进制构建/发布：
-#   - PR / push main → 测试 + 五平台编译验证（产物仅存 artifact，不发布）
-#   - push v* tag    → 同上 + 打包上传到 GitHub Release（zip/tar.gz + checksums）
-# 固化的发布纪律（曾两次人祸，见仓库 HANDOFF）：-s -w 剥离、二进制版本串 == 源码
-# appVersion、tag 版本 == 源码版本（-ci 后缀的测试 tag 豁免，用于演练发布线）。
+# 可运行二进制与镜像的构建/发布：
+#   - 先构建面板前端（web/ → internal/panel/dist，含类型检查 / ESLint / 单元测试），产物供后续任务 go:embed；
+#     顺带跑 .github/scripts 的测试（issue 信息检查脚本）
+#   - commits 按 docs/commits.md 检查这次推送的提交信息；test 跑 gofmt / go vet / golangci-lint / go test。
+#     二进制、Release 和镜像（docker-ghcr.yml）都排在这两项之后，检查没过不发布
+#   - PR        → 测试 + 五平台编译验证（产物仅存 artifact，不发布）
+#   - push main → 同上 + 覆盖固定的「最新构建」Release（tag latest 跟随 main 移动）；
+#                 这次推送升了版本号（appVersion 对应的 vX.Y.Z 标签还不存在）时，再打标签、建正式 Release
+# 版本号规则见 docs/releasing.md：有使用者看得到的改动就在推送前升版本号、写好 docs/CHANGELOG.md，
+# 不手动打 tag。发布纪律：-s -w 剥离、二进制必须带上这一版的更新日志与面板前端。
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
     paths:
       - "go.mod"
       - "go.sum"
+      - "*.go"
       - "cmd/**"
       - "internal/**"
+      - "docs/CHANGELOG.md"
       - "config.example.json"
+      - "web/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "scripts/**"
+      - ".githooks/**"
+      - "*.sh"
+      - ".github/scripts/**"
       - ".github/workflows/go-binaries.yml"
+      - ".github/workflows/docker-ghcr.yml"
   workflow_dispatch:
 
 concurrency:
@@ -27,18 +41,94 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  # 面板前端：构建一次，产物上传给 test / build 共用（dist 不进版本库）
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build   # 类型检查 + ESLint（零警告）+ 单元测试 + 构建到 ../internal/panel/dist
+      - run: node --test '../.github/scripts/*.test.js'   # issue 信息检查脚本（issue-check.yml 用）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
+          retention-days: 7
+
+  # 提交信息：只沿 main 的第一父提交查，合并进来的上游提交不查。强推后推送前的提交已不在历史里，
+  # 就退到最近的版本标签之后再查；新建分支或找不到标签时只查最新一个
+  commits:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 检查提交信息
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -n "$BASE" ]]; then
+            from=$BASE
+          elif [[ -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] && git merge-base --is-ancestor "$BEFORE" "$HEAD" 2>/dev/null; then
+            from=$BEFORE
+          else
+            from=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$HEAD^" 2>/dev/null || true)
+          fi
+          if [[ -n "$from" ]]; then
+            scripts/commit-msg.sh --commits "$from..$HEAD"
+          else
+            scripts/commit-msg.sh --commits --max-count=1 "$HEAD"
+          fi
+
+  test:
+    needs: [web, commits]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
+      # 格式：有文件没按 gofmt 排版就失败，列出文件名（本地 gofmt -w 改好再推）
+      - name: gofmt
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            echo "::error::这些文件没有按 gofmt 排版，请运行 gofmt -w 后再提交"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      # 静态检查：只开 vet、staticcheck、unused、ineffassign，配置见 .golangci.yml
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+      # 前端产物已就位：面板包的 TestBuiltDistIsServable 会真实校验页面引用的每个资源
       - run: go test ./...
 
-  build:
+  # 镜像：检查通过后才构建推送（PR 只构建不推送），见 docker-ghcr.yml
+  image:
     needs: test
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker-ghcr.yml
+
+  build:
+    needs: [web, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -51,6 +141,10 @@ jobs:
           - { goos: darwin, goarch: arm64, ext: .tar.gz }
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -66,28 +160,38 @@ jobs:
           CGO_ENABLED: 0
         run: go build -ldflags "-s -w" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
 
-      # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
-      - name: 断言二进制版本串
+      # 版本断言：二进制内嵌的更新日志必须有这一版（防交叉编译矩阵里编错树）。版本号本身太短，
+      # 直接 grep 容易误中；更新日志最新一版 == appVersion 由 go test 保证。
+      - name: 断言二进制版本
         run: |
           BIN="wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}"
-          if ! grep -qa "${{ steps.ver.outputs.v }}" "$BIN"; then
-            echo "::error::binary missing version string ${{ steps.ver.outputs.v }}"
+          if ! grep -qaF "## [${{ steps.ver.outputs.v }}]" "$BIN"; then
+            echo "::error::binary does not embed the changelog entry for ${{ steps.ver.outputs.v }}"
             exit 1
           fi
           echo "version assert OK: ${{ steps.ver.outputs.v }}"
 
-      - name: 打包（windows=zip 三件套，其余=tar.gz）
+      # 面板断言：发布的二进制必须带面板前端（dist 为空时 go build 也能通过，只会显示「前端还没有构建」）
+      - name: 断言二进制包含面板前端
+        run: |
+          BIN="wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}"
+          if ! grep -qa 'src="/panel/assets/' "$BIN"; then
+            echo "::error::binary does not embed the panel frontend (internal/panel/dist was empty)"
+            exit 1
+          fi
+          echo "panel assert OK"
+
+      - name: 打包（windows=zip，其余=tar.gz；许可证随包分发）
         run: |
           V="${{ steps.ver.outputs.v }}"
-          V="${V%-panel}"   # 文件名不带 -panel 后缀（wb2api-panel-v1.2.3-... 既有惯例）
           case "${{ matrix.goos }}" in
             windows)
               NAME="wb2api-panel-v${V}-windows-amd64.zip"
-              zip -q "$NAME" wb2api.exe config.example.json README.md
+              zip -q "$NAME" wb2api.exe config.example.json README.md LICENSE NOTICE
               ;;
             *)
               NAME="wb2api-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
-              tar czf "$NAME" wb2api config.example.json README.md
+              tar czf "$NAME" wb2api config.example.json README.md LICENSE NOTICE
               ;;
           esac
           echo "name=$NAME" >> "$GITHUB_ENV"
@@ -98,18 +202,88 @@ jobs:
           path: ${{ env.name }}
           retention-days: 7
 
-  # 仅 tag 触发：校验 tag == 源码版本（-ci 演练 tag 豁免）→ 汇总资产 → 建 Release
-  publish:
+  # 仅 push main：把五平台包覆盖到固定的「最新构建」Release，与 Docker 的 latest 镜像同步。
+  # 文件名去掉版本号（wb2api-panel-linux-amd64.tar.gz），releases/download/latest/<文件名> 链接长期不变。
+  # 「Latest」标记留给正式版本的 Release，这里不抢。
+  rolling:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    # 连续推送时排队执行，不并发改同一个 Release
+    concurrency:
+      group: rolling-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: 跳过已过时的构建
+        id: fresh
+        run: |
+          HEAD=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [[ "$HEAD" != "$GITHUB_SHA" ]]; then
+            echo "main 已前进到 $HEAD，本次（$GITHUB_SHA）不再覆盖，留给更新的运行"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.fresh.outputs.ok == 'true'
+        with:
+          pattern: wb2api-panel-*
+          path: dist
+          merge-multiple: true
+      - name: 去掉文件名里的版本号 + checksums
+        if: steps.fresh.outputs.ok == 'true'
+        run: |
+          cd dist
+          for f in wb2api-panel-v*; do mv "$f" "wb2api-panel-${f#wb2api-panel-v*-}"; done
+          sha256sum *.zip *.tar.gz > checksums.txt
+          ls -la
+      - name: 移动 latest 标签并覆盖 Release
+        if: steps.fresh.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
+          SHORT=${GITHUB_SHA::7}
+          BUILT=$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')
+          TITLE="最新构建 v${V}（${SHORT}）"
+          NOTES=$(printf '%s\n' \
+            "随 main 分支自动更新的构建，与 Docker 镜像 \`latest\` 同步，下一次推送会覆盖这里的文件。正式版本见带版本号的 Release。" \
+            "" \
+            "- 版本：\`${V}\`" \
+            "- 提交：https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" \
+            "- 构建时间：${BUILT}（UTC+8）" \
+            "- 校验：\`sha256sum -c --ignore-missing checksums.txt\`")
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "$TITLE" --notes "$NOTES" --prerelease=false --latest=false
+            gh release upload latest dist/* --clobber
+          else
+            gh release create latest dist/* --title "$TITLE" --notes "$NOTES" --latest=false --verify-tag
+          fi
+
+  # 仅 push main：appVersion 对应的 vX.Y.Z 标签还不存在（这次推送升了版本号）时，打标签并建正式 Release，
+  # 说明取 docs/CHANGELOG.md 里这一版的条目，附五平台包（文件名带版本号）和 checksums。标签已在更早的提交上
+  # （版本号没变）就跳过。不受 rolling 的「过时跳过」影响：每个版本都要有自己的 Release。
+  # 上一次发版中途失败、标签没打上时，下一次推送会补发（标签落在那次推送的提交上）。
+  release:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: version-release
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 取历史 tag 算 compare 链接
-      - name: tag 与源码版本一致性断言
+          fetch-depth: 0   # 取已有的版本标签，算对比链接
+      - name: 判断是否新版本
+        id: ver
         run: |
           # 两侧都归一到「纯版本号」再比：appVersion 与 tag 都带 -panel 后缀，
           # 只剥一侧会让 v1.15.x-panel 永远比不相等（v1.15.1/v1.15.2 的 tag
@@ -124,17 +298,17 @@ jobs:
               exit 1
             fi
           else
-            echo "演练 tag（-ci 后缀）跳过一致性断言：tag=$TAG src=$SRC"
+            echo "new=true" >> "$GITHUB_OUTPUT"
           fi
           echo "version assert OK: tag=$TAG src=$SRC"
       - uses: actions/download-artifact@v4
+        if: steps.ver.outputs.new == 'true'
         with:
+          pattern: wb2api-panel-*
           path: dist
           merge-multiple: true
-      - name: checksums
-        run: cd dist && sha256sum *.zip *.tar.gz > checksums.txt && ls -la
-      - name: 上一版 tag（compare 链接用）
-        id: prev
+      - name: 本版说明 + checksums
+        if: steps.ver.outputs.new == 'true'
         run: |
           PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"

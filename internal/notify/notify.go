@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package notify 出站告警通知（webhook）。
 //
 // 存在理由：网关此前**没有任何告警出口**——签到失败、账号 session dead 被禁用、
@@ -190,8 +194,8 @@ func (n *Notifier) deliver(msg Message) error {
 		}
 		endpoint := "https://api.telegram.org/bot" + n.cfg.Token + "/sendMessage"
 		return n.postJSON(endpoint, map[string]any{
-			"chat_id": n.cfg.ChatID,
-			"text":    msg.Title + "\n" + msg.Text,
+			"chat_id":                  n.cfg.ChatID,
+			"text":                     msg.Title + "\n" + msg.Text,
 			"disable_web_page_preview": true,
 		})
 	default: // generic

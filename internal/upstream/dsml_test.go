@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // dsml_test.go 覆盖模型原生工具调用标记修复层（dsml.go）。
 //
 // 所有夹具都用包内常量拼装（markupOpen / markupPipe / ...），不在源码里写死真实
@@ -438,6 +442,26 @@ func TestRepairAggregatedResponseSkips(t *testing.T) {
 		[]any{map[string]any{"id": "real", "type": "function"}}
 	if RepairAggregatedResponse(withCalls, testTools, false).Converted() != 0 {
 		t.Fatal("已有 tool_calls 时不得改写")
+	}
+
+	// 真实聚合路径：Aggregate 产出的 tool_calls 是 []map[string]any（不是 []any），同样不得覆盖。
+	frame := func(delta map[string]any, finish any) string {
+		b, _ := json.Marshal(map[string]any{"id": "c", "object": "chat.completion.chunk",
+			"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
+		return "data: " + string(b) + "\n\n"
+	}
+	agg, err := Aggregate(strings.NewReader(frame(map[string]any{"role": "assistant", "content": markup,
+		"tool_calls": []any{map[string]any{"index": 0, "id": "real", "type": "function",
+			"function": map[string]any{"name": "exec_command", "arguments": "{}"}}}}, nil) +
+		frame(map[string]any{}, "stop") + "data: [DONE]\n\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if RepairAggregatedResponse(agg, testTools, false).Converted() != 0 {
+		t.Fatal("聚合结果已有 tool_calls 时不得改写")
+	}
+	if ids := ResponseToolCallIDs(agg); len(ids) != 1 || ids[0] != "real" {
+		t.Fatalf("真实调用应原样保留，got %v", ids)
 	}
 
 	// finish_reason=length（正文被截断）→ 不解释。

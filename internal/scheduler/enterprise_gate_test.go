@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package scheduler
 
 import (
@@ -11,6 +15,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 // recorderUpstream 记录全部被请求的路径，并对所有端点返回成功信封。
@@ -47,6 +52,9 @@ func (r *recorderUpstream) snapshot() []string {
 
 func (r *recorderUpstream) server() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if upstreamtest.WebSession(w, req) {
+			return
+		}
 		r.record(req.URL.Path)
 		switch {
 		case strings.HasSuffix(req.URL.Path, "/get-enterprise-user-usage"):
@@ -54,9 +62,7 @@ func (r *recorderUpstream) server() *httptest.Server {
 			w.Write([]byte(`{"code":0,"msg":"OK","data":{"credit":812.45,"limitNum":2000,` +
 				`"cycleStartTime":"2026-09-27 00:00:00","cycleEndTime":"2099-10-26 23:59:59",` +
 				`"cycleResetTime":"2099-10-27 00:00:00"}}`))
-		case strings.HasSuffix(req.URL.Path, "/get-user-resource"):
-			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":` +
-				`[{"CycleCapacitySize":1000,"CycleCapacityRemain":900,"CycleCapacityUsed":100}]}}}}`))
+		case upstreamtest.Write(w, req.URL.Path, upstreamtest.Package(1000, 900, "")):
 		default:
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		}
@@ -142,7 +148,7 @@ func TestEnterpriseCheckinStillRefreshesCredits(t *testing.T) {
 	if !r.has("/get-enterprise-user-usage") {
 		t.Fatalf("企业号应走企业口径额度查询，实际请求=%v", r.snapshot())
 	}
-	if r.has("/billing/meter/get-user-resource") {
+	if r.has("/billing/meter/get-user-resource") { // 个人号的三个积分接口都带这一段
 		t.Errorf("企业号不应再走个人资源包端点，实际请求=%v", r.snapshot())
 	}
 	st, ok := s.cfg.Pool.Status("u1")

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package scheduler
 
 import (
@@ -14,6 +18,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 func TestNextFire(t *testing.T) {
@@ -200,22 +205,26 @@ type fakeUpstream struct {
 
 func (f *fakeUpstream) server() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if upstreamtest.WebSession(w, r) {
+			return
+		}
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/daily-checkin"):
 			f.checkinCalls.Add(1)
 			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
-		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
-			// remain 需 <= size（取数钳 [0,size]：脏数据 remain>size 会被钳到 size
-			// ——上游真实数据恒一致，实测 Cycle{17,482,500}）。
+		case r.URL.Path == upstreamtest.FreePath:
+			// remain 需 <= size（剩余超过额度会按额度算——上游真实数据恒一致）。
 			end := ""
 			if f.resourceEnd != "" {
-				end = `,"CycleEndTime":` + jsonString(f.resourceEnd)
+				end = `"CycleEndTime":` + jsonString(f.resourceEnd)
 			}
-			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":1000,"CycleCapacityRemain":` +
-				jsonI64(f.resourceRemain) + `,"CycleCapacityUsed":0` + end + `}]}}}}`))
+			w.Write([]byte(upstreamtest.List(upstreamtest.Package(1000, f.resourceRemain, end))))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
 			f.refreshCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
+		case r.URL.Path == "/v2/plugin/account":
+			// 刷新后核对账号：uid 与本地一致才算刷新成功。
+			w.Write([]byte(`{"code":0,"data":{"uid":"u1"}}`))
 		case strings.HasSuffix(r.URL.Path, "/activity/growth/buddy/info"):
 			// 已领养（data.buddy 非空）：跳过领养前置，直接进旅行状态查询。
 			w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1,"name":"cat"}}}`))
@@ -223,15 +232,11 @@ func (f *fakeUpstream) server() *httptest.Server {
 			// daily_limit_reached=true：状态查询计一次调用即止，不发 depart/claim。
 			f.travelCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"state":"idle","daily_limit_reached":true}}`))
+		case upstreamtest.Write(w, r.URL.Path):
 		default:
 			http.Error(w, "not found", 404)
 		}
 	}))
-}
-
-func jsonI64(v int64) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
 
 func jsonString(v string) string {
@@ -339,6 +344,10 @@ func TestRunKeepaliveSessionDeadDisables(t *testing.T) {
 func TestRunKeepaliveSessionDeadResetBySuccess(t *testing.T) {
 	var fails atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/plugin/account" { // 刷新后核对账号（只在刷新成功后发）
+			w.Write([]byte(`{"code":0,"data":{"uid":"u1"}}`))
+			return
+		}
 		if fails.Add(1) == 3 { // 第 3 次（本次调度循环的第二轮）刷新成功
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
 			return
@@ -410,7 +419,7 @@ func TestRunBalanceRefreshNowUpdatesCreditsAndRevives(t *testing.T) {
 	p.Cooldown("u1", pool.CoolHard, time.Hour, "余额不足")
 	p.Disable("u2", "manual")
 
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 	s.RunBalanceRefreshNow()
 
@@ -460,7 +469,7 @@ func TestRunBalanceRefreshReplacesExpirySnapshot(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
 	p.SetCreditsDetailed("u1", 999, 999, 999, time.Now().Add(time.Hour), 999)
 
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up, ExpiringSoonWindow: 7 * 24 * time.Hour})
 	s.RunBalanceRefreshNow()
 
@@ -513,7 +522,7 @@ func TestRunCheckinSkipsDisabledByDefault(t *testing.T) {
 	defer srv.Close()
 
 	p := poolWithDisabledAccount()
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22}})
 
 	s.RunCheckinNow()
@@ -530,7 +539,7 @@ func TestRunCheckinIncludesDisabledWhenConfigured(t *testing.T) {
 	defer srv.Close()
 
 	p := poolWithDisabledAccount()
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{
 		Pool: p, Upstream: up,
 		CheckinHours:           []int{9, 21},
@@ -558,7 +567,7 @@ func TestRunKeepaliveIncludesDisabledRenewsToken(t *testing.T) {
 	defer srv.Close()
 
 	p := poolWithDisabledAccount()
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up, IncludeDisabledInTasks: true})
 
 	s.RunKeepaliveNow()
@@ -575,7 +584,7 @@ func TestRunBalanceRefreshIncludesDisabledUpdatesCredits(t *testing.T) {
 	defer srv.Close()
 
 	p := poolWithDisabledAccount()
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up, IncludeDisabledInTasks: true})
 
 	s.RunBalanceRefreshNow()
@@ -595,7 +604,7 @@ func TestSetIncludeDisabledInTasksHot(t *testing.T) {
 	defer srv.Close()
 
 	p := poolWithDisabledAccount()
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
 	s.RunCheckinNow()
@@ -625,7 +634,7 @@ func TestPausedAccountStillRunsKeepaliveTasks(t *testing.T) {
 	if !p.Pause("u2") {
 		t.Fatal("Pause 失败")
 	}
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up}) // 有意不设 IncludeDisabledInTasks
 
 	s.RunCheckinNow()
@@ -664,7 +673,7 @@ func TestPausedVsDisabledTaskParticipation(t *testing.T) {
 	p.Pause("u2")
 	p.Disable("u3", "manual disable (test)")
 
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up}) // 全局开关有意保持关闭
 
 	s.RunCheckinNow()
@@ -673,7 +682,6 @@ func TestPausedVsDisabledTaskParticipation(t *testing.T) {
 		t.Errorf("checkin calls=%d want 2（正常 + 暂停参与；禁用跳过）", got)
 	}
 }
-
 
 // TestPausedStillTravels 暂停号照常跑旅行：旅行是纯 RPC（状态/派出/领奖 +
 // 领养前置上报），不发模型对话，与「让位防风控」不冲突——唯一被跳过的
@@ -687,7 +695,7 @@ func TestPausedStillTravels(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
 	p.Add(&auth.Auth{UID: "u2", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
 	p.Pause("u2")
-	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL, WebBaseCN: srv.URL}
 	s := New(Config{Pool: p, Upstream: up})
 
 	s.RunTravelNow()

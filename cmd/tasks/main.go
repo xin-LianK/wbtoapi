@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // tasks 诊断工具：拉取账号真正的上游成长任务列表，标出哪些任务还没有自动化实现。
 //
 // 做这件事的原因：任务码由服务端下发，代码里看不到。官方加了新任务时，
@@ -52,8 +56,8 @@ func main() {
 
 	up := upstream.New()
 	// 跨账号汇总：同一个新任务在一个账号上看到就够了
-	missing := map[string]string{}       // code -> 标题（需人工实现）
-	byFamily := map[string][]string{}    // 族名 -> 码（自动跑，无需改代码）
+	missing := map[string]string{}    // code -> 标题（需人工实现）
+	byFamily := map[string][]string{} // 族名 -> 码（自动跑，无需改代码）
 	total := 0
 
 	for _, f := range files {

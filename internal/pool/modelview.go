@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package pool
 
 import (
@@ -18,7 +22,7 @@ type ModelLockRow struct {
 	Model string `json:"model"`
 	// Realm 账号域（cn | global）。同名模型在两个域各自独立计数。
 	Realm string `json:"realm"`
-	// Total 该域**参与选号**的账号数（禁用/暂停号不计，与 ModelBlocked 同口径），
+	// Total 该域**参与选号**的账号数（禁用、暂停、被代理池拦着的号不计，与 ModelBlocked 同口径），
 	// 作为「可选 / 总数」的分母。
 	Total int `json:"total"`
 	// Servable 此刻真正能服务该模型的账号数（healthyForModel 且未在途占满）。
@@ -48,7 +52,7 @@ type ModelLockRow struct {
 // 本视图把 (域, 模型) 维度聚合成一张清单补齐这一点。
 //
 // 口径与选号/ModelBlocked 严格一致，三处易错点：
-//   - 只看**参与选号**的账号：disabled / paused 号跳过——它们的不可用与模型无关，
+//   - 只看**参与选号**的账号：disabled / paused / 被代理池拦着的号跳过——它们的不可用与模型无关，
 //     计进来会把「模型被锁」和「号被停了」混为一谈；
 //   - 只看**真正拦路由**的冷却：AuditOnly 台账（无重置时间的 6004）不改变选号，
 //     既不产生行也不计入 Locked；
@@ -71,7 +75,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 
 	for _, e := range p.byUID {
 		realm := e.a.Realm()
-		if e.disabled || e.paused {
+		if e.excluded() {
 			continue
 		}
 		routable[realm]++
@@ -116,7 +120,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			if e.a.Realm() != realm {
 				continue
 			}
-			if e.healthyForModel(now, model) && !p.inFlightFull(e) {
+			if p.servableFor(e, now, model) && !p.busy(e, now) {
 				row.Servable++
 			}
 		}

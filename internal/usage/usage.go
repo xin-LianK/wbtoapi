@@ -1,14 +1,19 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package usage 记录并聚合逐请求 token 用量，供面板「用量」视图展示。
 //
 // 与 internal/pool 的 TokenUsage 的区别：
 //   - pool 的 TokenUsage 是**每账号一个累计计数器**，只保留总量与「最近一次」，
 //     没有时间维度，也无法按模型/时间下钻；
-//   - 本包按 (时间片, realm, uid, model, rate) 分桶累计，因此可以出「今天各模型各用了多少」
+//   - 本包按 (时间片, realm, uid, model, rate, 密钥) 分桶累计，因此可以出「今天各模型各用了多少」
 //     「这一小时 prompt 涨得多快」这类问题，且能长期保留。
 //
 // 保留策略（分片粒度自动降级，总量因此有界）：
 //   - 近 hourlyKeep 小时内：小时桶（细粒度，看尖峰）
-//   - 更早：折叠为日桶，**永久保留**（看长期趋势）
+//   - 更早：折叠为日桶，缺省**永久保留**（看长期趋势）；设了保留天数（logging.usage_retention_days）
+//     时，整段早于这么多天的桶删掉
 //
 // 落盘：data/usage.json，原子替换 + 防抖刷新（默认 30s），重启不丢。
 // 桶数上界 ≈ 账号数 × 模型数 × (hourlyKeep + 已过天数)，实测单桶约 90 字节。
@@ -29,11 +34,12 @@ import (
 // hourlyKeep 小时桶的保留时长；超出后折叠为日桶。
 const hourlyKeep = 90 * 24 * time.Hour
 
-// flushInterval 防抖落盘间隔。
-const flushInterval = 30 * time.Second
+// flushInterval 防抖落盘间隔（var 供测试缩短后台 ticker）。
+var flushInterval = 30 * time.Second
 
-// maxBuckets 桶数硬上限。超过时立即触发一次折叠，避免异常流量把内存/文件撑爆。
-const maxBuckets = 400_000
+// maxBuckets 桶数硬上限。超过时立即触发一次折叠，避免异常流量把内存/文件撑爆
+// （var 供测试降低阈值以覆盖折叠触发分支）。
+var maxBuckets = 400_000
 
 // hourLayout / dayLayout 分片键的时间格式（本地时区，与用户直觉一致）。
 const (
@@ -42,11 +48,11 @@ const (
 )
 
 // fileVersion 是 usage.json 的当前格式版本。版本 2 增加积分观测字段，版本 3
-// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计；
+// 增加模型生效倍率分区，版本 4 增加前缀缓存命中/未命中累计，版本 5 增加密钥维度；
 // 旧版本缺失字段按零值加载，旧数据不会丢弃。
-const fileVersion = 4
+const fileVersion = 5
 
-// bucket 一个 (时间片, realm, uid, model, rate) 的累计量。
+// bucket 一个 (时间片, realm, uid, model, rate, 密钥) 的累计量。
 // JSON 字段名刻意取短，因为桶数量会随时间增长。
 type bucket struct {
 	Scope string  `json:"s"`            // "h:2006-01-02T15" 或 "d:2006-01-02"
@@ -54,6 +60,7 @@ type bucket struct {
 	UID   string  `json:"u"`            // 账号 uid
 	Model string  `json:"m"`            // 上游裸模型名
 	Rate  string  `json:"x,omitempty"`  // 请求时生效积分倍率（规范化数值；旧桶为空）
+	Key   string  `json:"k,omitempty"`  // 请求带的密钥：客户端密钥的 id、管理员密钥 admin；没开鉴权和旧桶为空
 	Req   int64   `json:"q"`            // 请求数（含失败）
 	Err   int64   `json:"e"`            // 失败数
 	PT    int64   `json:"p"`            // prompt tokens
@@ -84,6 +91,8 @@ type Recorder struct {
 	buckets map[string]*bucket // key: scope|realm|uid|model|rate
 	dirty   bool
 	started time.Time
+	// retentionDays 保留天数，0 = 永久保留（见 SetRetentionDays）。
+	retentionDays int
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -125,6 +134,7 @@ func (r *Recorder) Start() {
 				if n > maxBuckets {
 					r.Rollup(time.Now())
 				}
+				r.pruneExpired(time.Now())
 				r.flush(false)
 			}
 		}
@@ -149,13 +159,24 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
+	// Key 请求带的密钥（见 bucket.Key），空 = 没开鉴权。
+	Key string
+}
+
+// bucketKey 桶在内存里的键。没有密钥的桶（没开鉴权、旧数据）键和加密钥维度之前一样。
+func bucketKey(scope, realm, uid, model, rate, key string) string {
+	k := scope + "|" + realm + "|" + uid + "|" + model + "|" + rate
+	if key != "" {
+		k += "|" + key
+	}
+	return k
 }
 
 // Add 记录一次请求尝试。
@@ -173,14 +194,14 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		model = "(unknown)"
 	}
 	scope := "h:" + now.Format(hourLayout)
-	key := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate
+	key := bucketKey(scope, realm, uid, model, d.ModelRate, d.Key)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	b := r.buckets[key]
 	if b == nil {
-		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate}
+		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate, Key: d.Key}
 		r.buckets[key] = b
 	}
 	b.Req++
@@ -247,7 +268,7 @@ func (r *Recorder) Rollup(now time.Time) {
 			continue
 		}
 		day := "d:" + ts.Format(dayLayout)
-		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate})
+		moves = append(moves, move{from: k, to: bucketKey(day, b.Realm, b.UID, b.Model, b.Rate, b.Key)})
 	}
 	for _, m := range moves {
 		src := r.buckets[m.from]
@@ -300,20 +321,20 @@ func (r *Recorder) load() error {
 	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]
-		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
+		r.buckets[bucketKey(b.Scope, b.Realm, b.UID, b.Model, b.Rate, b.Key)] = &b
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
 }
 
-func (r *Recorder) flush(force bool) {
+func (r *Recorder) flush(force bool) error {
 	if r == nil || r.path == "" {
-		return
+		return nil
 	}
 	r.mu.Lock()
 	if !r.dirty && !force {
 		r.mu.Unlock()
-		return
+		return nil
 	}
 	snap := file{Version: fileVersion, Saved: time.Now().Format(time.RFC3339), Buckets: make([]bucket, 0, len(r.buckets))}
 	for _, b := range r.buckets {
@@ -325,20 +346,107 @@ func (r *Recorder) flush(force bool) {
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		log.Printf("[usage] 序列化失败: %v", err)
-		return
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
 		log.Printf("[usage] 建目录失败: %v", err)
-		return
+		return err
 	}
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		log.Printf("[usage] 写临时文件失败: %v", err)
-		return
+		return err
 	}
 	if err := os.Rename(tmp, r.path); err != nil {
 		log.Printf("[usage] 原子替换失败: %v", err)
+		return err
 	}
+	return nil
+}
+
+// ---------------------------------------------------------------- 留存 ----
+
+// SetRetentionDays 设保留天数：整段早于这么多天的用量桶删掉；0 = 永久保留（缺省），负数当 0。
+// 面板保存配置即生效，马上按新天数清一次。
+func (r *Recorder) SetRetentionDays(days int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.retentionDays = max(days, 0)
+	r.mu.Unlock()
+	r.pruneExpired(time.Now())
+}
+
+// pruneExpired 删掉整段早于保留天数的用量桶：小时桶到这一小时结束、日桶到次日零点才算整段过去；
+// 保留天数为 0 时不删。
+func (r *Recorder) pruneExpired(now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.retentionDays <= 0 {
+		return
+	}
+	cutoff := now.AddDate(0, 0, -r.retentionDays)
+	for k, b := range r.buckets {
+		start, ok := bucketTime(b.Scope)
+		if !ok {
+			continue
+		}
+		end := start.AddDate(0, 0, 1)
+		if strings.HasPrefix(b.Scope, "h:") {
+			end = start.Add(time.Hour)
+		}
+		if !end.After(cutoff) {
+			delete(r.buckets, k)
+			r.dirty = true
+		}
+	}
+}
+
+// StoreStats 用量统计的存储状态（面板「日志留存」显示）。
+type StoreStats struct {
+	RetentionDays int   `json:"retention_days"`
+	Buckets       int   `json:"buckets"`
+	Bytes         int64 `json:"bytes"` // usage.json 的大小
+	// OldestDay 最早那个用量桶的日期（YYYY-MM-DD），没有数据时为空。
+	OldestDay string `json:"oldest_day,omitempty"`
+}
+
+// StoreStats 返回保留天数、桶数、usage.json 大小和最早那个桶的日期。
+func (r *Recorder) StoreStats() StoreStats {
+	if r == nil {
+		return StoreStats{}
+	}
+	r.mu.Lock()
+	st := StoreStats{RetentionDays: r.retentionDays, Buckets: len(r.buckets)}
+	var oldest time.Time
+	for _, b := range r.buckets {
+		if t, ok := bucketTime(b.Scope); ok && (oldest.IsZero() || t.Before(oldest)) {
+			oldest = t
+		}
+	}
+	r.mu.Unlock()
+	if !oldest.IsZero() {
+		st.OldestDay = oldest.Format(dayLayout)
+	}
+	if r.path != "" {
+		if fi, err := os.Stat(r.path); err == nil {
+			st.Bytes = fi.Size()
+		}
+	}
+	return st
+}
+
+// Clear 清空全部用量明细并马上落盘：用量页从零开始。客户端密钥的每天、总量限额另有计数，不受影响。
+func (r *Recorder) Clear() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	r.buckets = make(map[string]*bucket)
+	r.dirty = true
+	r.mu.Unlock()
+	return r.flush(true)
 }
 
 // Save 立即落盘（面板「刷新」或关闭前调用）。
@@ -470,6 +578,7 @@ type Snapshot struct {
 	ByRealm         []KeyedAgg  `json:"by_realm"`
 	ByAccount       []KeyedAgg  `json:"by_account"`
 	ByModel         []KeyedAgg  `json:"by_model"`
+	ByKey           []KeyedAgg  `json:"by_key"` // 按密钥：Key 是 bucket.Key（空串 = 没开鉴权或旧数据），名字由面板补进 Extra
 	Series          []Point     `json:"series"`
 	CreditByAccount []CreditAgg `json:"credit_by_account"`
 	CreditByModel   []CreditAgg `json:"credit_by_model"`
@@ -496,6 +605,9 @@ type Window struct {
 	Hours int
 	From  time.Time
 	To    time.Time
+	// Key 只统计这个密钥（bucket.Key 的值，空串 = 没开鉴权和旧数据）；KeySet=false 时不按密钥筛。
+	Key    string
+	KeySet bool
 }
 
 // bounds 解析出实际生效的 [from, to]；零值表示该侧不设界。
@@ -570,6 +682,7 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	acctAgg := map[string]*aggAcc{}
 	acctRealm := map[string]string{}
 	modelAgg := map[string]*aggAcc{}
+	keyAgg := map[string]*aggAcc{}
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
 	creditAcctAgg := map[string]*creditAcc{}
@@ -598,6 +711,9 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 				continue
 			}
 		}
+		if w.KeySet && b.Key != w.Key {
+			continue
+		}
 		matched++
 		total.add(b)
 
@@ -620,6 +736,11 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			modelAgg[b.Model] = &aggAcc{}
 		}
 		modelAgg[b.Model].add(b)
+
+		if keyAgg[b.Key] == nil {
+			keyAgg[b.Key] = &aggAcc{}
+		}
+		keyAgg[b.Key].add(b)
 
 		if strings.HasPrefix(b.Scope, "h:") {
 			scope := strings.TrimPrefix(b.Scope, "h:")
@@ -676,6 +797,7 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 			return k, nicks[k]
 		}),
 		ByModel:         keyed(modelAgg, func(k string) (string, string) { return k, "" }),
+		ByKey:           keyed(keyAgg, func(k string) (string, string) { return k, "" }),
 		CreditByAccount: creditKeyed(creditAcctAgg),
 		CreditByModel:   creditKeyed(creditModelAgg),
 		Buckets:         matched,

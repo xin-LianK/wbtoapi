@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // config.go 加载 JSON 配置 + 环境变量覆盖。
 package main
 
@@ -6,12 +10,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -24,21 +30,33 @@ type Config struct {
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
-	// DNSServers 出站解析用的 DNS 服务器（空 = 系统解析器）；也可用 WB2A_DNS 覆盖。
-	// Android/magisk 模块里没有 /etc/resolv.conf，必须显式指定，否则解析全落本机 :53。
+	// DNSServers 出站解析只问这几台 DNS 服务器（IP 或 IP:端口，没写端口用 53），按顺序试；空 = 系统解析器。
+	// 用在没有 /etc/resolv.conf 的环境（Android、精简容器）。WB2A_DNS（逗号分隔）覆盖。需重启。
 	DNSServers []string `json:"dns_servers,omitempty"`
+
+	// ModelRoutes 模型路由：客户端发来的模型名不在上游目录里时，从上往下找第一条 match
+	// 匹配的规则（只认 * 通配，不区分大小写），改用它的 target。三个对话入口都生效，
+	// 带 cn: / global: 前缀的名字不改；target 可以带前缀。缺省为空（不路由）。热生效。
+	ModelRoutes []livecfg.ModelRoute `json:"model_routes"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
 		PackageDetailLimit int `json:"package_detail_limit"`
+		// UpdateCheck 每 6 小时读取一次 GitHub 上的更新日志，有新版本时面板提醒；缺省 true。
+		// 热生效（经 livecfg 快照）。
+		UpdateCheck bool `json:"update_check"`
 	} `json:"panel"`
 
 	Logging struct {
+		// 日志留存：请求记录、任务日志、系统日志、积分获取各自一个开关、保留天数、容量上限，用量统计只设
+		// 保留天数。保留天数 0 = 永久保留（容量上限照样生效），负值回落默认；容量 <=0 回落默认。
+		// 全部热生效（面板保存配置即生效）。
+
 		// RequestArchiveEnabled 请求元数据 JSONL 归档开关，缺省 true。
 		RequestArchiveEnabled bool `json:"request_archive_enabled"`
-		// RequestRetentionDays 归档保留天数，缺省 7；<=0 回落默认。
+		// RequestRetentionDays 请求归档保留天数，缺省 7。
 		RequestRetentionDays int `json:"request_retention_days"`
-		// RequestArchiveMaxMB 归档总上限（MiB），缺省 100；<=0 回落默认。
+		// RequestArchiveMaxMB 请求归档总上限（MiB），缺省 100。
 		RequestArchiveMaxMB int `json:"request_archive_max_mb"`
 		// RequestClientInfo 是否在请求日志（归档事件 + stdout 流水行 + 面板运行
 		// 日志）里记录调用来源：客户端 IP 与 User-Agent。缺省 true。
@@ -48,6 +66,27 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+
+		// TaskLogEnabled 任务日志（运行日志的任务频道：签到、领奖、任务中心等）落盘留存，缺省 true。
+		TaskLogEnabled bool `json:"task_log_enabled"`
+		// TaskLogRetentionDays 任务日志保留天数，缺省 30。
+		TaskLogRetentionDays int `json:"task_log_retention_days"`
+		// TaskLogMaxMB 任务日志总上限（MiB），缺省 20。和系统日志分开设，免得系统日志把任务日志挤掉。
+		TaskLogMaxMB int `json:"task_log_max_mb"`
+		// SystemLogEnabled 系统日志（运行日志的系统频道：启动、热更新、冷却风控、告警等）落盘留存，缺省 true。
+		SystemLogEnabled bool `json:"system_log_enabled"`
+		// SystemLogRetentionDays 系统日志保留天数，缺省 30。
+		SystemLogRetentionDays int `json:"system_log_retention_days"`
+		// SystemLogMaxMB 系统日志总上限（MiB），缺省 50。
+		SystemLogMaxMB int `json:"system_log_max_mb"`
+		// UsageRetentionDays 用量统计保留天数，缺省 0 = 永久保留。
+		UsageRetentionDays int `json:"usage_retention_days"`
+		// CreditLogEnabled 积分获取流水（签到、领奖、补偿、旅行、新手礼包、连登兑换领到的积分）落盘留存，缺省 true。
+		CreditLogEnabled bool `json:"credit_log_enabled"`
+		// CreditLogRetentionDays 积分获取流水保留天数，缺省 0 = 永久保留（一天也就几十条）。
+		CreditLogRetentionDays int `json:"credit_log_retention_days"`
+		// CreditLogMaxMB 积分获取流水总上限（MiB），缺省 20。
+		CreditLogMaxMB int `json:"credit_log_max_mb"`
 	} `json:"logging"`
 
 	Server struct {
@@ -127,6 +166,11 @@ type Config struct {
 		// 发现直接复用那份数据，因此不产生任何额外上游请求。想立刻看一眼可以
 		// POST /panel/api/tasks/discover 手动触发。
 		TaskDiscoverAutoRun bool `json:"task_discover_autorun"` // 缺省 true；false = 只发现不跑
+
+		// 定时测活：每隔一段时间给整个号在限流冷却、熔断中的号发一条最短的真实对话，测通就提前恢复
+		// （见 scheduler/liveness.go）。余额不足、风控、禁用、暂停选号的号不测。
+		LivenessEnabled bool `json:"liveness_enabled"` // 缺省 true；false = 关闭
+		LivenessMinutes int  `json:"liveness_minutes"` // 缺省 30；<=0 回落 30
 	} `json:"schedule"`
 
 	Global struct {
@@ -158,17 +202,19 @@ type Config struct {
 		HeaderTimeoutSeconds int `json:"header_timeout_seconds"`
 		// IdleTimeoutSeconds 聊天 SSE 流中空闲上限（活跃吐数据续命不掐）；<=0 回落默认 300。
 		IdleTimeoutSeconds int `json:"idle_timeout_seconds"`
-		// UserAgent 出站 User-Agent 显式覆盖（非空时全路径生效，优先于默认三段式）。
-		// 全部出站请求生效：chat/refresh/checkin/balance/report/travel/FetchModels。
-		// 默认值已对齐官方 WorkBuddy 桌面形态（三段式），用户仍可配完全自定义值改写。
+		// UserAgent 出站 User-Agent 显式覆盖：非空时对话、刷新令牌、模型目录、积分、签到、
+		// 成长任务、上报都用它（任务中心的桌面端上报除外）。空 = 按账号域取官方桌面端的 UA：
+		// 内置 CLI 发的请求 `WorkBuddy/<ver> <applicationName>/<ver> CLI/<cli>`，后台服务发的
+		// 请求前两段对调（applicationName 国内版 WorkBuddy、国际版 workbuddy-ai）。
 		UserAgent string `json:"user_agent"`
-		// ClientVersion WorkBuddy 客户端版本段（出站 UA 的 `WorkBuddy/<ver>` 与归属头
-		// X-IDE-Version）。空 = 内置默认（对齐官方 5.5.4 分发包）。
+		// ClientVersion 桌面端版本（UA 的版本段与 X-IDE-Version），两域共用一个值。
+		// 空 = 内置默认：国内版 5.9.3、国际版 5.9.4（官方安装包）。
 		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.161.0）。
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认 2.165.0（两域桌面端内置的 CLI）。
 		CliVersion string `json:"cli_version"`
-		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
+		// ClientName 对话请求的归属头 X-IDE-Name / X-IDE-Type 取值。空 = "WorkBuddy"，同官方
+		// 桌面端（带 X-Agent-Purpose 与 X-IDE-*）；配 "SaaS" 还原旧行为：对话不带这几个头，
+		// 后台服务的请求不设 UA。X-Product 不受影响，固定为官方的 "SaaS"。
 		ClientName string `json:"client_name"`
 		// Profile 出站头形态："desktop"（缺省，WorkBuddy 桌面端 37.x 实测形态）
 		// 或 "legacy"（停更前的 CodeBuddy IDE 5.x 形态，用于回滚对比）。
@@ -177,8 +223,8 @@ type Config struct {
 		IDEVersion string `json:"ide_version"`
 		// Product X-Product 取值，空 = "SaaS"（不是产品名 WorkBuddy）。
 		Product string `json:"product"`
-		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
-		// 每号 auth 文件的 device_token 键优先于本项。
+		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。官方只在签到请求上
+		// 带它，网关同样只在签到（和小程序接口）上带。每号 auth 文件的 device_token 键优先于本项。
 		DeviceToken string `json:"device_token"`
 		// DeviceTokenFile device token 文件路径兜底（宿主落盘的桌面端 token，5 分钟读取缓存）。
 		DeviceTokenFile string `json:"device_token_file"`
@@ -187,6 +233,12 @@ type Config struct {
 		ChatDeviceToken bool `json:"chat_device_token"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// ModelOptimization 允许上游用对话做模型优化（默认 false）：false 时对话一律带
+		// X-Private-Data: true；true 时照官方客户端默认，个人号 false、企业号 true。面板保存即生效。
+		ModelOptimization bool `json:"model_optimization"`
+		// TLSFingerprint 出站是否把 TLS 握手伪装成官方桌面端客户端的 ClientHello（默认 true）。
+		// 键缺席保留 true，显式 false 才关（关掉回落 Go 标准库 TLS，旧行为）。改这项要重启生效。
+		TLSFingerprint bool `json:"tls_fingerprint"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -235,6 +287,9 @@ type Config struct {
 		AccountOrder       pool.RegionAccountOrder `json:"account_order,omitempty"`
 		MaxInFlight        int                     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
 		MaxInFlightGlobal  int                     `json:"max_in_flight_global"` // global 域单账号在途上限（WAF 风控紧域压低并发），0 = 回落默认 2
+		InFlightWait       string                  `json:"in_flight_wait"`       // 能接的号在途都满时请求最多等多久空位，默认 "30s"，"0" = 不等直接 503
+		MaxRPM             int                     `json:"max_rpm"`              // 国内版单号每分钟请求数上限（最近 60 秒），0 = 不限
+		MaxRPMGlobal       int                     `json:"max_rpm_global"`       // 国际版单号每分钟请求数上限，0 = 不限；两档各管各的域
 		BreakerThreshold   int                     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string                  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string                  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
@@ -270,6 +325,8 @@ type Config struct {
 		// 熔断/在途占满，或该域账号对这个模型 11102 后进入模型级负缓存）会自动改用
 		// 另一域再选一次；显式 cn:/global: 前缀不受影响，行为与引入前完全一致。
 		// 语义取舍：跨域会消耗另一个域的额度，属策略选择，故默认关闭、显式开启。
+		// 注意：本项与下方的 cross_realm 是同一能力的两种开关，cross_realm 三档更完整，
+		// 新配置优先用 cross_realm；本项保留用于兼容既有配置（true ≈ cn_first）。
 		CrossDomainFallback bool `json:"cross_domain_fallback"`
 		// StopOnBan 账号被上游**禁用/封禁**时是否立即终止本次请求的轮转（不再换号
 		// 重试），默认 true。
@@ -286,6 +343,19 @@ type Config struct {
 		// 自身历史问题、其余号清白」且更看重单请求成功率时使用。
 		// 改动需重启进程（Handler 装配期读取）。
 		StopOnBan bool `json:"stop_on_ban"`
+		// CrossRealm 跨域负载均衡，三档（见 livecfg.CrossRealm*），默认 "off"：不带前缀的模型名只走国内版。
+		// "merge"：不带 cn: / global: 前缀的模型请求在「模型目录里有这个模型」的各域账号合成的一个池里
+		// 选号，规则不变（实测免费优先，再按积分 / 闲置等权重加权随机）。"cn_first"：两个域都有这个模型时
+		// 国内版优先，国内版此刻没有能接的号才在国际版选。带前缀的照旧只走该域；打开时 /v1/models 同时
+		// 列出不带前缀的模型名。热生效。1.8.0 及以前是布尔，true 读成 "merge"、false 读成 "off"。
+		CrossRealm crossRealmMode `json:"cross_realm"`
+		// 风控波熔断：restriction_wave_window 内同一个域有 restriction_wave_threshold 个号
+		// 被上游 11140「账号存在异常行为」限制，就把该域其余的号暂停 restriction_wave_pause。
+		// 默认 2 个 / "15m" / "30m"（照 workbuddy2api-hub #629 的做法）；阈值 0 = 关闭，
+		// 负值钳 0；两个时长空值或非正值回落默认。热生效。
+		RestrictionWaveThreshold int    `json:"restriction_wave_threshold"`
+		RestrictionWaveWindow    string `json:"restriction_wave_window"`
+		RestrictionWavePause     string `json:"restriction_wave_pause"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -365,9 +435,15 @@ type Config struct {
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
 	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
+	LivenessInterval       time.Duration `json:"-"` // 定时测活间隔；0 = 关闭（liveness_enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
+	// InFlightWaitDur 解析后的排队等空位上限；0 = 不等。
+	InFlightWaitDur time.Duration `json:"-"`
+	// RestrictionWaveWindowDur / RestrictionWavePauseDur 解析后的风控波窗口与暂停时长。
+	RestrictionWaveWindowDur time.Duration `json:"-"`
+	RestrictionWavePauseDur  time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
 	// PacingCfg 解析后的出站节奏参数（零值 = 全关）。
@@ -386,9 +462,18 @@ func Default() *Config {
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
 	c.Panel.PackageDetailLimit = 5
+	c.Panel.UpdateCheck = true
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7
 	c.Logging.RequestArchiveMaxMB = 100
+	c.Logging.TaskLogEnabled = true
+	c.Logging.TaskLogRetentionDays = 30
+	c.Logging.TaskLogMaxMB = 20
+	c.Logging.SystemLogEnabled = true
+	c.Logging.SystemLogRetentionDays = 30
+	c.Logging.SystemLogMaxMB = 50
+	c.Logging.CreditLogEnabled = true
+	c.Logging.CreditLogMaxMB = 20
 	// 缺省 true 靠显式赋值实现（同 Schedule 开关）：JSON 里键缺席时字段保留此值，
 	// 只有显式 false 才关闭来源记录。
 	c.Logging.RequestClientInfo = true
@@ -419,7 +504,11 @@ func Default() *Config {
 	c.Schedule.TaskSweepEnabled = true
 	c.Schedule.TaskSweepMinutes = 15
 	c.Schedule.TaskDiscoverAutoRun = true
+	c.Schedule.LivenessEnabled = true
+	c.Schedule.LivenessMinutes = 30
 	c.Upstream.TimeoutSeconds = 120
+	// TLSFingerprint 缺省 true（伪装官方客户端的 TLS 指纹）；键缺席保留 true，显式 false 才关。
+	c.Upstream.TLSFingerprint = true
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
 	c.Upstream.IdleTimeoutSeconds = 0
@@ -446,6 +535,8 @@ func Default() *Config {
 	c.Pacing.MinIntervalMS = 120
 	c.Pacing.JitterMS = 180
 	c.Pacing.PerMinute = 90
+	// 号都在途占满时排队等空位，默认 30s（参考 sub2api 的 fallback_wait_timeout）；"0" 不等。
+	c.Pool.InFlightWait = "30s"
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
@@ -458,6 +549,9 @@ func Default() *Config {
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
+	c.Pool.RestrictionWaveThreshold = 2
+	c.Pool.RestrictionWaveWindow = "15m"
+	c.Pool.RestrictionWavePause = "30m"
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
@@ -507,13 +601,20 @@ func ParseConfig(raw []byte) (*Config, error) {
 	return ParseConfigInto(raw, Default())
 }
 
+// 测试可替换：随机数失败回退、写配置失败。默认值就是原来的直接调用，行为不变。
+var (
+	randRead        = rand.Read
+	configFileWrite = (*os.File).Write
+	configFileClose = (*os.File).Close
+)
+
 // WriteDefault 在 path 落一份推荐配置（首次运行自动生成，双击即开免手工复制样例）。
 // 值取自 Default()（含超时/熔断/签到排程等推荐值），api_key 用 crypto/rand 随机生成：
 // 安全默认优于示例占位符（listen 绑定 0.0.0.0，空 key 会把网关裸暴露给局域网）。
 // 返回生成的 key 供启动日志透出。已存在时经 O_EXCL 原子拒绝，绝不改写用户配置。
 func WriteDefault(path string) (string, error) {
 	raw := make([]byte, 18)
-	if _, err := rand.Read(raw); err != nil {
+	if _, err := randRead(raw); err != nil {
 		return "", fmt.Errorf("gen api_key: %w", err)
 	}
 	key := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
@@ -535,7 +636,7 @@ func WriteDefault(path string) (string, error) {
 		return "", fmt.Errorf("write config: %w", err)
 	}
 	defer f.Close()
-	if _, err := f.Write(out); err != nil {
+	if _, err := configFileWrite(f, out); err != nil {
 		return "", fmt.Errorf("write config: %w", err)
 	}
 	return key, nil
@@ -553,6 +654,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
 		c.StateFile = v
+	}
+	if v := os.Getenv("WB2A_DNS"); v != "" {
+		c.DNSServers = strings.Split(v, ",")
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
@@ -612,6 +716,16 @@ func applyEnv(c *Config) {
 			c.Upstream.PassthroughIP = b
 		}
 	}
+	if v := os.Getenv("WB2A_MODEL_OPTIMIZATION"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.ModelOptimization = b
+		}
+	}
+	if v := os.Getenv("WB2A_TLS_FINGERPRINT"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.TLSFingerprint = b
+		}
+	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
@@ -666,11 +780,33 @@ func (c *Config) normalize() error {
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}
-	if c.Logging.RequestRetentionDays <= 0 {
-		c.Logging.RequestRetentionDays = 7
+	// 日志留存：保留天数 0 = 永久，负值回落默认；容量 <=0 回落默认。
+	for _, d := range []struct {
+		days *int
+		def  int
+	}{
+		{&c.Logging.RequestRetentionDays, 7},
+		{&c.Logging.TaskLogRetentionDays, 30},
+		{&c.Logging.SystemLogRetentionDays, 30},
+		{&c.Logging.UsageRetentionDays, 0},
+		{&c.Logging.CreditLogRetentionDays, 0},
+	} {
+		if *d.days < 0 {
+			*d.days = d.def
+		}
 	}
-	if c.Logging.RequestArchiveMaxMB <= 0 {
-		c.Logging.RequestArchiveMaxMB = 100
+	for _, m := range []struct {
+		mb  *int
+		def int
+	}{
+		{&c.Logging.RequestArchiveMaxMB, 100},
+		{&c.Logging.TaskLogMaxMB, 20},
+		{&c.Logging.SystemLogMaxMB, 50},
+		{&c.Logging.CreditLogMaxMB, 20},
+	} {
+		if *m.mb <= 0 {
+			*m.mb = m.def
+		}
 	}
 	// 入站读取上限（issue #100）：空值回落默认 300s；"0" 合法（不限制）；
 	// 负值无语义，fail fast（静默钳 0 会把保护悄悄关掉）。
@@ -733,6 +869,28 @@ func (c *Config) normalize() error {
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
 	}
+	// 排队等空位：空值回落默认 30s，"0" 是合法值（不等，选不到号直接 503），负值钳 0。
+	if c.Pool.InFlightWait == "" {
+		c.Pool.InFlightWait = "30s"
+	}
+	if c.InFlightWaitDur, err = time.ParseDuration(c.Pool.InFlightWait); err != nil {
+		return fmt.Errorf("pool.in_flight_wait: %w", err)
+	}
+	if c.InFlightWaitDur < 0 {
+		c.InFlightWaitDur = 0
+	}
+	// 风控波：阈值 0 是合法值（关闭），负值钳 0；时长 0 没有合理语义，空值或非正值回落默认。
+	if c.Pool.RestrictionWaveThreshold < 0 {
+		c.Pool.RestrictionWaveThreshold = 0
+	}
+	if c.RestrictionWaveWindowDur, err = parseDurationOr(c.Pool.RestrictionWaveWindow, "15m"); err != nil {
+		return fmt.Errorf("pool.restriction_wave_window: %w", err)
+	}
+	if c.RestrictionWavePauseDur, err = parseDurationOr(c.Pool.RestrictionWavePause, "30m"); err != nil {
+		return fmt.Errorf("pool.restriction_wave_pause: %w", err)
+	}
+	// 每号每分钟请求数上限：0 是合法默认（不限），负值钳 0。
+	c.Pool.MaxRPM, c.Pool.MaxRPMGlobal = max(c.Pool.MaxRPM, 0), max(c.Pool.MaxRPMGlobal, 0)
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
@@ -741,14 +899,10 @@ func (c *Config) normalize() error {
 		c.Pool.BreakerThreshold = 3
 	}
 	// 连败降权参数缺省归一（非法/未设置回落默认，与 breaker_threshold 同风格）。
+	// degrade_cooldown / degrade_cooldown_max 的默认值由 Default() 给出，显式写 "" 在上面
+	// 解析时报错（与 breaker_cooldown 一致），这里不再回落。
 	if c.Pool.DegradeThreshold <= 0 {
 		c.Pool.DegradeThreshold = 5
-	}
-	if c.Pool.DegradeCooldown == "" {
-		c.Pool.DegradeCooldown = "10m"
-	}
-	if c.Pool.DegradeCooldownMax == "" {
-		c.Pool.DegradeCooldownMax = "2h"
 	}
 	// global 在途分档：0/负数视为未设置回落默认 2（WAF 403 修复 P1-1）。
 	if c.Pool.MaxInFlightGlobal <= 0 {
@@ -828,6 +982,13 @@ func (c *Config) normalize() error {
 		}
 		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
 	}
+	// 定时测活同理：启用时 minutes<=0 回落默认 30；关闭时 interval 保持 0。
+	if c.Schedule.LivenessEnabled {
+		if c.Schedule.LivenessMinutes <= 0 {
+			c.Schedule.LivenessMinutes = 30
+		}
+		c.LivenessInterval = time.Duration(c.Schedule.LivenessMinutes) * time.Minute
+	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
@@ -854,7 +1015,93 @@ func (c *Config) normalize() error {
 	if c.Update.CheckHours <= 0 {
 		c.Update.CheckHours = 12
 	}
+	if err := c.normalizeModelRoutes(); err != nil {
+		return err
+	}
+	if err := c.normalizeDNSServers(); err != nil {
+		return err
+	}
+	switch c.Pool.CrossRealm {
+	case "":
+		c.Pool.CrossRealm = livecfg.CrossRealmOff
+	case livecfg.CrossRealmOff, livecfg.CrossRealmMerge, livecfg.CrossRealmCNFirst:
+	default:
+		return fmt.Errorf("pool.cross_realm 只能是 off、merge、cn_first，不认 %q", string(c.Pool.CrossRealm))
+	}
 	return c.normalizePrompt()
+}
+
+// crossRealmMode pool.cross_realm 的取值。老配置是布尔：true 读成 "merge"、false 读成 "off"。
+type crossRealmMode string
+
+func (m *crossRealmMode) UnmarshalJSON(b []byte) error {
+	var on bool
+	if json.Unmarshal(b, &on) == nil {
+		*m = livecfg.CrossRealmOff
+		if on {
+			*m = livecfg.CrossRealmMerge
+		}
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("pool.cross_realm 只能是 \"off\"、\"merge\"、\"cn_first\" 或老写法 true、false，不认 %s", b)
+	}
+	*m = crossRealmMode(s)
+	return nil
+}
+
+// normalizeModelRoutes 去掉两端空白并校验：match、target 都不能为空，target 不能带通配。
+// parseDurationOr 解析时长；空值或非正值用 def（def 须是合法时长）。
+func parseDurationOr(s, def string) (time.Duration, error) {
+	if s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return 0, err
+		}
+		if d > 0 {
+			return d, nil
+		}
+	}
+	return time.ParseDuration(def)
+}
+
+// normalizeDNSServers 去掉两端空白和空项，每项必须是 IP 或 IP:端口：写域名的话解析它又得先有 DNS。
+func (c *Config) normalizeDNSServers() error {
+	out := c.DNSServers[:0]
+	for _, s := range c.DNSServers {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		host := s
+		if h, port, err := net.SplitHostPort(s); err == nil {
+			if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("dns_servers: %q 的端口不对", s)
+			}
+			host = h
+		}
+		if net.ParseIP(host) == nil {
+			return fmt.Errorf("dns_servers: %q 不是 IP 或 IP:端口", s)
+		}
+		out = append(out, s)
+	}
+	c.DNSServers = out
+	return nil
+}
+
+func (c *Config) normalizeModelRoutes() error {
+	for i := range c.ModelRoutes {
+		rt := &c.ModelRoutes[i]
+		rt.Match, rt.Target = strings.TrimSpace(rt.Match), strings.TrimSpace(rt.Target)
+		if rt.Match == "" || rt.Target == "" {
+			return fmt.Errorf("model_routes[%d]: match 和 target 都不能为空", i)
+		}
+		if strings.Contains(rt.Target, "*") {
+			return fmt.Errorf("model_routes[%d]: target %q 不能带 *", i, rt.Target)
+		}
+	}
+	return nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // notify_backup.go 面板侧的告警测试与备份操作接口。
 //
 // 都只做「触发 + 如实回报结果」，不做任何自动补救：备份失败时要让用户看到真实

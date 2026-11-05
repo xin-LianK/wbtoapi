@@ -1,5 +1,14 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.23-alpine AS build
+# 面板前端：产物是纯静态文件、与目标平台无关，固定在构建机原生平台上构建
+#（若以后要构建其他架构的镜像，Node 这一步也不必在模拟器里跑）。npm run build 含类型检查、ESLint 与单元测试。
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 # 防止因为直接使用官方源导致下载失败
@@ -7,6 +16,8 @@ RUN go env -w GOPROXY=https://goproxy.cn,direct && \
     go env GOPROXY && \
     go mod download
 COPY . .
+# 前端产物放进 go:embed 目录（构建上下文里的 internal/panel/dist 已被 .dockerignore 排除）
+COPY --from=web /src/internal/panel/dist/ internal/panel/dist/
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
@@ -28,9 +39,9 @@ COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
 COPY login.sh signin.sh credit.sh /app/
 COPY scripts/probe_active.py /app/scripts/probe_active.py
+# 许可证随程序一起分发（AGPL-3.0 与附加条款）
+COPY LICENSE NOTICE /app/
 RUN sed -i 's/\r$//' /app/login.sh /app/signin.sh /app/credit.sh && chmod 755 /app/login.sh /app/signin.sh /app/credit.sh
-# 镜像不带真实配置：落 example 作为默认（生产由挂载卷 /app/config.json 覆盖）
-COPY config.example.json /app/config.json
 USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \

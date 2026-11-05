@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // checkin_retry_test.go 钉住签到/余额维护类计费调用的瞬时错误有界重试：
 // 上游 5xx（实测偶发 code 10000 / http 500）与网络抖动重试，业务错误（已签到/
 // 参数错）不重试——重试只会原样再失败一次。
@@ -6,7 +10,6 @@ package upstream
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,11 +25,21 @@ func shortBillingRetry(t *testing.T) {
 	t.Cleanup(func() { billingRetryDelay = old })
 }
 
+// checkinClient 签到状态固定回「活动进行中、今天未签」，其余请求交给 fn（只数签到本身）。
+func checkinClient(fn func(r *http.Request) (*http.Response, error)) *Client {
+	return testClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == checkinStatusPath {
+			return jsonResp(200, `{"code":0,"data":{"active":true,"today_checked_in":false}}`), nil
+		}
+		return fn(r)
+	})
+}
+
 func TestDailyCheckinRetriesTransient500(t *testing.T) {
 	shortBillingRetry(t)
 	var calls int32
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/daily-checkin") {
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != dailyCheckinPath {
 			return nil, errors.New("wrong path")
 		}
 		if atomic.AddInt32(&calls, 1) == 1 {
@@ -45,7 +58,7 @@ func TestDailyCheckinRetriesTransient500(t *testing.T) {
 func TestDailyCheckinRetriesExhausted(t *testing.T) {
 	shortBillingRetry(t)
 	var calls int32
-	c := testClient(func(r *http.Request) (*http.Response, error) {
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
 		atomic.AddInt32(&calls, 1)
 		return jsonResp(500, `{"code":10000,"msg":"API request failed with status code: 500"}`), nil
 	})
@@ -61,7 +74,7 @@ func TestDailyCheckinRetriesExhausted(t *testing.T) {
 func TestDailyCheckinNoRetryOnBusinessError(t *testing.T) {
 	shortBillingRetry(t)
 	var calls int32
-	c := testClient(func(r *http.Request) (*http.Response, error) {
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
 		atomic.AddInt32(&calls, 1)
 		// 「今天已签到」是业务幂等拒绝（code!=0），重试无意义。
 		return jsonResp(200, `{"code":14001,"msg":"今日已签到"}`), nil
@@ -78,7 +91,7 @@ func TestDailyCheckinNoRetryOnBusinessError(t *testing.T) {
 func TestDailyCheckinNoRetryOn4xx(t *testing.T) {
 	shortBillingRetry(t)
 	var calls int32
-	c := testClient(func(r *http.Request) (*http.Response, error) {
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
 		atomic.AddInt32(&calls, 1)
 		return jsonResp(403, `{"code":11140,"msg":"request illegal"}`), nil
 	})
@@ -94,15 +107,19 @@ func TestUserResourceDetailedRetriesTransient500(t *testing.T) {
 	shortBillingRetry(t)
 	var calls int32
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
+		switch r.URL.Path {
+		case resourceSummaryPath:
+			return jsonResp(200, `{"code":0,"data":{"Packages":[{"CycleTotalCapacity":"100","CycleRemainCapacity":"60"}]}}`), nil
+		case resourcePaidPath:
+			return jsonResp(200, resourceList()), nil
+		case resourceFreePath:
+		default:
 			return nil, errors.New("wrong path")
 		}
 		if atomic.AddInt32(&calls, 1) == 1 {
 			return jsonResp(500, `{"code":10000,"msg":"API request failed with status code: 500"}`), nil
 		}
-		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[
-			{"PackageName":"p","CapacitySize":100,"CapacityRemain":60}
-		]}}}}`), nil
+		return jsonResp(200, resourceList(`{"PackageName":"p","CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"60"}`)), nil
 	})
 	remain, _, _, _, _, err := c.UserResourceDetailedWithExpiry(&auth.Auth{AccessToken: "at"}, 0)
 	if err != nil || remain != 60 {

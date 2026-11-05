@@ -1,19 +1,26 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package session 会话粘性路由：同一会话（conversationId / metadata 键）尽量绑定同一账号。
 //
 // 设计参考 antigravityProxyGo internal/session（fast-path RLock / 双段分配 / TTL / 持久化），
 // 但改为纯内存 + redisstore 异步镜像：
 //   - 命中走 RLock 快查（绝大多数请求已绑定）；
 //   - 未命中/失效走写锁 re-check 后分配，避免同 key 并发重复分配（TOCTOU 防护）；
-//   - 分配优先"空闲账号"（未绑定任何会话的可用号）哈希，其次全池哈希（双段策略）；
+//   - 分配先回到这段对话最近成功用过的号（见 warmEntry），没有再优先"空闲账号"（未绑定任何
+//     会话的可用号）哈希，其次全池哈希（双段策略）；
 //   - LastActive 滚动续期，TTL 过期由后台 GC 或快路径惰性过期清理；
 //   - 每次绑定变更 fire-and-forget 镜像到 redisstore（防重启丢粘性）。
 package session
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +34,24 @@ type entry struct {
 	lastActive time.Time
 }
 
+// warmEntry 一段对话最近成功用过的号，最近的在前（issue #2）。有的模型的前缀缓存按号存
+// （deepseek，见 docs/official-client.md），绑定过期（闲置超过 TTL）、绑定的号这次用不了、
+// 网关重启后，先回到这些号：上面留着这段对话的前缀缓存。思路参考 workbuddy2api-hub 按会话记录
+// 用过的号（affinity），见 README 致谢。
+type warmEntry struct {
+	uids []string
+	last time.Time
+}
+
+const (
+	// warmMax 每段对话记几个用过的号。
+	warmMax = 3
+	// warmTTL 用过的号在最后一次成功后记多久，同会话 id 记录（convIDTTL）。
+	warmTTL = convIDTTL
+	// warmKeysMax 最多记多少段对话，超了先清过期的，再清最久没用的，降到九成。
+	warmKeysMax = 20000
+)
+
 // Config 路由依赖；Available 返回"可用账号"（healthy 且未占满在途）的有序 uid 列表，
 // 由 pool.AvailableUIDs 提供。Store 可为 redisstore.Noop（纯内存）。
 type Config struct {
@@ -34,21 +59,33 @@ type Config struct {
 	GCInterval time.Duration
 	Store      redisstore.Store
 	Available  func() []string
-	// AvailableForModel 按请求模型返回"在该模型上可用"的账号（healthy 且未占满在途，
-	// 且未被该模型限流/限额）。nil 时回落 Available（无模型维度，行为与引入前一致）。
+	// AvailableForModel 按请求的裸模型名与域返回"在该模型上可用"的账号（healthy 且未占满在途，
+	// 且未被该模型限流/限额）；realm 为 "" 表示两域合池（跨域负载均衡）。
+	// nil 时回落 Available（无模型维度，行为与引入前一致）。
 	//
 	// 为什么粘性需要模型维度：绑定只记 uid，而同一个会话可能换模型。账号被 6004
 	// 模型级限额后对**其他模型**仍可用（issue #31 豁免），此时若只按账号级可用性
 	// 校验，会话会被钉在这个号上反复失败——正是"限额后换不动号"的观感来源。
-	AvailableForModel func(model string) []string
+	// 域由调用方（handler）按前缀与跨域开关定好再传入，这里不再自己解析模型名。skip 里的号不算
+	// （客户端密钥绑了分组时，组外的号）；只返回优先级最高的那一层（见 pool.servableEntriesLocked）。
+	AvailableForModel func(model, realm string, skip map[string]bool) []string
+	// AssignableForModel 新会话（或绑定失效后重新分配）挑号的候选，在 AvailableForModel 之上
+	// 再按成本分层只留最便宜那一层（pool.CheapestWeightedUIDsForModelRealm）。只用于分配，
+	// 已绑定会话的续用仍按 AvailableForModel 校验，免得免费号一出现就把会话全挪走。
+	// nil 时分配也用 AvailableForModel。
+	AssignableForModel func(model, realm string, skip map[string]bool) []string
 }
 
 // Router 会话粘性路由器。
 type Router struct {
 	mu      sync.RWMutex
 	entries map[string]entry
-	cfg     Config
-	stop    chan struct{}
+	// warm 会话键的 sha256 → 这段对话最近成功用过的号；warmDirty 有没存盘的改动（见 persist.go）。
+	warm      map[[32]byte]warmEntry
+	warmDirty bool
+	cfg       Config
+	stop      chan struct{}
+	done      chan struct{} // GC goroutine 退出时关闭，StopGC 等它
 }
 
 // New 构建路由器。若 cfg.Store 为 nil 则用 Noop（纯内存）；cfg.Available 为 nil 视为空池。
@@ -63,7 +100,7 @@ func New(cfg Config) *Router {
 	if cfg.GCInterval <= 0 {
 		cfg.GCInterval = 5 * time.Minute
 	}
-	return &Router{entries: map[string]entry{}, cfg: cfg}
+	return &Router{entries: map[string]entry{}, warm: map[[32]byte]warmEntry{}, cfg: cfg}
 }
 
 // StartGC 启动后台 GC goroutine（幂等）。进程退出时调 StopGC。
@@ -80,11 +117,12 @@ func (r *Router) StartGC() {
 		r.mu.Unlock()
 		return
 	}
-	stop := make(chan struct{})
-	r.stop = stop
+	stop, done := make(chan struct{}), make(chan struct{})
+	r.stop, r.done = stop, done
 	r.mu.Unlock()
 
 	go func() {
+		defer close(done)
 		t := time.NewTicker(r.cfg.GCInterval)
 		defer t.Stop()
 		for {
@@ -98,14 +136,19 @@ func (r *Router) StartGC() {
 	}()
 }
 
-// StopGC 停止后台 GC（幂等）。
+// StopGC 停止后台 GC（幂等），等 GC goroutine 退出才返回，返回后不会再清理。
+// select 在 stop 和 ticker 同时就绪时随机选，只关 stop 不等的话还可能再跑一轮 gcOnce。
+// 要放开锁再等：gcOnce 自己要拿 r.mu。
 func (r *Router) StopGC() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.stop != nil {
-		close(r.stop)
-		r.stop = nil
+	stop, done := r.stop, r.done
+	r.stop, r.done = nil, nil
+	r.mu.Unlock()
+	if stop == nil {
+		return
 	}
+	close(stop)
+	<-done
 }
 
 // LoadFromStore 启动时从 redisstore 恢复绑定（内存覆盖本地，读操作仅此处发生）。
@@ -132,37 +175,21 @@ func (r *Router) LoadFromStore() {
 }
 
 // Resolve 返回会话 key 应绑定的账号 uid，ok=false 表示当前无可用账号。
-// 无模型维度（等价于 ResolveForModel(key, "")），保留给不关心模型的调用方。
+// 无模型、无域维度（等价于 ResolveForModel(key, "", "")），保留给不关心模型的调用方。
 func (r *Router) Resolve(key string) (string, bool) {
-	return r.ResolveForModel(key, "")
+	return r.ResolveForModel(key, "", "", nil)
 }
 
-// LookupForModel 只复用已有有效绑定，不通过哈希为新会话分配账号。
-// 有序账号池策略用它保留粘性，未绑定会话由 Pool 选号并在成功后 Bind。
-func (r *Router) LookupForModel(key, model string) (string, bool) {
-	now := time.Now()
-	available := r.availableSet(model)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, found := r.entries[key]
-	if !found || expired(e, now, r.cfg.TTL) || !available[e.uid] {
-		return "", false
-	}
-	r.entries[key] = entry{uid: e.uid, lastActive: now}
-	r.cfg.Store.SetBind(key, e.uid, r.cfg.TTL)
-	return e.uid, true
-}
-
-// ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
-// 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
-// 被该模型限流）走重新分配。
+// ResolveForModel 返回会话 key 在该模型（裸名）与域上应绑定的账号 uid；realm 为 "" 即两域合池，skip 里的号
+// 不用（客户端密钥绑了分组时，组外的号）。命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/
+// 占满/被该模型限流/不在此刻最高的优先级层）走重新分配。
 //
 // 为什么必须带模型：绑定只记 uid，同一个会话可能换模型；账号被 6004 模型级限额后
 // 对其他模型仍可用（见 pool.healthyForModel 的 softRateModel 豁免）。若只按账号级
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
-func (r *Router) ResolveForModel(key, model string) (string, bool) {
+func (r *Router) ResolveForModel(key, model, realm string, skip map[string]bool) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
+	available := r.availableSet(model, realm, skip)
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
@@ -189,7 +216,15 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice(model)
+	// 先回到这段对话用过的号（最近的优先）：按 AvailableForModel 校验、不按成本分层筛，
+	// 同已绑定会话的续用——换到更便宜的号就丢了这段对话的前缀缓存。
+	if uid := r.warmPickLocked(key, available, now); uid != "" {
+		r.entries[key] = entry{uid: uid, lastActive: now}
+		r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+		return uid, true
+	}
+
+	uids := r.assignableSlice(model, realm, skip)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -230,7 +265,8 @@ func (r *Router) touch(key, uid string, now time.Time) {
 
 // Bind 显式把会话 key 绑定到 uid（幂等覆盖旧值），并异步镜像到 redisstore。
 // 供"粘性跟随最终成功号"用：请求成功返回前，把会话重绑到实际成功的账号，让多轮对话下一跳稳定
-// 收敛到"对该会话持续成功的号"（对齐 antigravity 语义）。空 key 直接返回（无会话则不绑）。
+// 收敛到"对该会话持续成功的号"（对齐 antigravity 语义）。同时把 uid 记成这段对话最近用过的号。
+// 空 key 直接返回（无会话则不绑）。
 func (r *Router) Bind(key, uid string) {
 	if key == "" || uid == "" {
 		return
@@ -238,8 +274,67 @@ func (r *Router) Bind(key, uid string) {
 	now := time.Now()
 	r.mu.Lock()
 	r.entries[key] = entry{uid: uid, lastActive: now}
+	r.rememberLocked(key, uid, now)
 	r.mu.Unlock()
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
+}
+
+// rememberLocked 把 uid 排到这段对话用过的号的最前面。只有名单变了或时刻跨了整点才算改动
+// （同 convStore.touchLocked）。
+func (r *Router) rememberLocked(key, uid string, now time.Time) {
+	k := sha256.Sum256([]byte(key))
+	e, ok := r.warm[k]
+	if ok && now.Sub(e.last) >= warmTTL {
+		e = warmEntry{}
+	}
+	if len(e.uids) > 0 && e.uids[0] == uid {
+		if !sameHour(e.last, now) {
+			r.warmDirty = true
+		}
+		e.last = now
+		r.warm[k] = e
+		return
+	}
+	uids := make([]string, 0, warmMax)
+	uids = append(uids, uid)
+	for _, u := range e.uids {
+		if u != uid && len(uids) < warmMax {
+			uids = append(uids, u)
+		}
+	}
+	if !ok && len(r.warm) >= warmKeysMax {
+		evictStale(r.warm, func(e warmEntry) time.Time { return e.last }, now, warmTTL, warmKeysMax)
+	}
+	r.warm[k] = warmEntry{uids: uids, last: now}
+	r.warmDirty = true
+}
+
+// warmPickLocked 这段对话用过的号里，按最近用过的先后挑第一个还在 available 里的；没有返回 ""。
+func (r *Router) warmPickLocked(key string, available map[string]bool, now time.Time) string {
+	e, ok := r.warm[sha256.Sum256([]byte(key))]
+	if !ok || now.Sub(e.last) >= warmTTL {
+		return ""
+	}
+	for _, u := range e.uids {
+		if available[u] {
+			return u
+		}
+	}
+	return ""
+}
+
+// WarmUIDs 这段对话最近成功用过的号（最近的在前），供换号重试时先回到它们。
+func (r *Router) WarmUIDs(key string) []string {
+	if key == "" {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.warm[sha256.Sum256([]byte(key))]
+	if !ok || time.Since(e.last) >= warmTTL {
+		return nil
+	}
+	return slices.Clone(e.uids)
 }
 
 // Unbind 解除会话绑定（请求失败时调用，让该会话下次重新分配）。返回是否存在。
@@ -275,6 +370,11 @@ func (r *Router) gcOnce(now time.Time) int {
 	for _, key := range expiredKeys {
 		delete(r.entries, key)
 	}
+	for k, e := range r.warm {
+		if now.Sub(e.last) >= warmTTL {
+			delete(r.warm, k)
+		}
+	}
 	r.mu.Unlock()
 	for _, key := range expiredKeys {
 		r.cfg.Store.DelBind(key)
@@ -282,9 +382,86 @@ func (r *Router) gcOnce(now time.Time) int {
 	return len(expiredKeys)
 }
 
-// availableSet 把 AvailableForModel(model) 的有序列表转集合（快路径命中校验用）。
-func (r *Router) availableSet(model string) map[string]bool {
-	uids := r.availableSlice(model)
+// warmSnap 存盘的一段对话用过的号。
+type warmSnap struct {
+	K string   `json:"k"` // 会话键的 sha256（base64url）
+	U []string `json:"u"` // 用过的号，最近的在前
+	T int64    `json:"t"` // 最后一次成功（Unix 秒）
+}
+
+// takeWarmDirty 返回用过的号有没有没存盘的改动，并清掉标记。nil 路由器（粘性关闭）恒为 false。
+func (r *Router) takeWarmDirty() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d := r.warmDirty
+	r.warmDirty = false
+	return d
+}
+
+func (r *Router) markWarmDirty() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.warmDirty = true
+	r.mu.Unlock()
+}
+
+// warmSnapshot 没过期的用过的号。nil 路由器返回 nil。
+func (r *Router) warmSnapshot() []warmSnap {
+	if r == nil {
+		return nil
+	}
+	now := time.Now()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]warmSnap, 0, len(r.warm))
+	for k, e := range r.warm {
+		if now.Sub(e.last) >= warmTTL {
+			continue
+		}
+		out = append(out, warmSnap{K: base64.RawURLEncoding.EncodeToString(k[:]), U: slices.Clone(e.uids), T: e.last.Unix()})
+	}
+	return out
+}
+
+// restoreWarm 读回存盘的用过的号：跳过过期和格式不对的，内存里已有的以内存为准。返回读回的条数。
+func (r *Router) restoreWarm(recs []warmSnap) int {
+	if r == nil {
+		return 0
+	}
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rec := range recs {
+		k, ok := decodeKey(rec.K)
+		last := time.Unix(rec.T, 0)
+		if !ok || len(rec.U) == 0 || now.Sub(last) >= warmTTL {
+			continue
+		}
+		if _, exists := r.warm[k]; exists {
+			continue
+		}
+		if len(r.warm) >= warmKeysMax {
+			break
+		}
+		uids := rec.U
+		if len(uids) > warmMax {
+			uids = uids[:warmMax]
+		}
+		r.warm[k] = warmEntry{uids: slices.Clone(uids), last: last}
+		n++
+	}
+	return n
+}
+
+// availableSet 把 AvailableForModel(model, realm, skip) 的有序列表转集合（快路径命中校验用）。
+func (r *Router) availableSet(model, realm string, skip map[string]bool) map[string]bool {
+	uids := r.availableSlice(model, realm, skip)
 	set := make(map[string]bool, len(uids))
 	for _, u := range uids {
 		set[u] = true
@@ -292,10 +469,18 @@ func (r *Router) availableSet(model string) map[string]bool {
 	return set
 }
 
-// availableSlice 安全调用 AvailableForModel；未注入时回落 Available（nil 视空池）。
-func (r *Router) availableSlice(model string) []string {
+// assignableSlice 分配新绑定用的候选：注入了 AssignableForModel 就用它，否则同 availableSlice。
+func (r *Router) assignableSlice(model, realm string, skip map[string]bool) []string {
+	if r.cfg.AssignableForModel != nil {
+		return r.cfg.AssignableForModel(model, realm, skip)
+	}
+	return r.availableSlice(model, realm, skip)
+}
+
+// availableSlice 安全调用 AvailableForModel；未注入时回落 Available（nil 视空池，不看 skip：只有测试不注入）。
+func (r *Router) availableSlice(model, realm string, skip map[string]bool) []string {
 	if r.cfg.AvailableForModel != nil {
-		return r.cfg.AvailableForModel(model)
+		return r.cfg.AvailableForModel(model, realm, skip)
 	}
 	if r.cfg.Available == nil {
 		return nil

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package usage
 
 import (
@@ -351,5 +355,38 @@ func TestCacheTokensPersistRoundtrip(t *testing.T) {
 	snap := r2.Snapshot(0, nil)
 	if snap.CreditByModel[0].CacheHitRate != 75 {
 		t.Fatalf("恢复后 cache_hit_rate=%v want 75", snap.CreditByModel[0].CacheHitRate)
+	}
+}
+
+// TestKeyDimension 密钥维度：同一账号同一模型按密钥分桶，按密钥聚合和筛选；折叠成日桶、落盘读回
+// 都保留密钥；没有密钥的桶（没开鉴权、旧数据）键和以前一样。
+func TestKeyDimension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	r := New(path)
+	old := time.Now().AddDate(0, 0, -100)
+	for _, k := range []string{"ka", "ka", "admin", ""} {
+		r.Add(old, "cn", "u", "m", Delta{TotalTokens: 10, HasTotal: true, Key: k}, true)
+	}
+	r.Add(time.Now(), "cn", "u", "m", Delta{TotalTokens: 1, HasTotal: true, Key: "ka"}, true)
+	if _, ok := r.buckets[bucketKey("h:"+old.Format(hourLayout), "cn", "u", "m", "", "")]; !ok {
+		t.Fatal("没有密钥的桶键应和加密钥维度之前一样")
+	}
+	r.Rollup(time.Now())
+	r.Save()
+
+	r2 := New(path)
+	snap := r2.Snapshot(0, nil)
+	got := map[string]int64{}
+	for _, row := range snap.ByKey {
+		got[row.Key] = row.TotalTokens
+	}
+	if got["ka"] != 21 || got["admin"] != 10 || got[""] != 10 || len(got) != 3 {
+		t.Fatalf("按密钥 = %v", got)
+	}
+	if one := r2.SnapshotWindow(Window{Key: "ka", KeySet: true}, nil, nil); one.Totals.Requests != 3 || one.Totals.TotalTokens != 21 || len(one.ByKey) != 1 {
+		t.Fatalf("只看 ka = %+v", one.Totals)
+	}
+	if none := r2.SnapshotWindow(Window{KeySet: true}, nil, nil); none.Totals.Requests != 1 || none.ByKey[0].Key != "" {
+		t.Fatalf("只看没开鉴权的 = %+v", none.Totals)
 	}
 }

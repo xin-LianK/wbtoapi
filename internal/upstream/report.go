@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // report.go growth 域「对话活跃上报」接口：POST {billingBase}/v2/report。
 // 照抄客户端 chat_request_send 事件形状（含 conversationId/mode/inputLength 等全字段，
 // 勿用最小 3 字段，防上游后续加严）。事件必须带 userId（=账号 uid），缺失则服务端
@@ -9,6 +13,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -35,6 +40,17 @@ func NewEventID() string {
 // 与 travel.go 的 growthJSON 对称（growth 域走 chatBase + BillingHeaders；billing 域走 billingBase）。
 // report/checkin 等 billing 端点共用：请求头统一 BillingHeaders，信封与错误语义同 doJSON。
 func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.RawMessage, error) {
+	return c.billingDo(a, method, path, body, c.BillingHeaders, nil)
+}
+
+// authServiceJSON 同 billingJSON，请求头换成后台服务 AuthService 的那组（authServiceHeaders）：积分查询、
+// 企业用量、签到状态与签到。extra 在它之后逐个调用，补个别接口才带的头（积分的 Accept-Language、签到的
+// X-Device-Token）。
+func (c *Client) authServiceJSON(a *auth.Auth, method, path string, body any, extra ...func(*http.Request)) (json.RawMessage, error) {
+	return c.billingDo(a, method, path, body, c.authServiceHeaders, extra)
+}
+
+func (c *Client) billingDo(a *auth.Auth, method, path string, body any, headers func(*http.Request, *auth.Auth), extra []func(*http.Request)) (json.RawMessage, error) {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -43,32 +59,25 @@ func (c *Client) billingJSON(a *auth.Auth, method, path string, body any) (json.
 		}
 		rdr = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequest(method, c.billingBase(a)+path, rdr)
+	req, err := newAccountRequest(context.Background(), a, method, c.billingBase(a)+path, rdr)
 	if err != nil {
 		return nil, err
 	}
-	c.BillingHeaders(req, a)
+	headers(req, a)
+	for _, f := range extra {
+		f(req)
+	}
 	return c.doJSON(req)
 }
 
-// billingMeterJSON 仅对 /billing/meter 族端点（get-user-resource / daily-checkin）
-// 按 realm 走双路径 fallback：global 先无 /v2 前缀，ErrNotFound 时二次换有 /v2 前缀
-// （上游新旧路径分叉）；cn 单路径（有 /v2）现状不变。仅 global realm 才有多路径。
-func (c *Client) billingMeterJSON(a *auth.Auth, paths []string, method string, body any) (json.RawMessage, error) {
-	var lastErr error
-	for i, path := range paths {
-		data, err := c.billingJSON(a, method, path, body)
-		if err == nil {
-			return data, nil
-		}
-		lastErr = err
-		// 仅 404 换路径（路径不存在才值得 fallback）；其他错误直接返回。
-		var ue *Error
-		if !errors.As(err, &ue) || ue.Kind != ErrNotFound || i == len(paths)-1 {
-			return nil, err
-		}
-	}
-	return nil, lastErr
+// withBillingLanguage 积分包查询才带的 Accept-Language（见 billingAcceptLanguage）。
+func withBillingLanguage(a *auth.Auth) func(*http.Request) {
+	return func(req *http.Request) { req.Header.Set("Accept-Language", billingAcceptLanguage(a)) }
+}
+
+// withDeviceToken 签到才带的 X-Device-Token（官方 AuthService 的 buildHeadersWithTuringToken）。
+func (c *Client) withDeviceToken(a *auth.Auth) func(*http.Request) {
+	return func(req *http.Request) { c.injectDeviceToken(req, a) }
 }
 
 // billingRetryDelay 签到/余额等维护类计费调用瞬时错误重试的间隔基数。
@@ -149,8 +158,8 @@ type chatRequestEvent struct {
 }
 
 // ReportChatActivity 向上游发送一条对话活跃上报（chat_request_send）。
-// conversationID 由调用方生成（官方形态 v4 UUID，NewEventID），无需真实会话——服务端不校验一致性。
-// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时回落 conversationID。
+// conversationID 由调用方生成（NewConversationID，形状同官方会话 id），无需真实会话——服务端不校验一致性。
+// requestID 为本轮请求独立标识（多轮同会话上报时各条不同）；空时新生成一个（NewRequestID）。
 // 错误语义与 doJSON 一致：HTTP 非 2xx / 业务 code != 0 → *Error。
 func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID string) error {
 	return c.ReportChatActivityModel(a, conversationID, requestID, "deepseek-v4-flash", "DeepSeek V4 Flash")
@@ -160,7 +169,7 @@ func (c *Client) ReportChatActivity(a *auth.Auth, conversationID, requestID stri
 // 对齐实际模型（如 Model_chat_GLM5.2 需 requestModelId=glm-5.2 与独立 requestID）。
 func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID, modelID, modelName string) error {
 	if requestID == "" {
-		requestID = conversationID
+		requestID = NewRequestID()
 	}
 	if modelID == "" {
 		modelID = "deepseek-v4-flash"
@@ -168,11 +177,14 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 	if modelName == "" {
 		modelName = modelID
 	}
-	now := time.Now().UnixMilli()
+	// 内置 CLI 的上报服务同样补公共字段（eventFingerprint，sessionId 是 CLI 进程的 id），
+	// 也是攒一批再发，timestamp 与 presentAt 取事件发生的时刻。
+	fp := c.eventFingerprint(a, cliSessionID(a))
+	now, _ := fp["timestamp"].(int64)
 	ev := chatRequestEvent{
 		EventCode:             "chat_request_send",
 		Timestamp:             now,
-		ReportDelay:           0,
+		ReportDelay:           eventReportDelay,
 		Mode:                  "craft",
 		ConversationID:        conversationID,
 		RequestID:             requestID,
@@ -207,7 +219,21 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 		AgentType:             "conversation",
 		UserID:                a.UID,
 	}
-	raw, err := json.Marshal([]chatRequestEvent{ev})
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	m := map[string]any{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return err
+	}
+	// 业务字段优先，公共字段只补没有的。
+	for k, v := range fp {
+		if _, ok := m[k]; !ok {
+			m[k] = v
+		}
+	}
+	raw, err = json.Marshal([]map[string]any{m})
 	if err != nil {
 		return err
 	}

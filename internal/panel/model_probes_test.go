@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package panel
 
 import (
@@ -37,8 +41,8 @@ func TestModelProbesEndpoint(t *testing.T) {
 	}
 	var got struct {
 		Probes    map[string]json.RawMessage `json:"probes"`
-		Exists    bool                        `json:"exists"`
-		UpdatedAt string                      `json:"updated_at"`
+		Exists    bool                       `json:"exists"`
+		UpdatedAt string                     `json:"updated_at"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
@@ -65,7 +69,7 @@ func TestModelProbesEndpoint(t *testing.T) {
 	}
 	var gotEmpty struct {
 		Probes map[string]json.RawMessage `json:"probes"`
-		Exists bool                        `json:"exists"`
+		Exists bool                       `json:"exists"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &gotEmpty); err != nil {
 		t.Fatal(err)

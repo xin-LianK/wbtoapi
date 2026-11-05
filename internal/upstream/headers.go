@@ -1,10 +1,13 @@
-// Package headers 构造三类上游请求头（common / chat / billing / refresh）。
-// 规则来自 docs/api-reference.md §0/§4/§6。
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
+// headers.go 构造上游请求头：对话（ChatHeaders）、桌面端后台服务经请求框架发的请求（BillingHeaders）、
+// 后台服务 AuthService 自己发的积分与签到（authServiceHeaders）、刷新令牌（RefreshHeaders），以及请求
+// 框架的公共形状（frameworkHeaders）。
 package upstream
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strings"
 
@@ -12,89 +15,119 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
+// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy-darwin-arm64-5.9.3、国际版 5.9.4，都内置 CLI
+// @tencent-ai/codebuddy-code 2.165.0）。对话、刷新令牌、模型目录由内置
+// CLI 发；积分、签到、成长任务、旅行、上报由桌面端后台服务发。两者用同一套请求框架，UA 段序不同。
 const (
-	// defaultClientVersion 出站 WorkBuddy 客户端版本段（UA 的 `WorkBuddy/<ver>` 与
-	// X-IDE-Version）。对齐官方 WorkBuddy Desktop 当前分发包版本（5.8.3，
-	// 2026-10-21 由 www.codebuddy.cn/v2/update?platform=workbuddy-win32-x64-user 取得，
-	// 与本机 app.asar 的 package.json version 一致）。
-	// config upstream.client_version 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.8.3"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本。官方取值来自
-	// productManager 下发的 platformVersion（buildVlmGatewayHeaders 的 cliVersion）。
-	// 5.8.3 安装包内嵌的 CLI 为 @tencent-ai/codebuddy-code 2.161.0
-	// （resources/app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs 内 customPackage.version）。
-	// config upstream.cli_version 可覆盖（空 = 内置默认），实测到新值优先改配置。
-	defaultCliVersion = "2.161.0"
-
-	originRefererCN     = "https://www.codebuddy.cn"
-	originRefererGlobal = "https://www.workbuddy.ai"
+	// defaultClientVersionCN / defaultClientVersionGlobal 两域桌面端版本（UA 与 X-IDE-Version）。
+	// config upstream.client_version 可覆盖（两域共用一个值，空 = 内置默认）。
+	defaultClientVersionCN     = "5.9.3"
+	defaultClientVersionGlobal = "5.9.4"
+	// defaultCliVersionCN / defaultCliVersionGlobal 两域桌面端内置 CLI 的版本（UA 的 `CLI/<ver>` 段）。
+	// config upstream.cli_version 可覆盖（两域共用一个值，空 = 内置默认）。
+	defaultCliVersionCN     = "2.165.0"
+	defaultCliVersionGlobal = "2.165.0"
+	// deploymentType 两域 product.json 的 deploymentType。官方请求框架的 ProductEndpointHttpInterceptor
+	// 把它作为 X-Product 加到经过框架的每个请求上（对话、刷新令牌、模型目录、积分等都在内）。
+	deploymentType = "SaaS"
+	// X-Stainless-* 的固定取值依据：内置 CLI 的对话经 OpenAI SDK（@openai 的 JS 版）发出，SDK 的
+	// buildHeaders 给每个请求加这组头（见 cli/dist/lazy-lite-wb/3043.*.mjs，2.161.0 与 2.165.0 是同一份），
+	// axiosToFetchAdapter 把 SDK 的头原样交给出站（只删 authorization 与 user-agent）。
+	//   - stainlessPackageVersion：SDK 版本（X-Stainless-Package-Version），两域内置 CLI 同为 6.25.0。
+	//   - stainlessTimeout：X-Stainless-Timeout，SDK 取客户端 timeout（桌面端 resolveRequestTimeoutMs
+	//     默认 1200000ms，未设 CODEBUDDY_FIRST_TOKEN_TIMEOUT_MS）/1000 = 1200。
+	//   - stainlessRetryCount：X-Stainless-Retry-Count 是当前重试计数；桌面端 maxRetries=0，只发一次，恒 0。
+	stainlessPackageVersion = "6.25.0"
+	stainlessTimeout        = "1200"
+	stainlessRetryCount     = "0"
+	// nodeRuntimeVersionCN / nodeRuntimeVersionGlobal 两域桌面端 Electron 内置的 Node 版本
+	// （X-Stainless-Runtime-Version = process.version）。国内版 5.9.3、国际版 5.9.4 都是 Electron 37.10.3
+	// 内置 v22.21.1（2026-10-28、10-31 读 Electron Framework 实测，与 5.8.x 相同）。
+	nodeRuntimeVersionCN     = "v22.21.1"
+	nodeRuntimeVersionGlobal = "v22.21.1"
 )
 
-// originRefererFor 按账号 realm 返回 Origin/Referer 基础域：
-// global → https://www.workbuddy.ai；cn（含全局开关未开）→ https://www.codebuddy.cn。
-func originRefererFor(a *auth.Auth) string {
-	if a != nil && a.IsGlobal() {
-		return originRefererGlobal
-	}
-	return originRefererCN
-}
-
-// clientVersion 生效的 WorkBuddy 客户端版本：Client.ClientVersion 非空则取之，
-// 否则内置默认 defaultClientVersion。
-func (c *Client) clientVersion() string {
+// clientVersion 生效的桌面端版本：Client.ClientVersion 非空则取之，否则按账号域取内置默认。
+func (c *Client) clientVersion(a *auth.Auth) string {
 	if c != nil && c.ClientVersion != "" {
 		return c.ClientVersion
 	}
-	return defaultClientVersion
+	if a != nil && a.IsGlobal() {
+		return defaultClientVersionGlobal
+	}
+	return defaultClientVersionCN
 }
 
-// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则内置默认 defaultCliVersion。
-func (c *Client) cliVersion() string {
+// cliVersion 生效的 CLI 版本：Client.CliVersion 非空则取之，否则按账号域取内置默认。
+func (c *Client) cliVersion(a *auth.Auth) string {
 	if c != nil && c.CliVersion != "" {
 		return c.CliVersion
 	}
-	return defaultCliVersion
-}
-
-// defaultWorkBuddyUAFor 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
-// `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
-// 平台段（第二段）品牌按 realm 切换——CN 用 applicationName 同值 `WorkBuddy`，
-// global 用官方国际版 productName `WorkBuddy AI`（intl 项目逆向证据：
-// `WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2`）。
-// global 账号送错平台段（`WorkBuddy` 非 `WorkBuddy AI`）可能触发上游 403 code 11140
-// "request illegal" 风控。官方无任何 UA 随机化，故默认确定性。
-func (c *Client) defaultWorkBuddyUAFor(a *auth.Auth) string {
-	platform := "WorkBuddy"
 	if a != nil && a.IsGlobal() {
-		platform = "WorkBuddy AI"
+		return defaultCliVersionGlobal
 	}
-	return "WorkBuddy/" + c.clientVersion() + " " + platform + "/" + c.clientVersion() + " CLI/" + c.cliVersion()
+	return defaultCliVersionCN
 }
 
-// defaultWorkBuddyUA 返回 CN 形态的默认 UA（默认账号形态即 CN，零回归兼容既有调用/测试）。
-func (c *Client) defaultWorkBuddyUA() string {
-	return c.defaultWorkBuddyUAFor(nil)
+// applicationNameFor 两域桌面端 product.json 的 applicationName：国内版 "WorkBuddy"，国际版
+// "workbuddy-ai"（productName 是 "WorkBuddy AI"，UA 里用的是 applicationName）。
+func applicationNameFor(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return "workbuddy-ai"
+	}
+	return "WorkBuddy"
 }
 
-// userAgent 返回当前出站 UA（客户端出站路径：chat/refresh/FetchModels）。
-// 优先级：Client.UserAgent（config user_agent）显式覆盖 > 按账号 realm 的默认 WorkBuddy 三段式。
-// 显式覆盖兼容既有覆盖逻辑：用户配了即以用户值为准（自定义品牌/版本），
-// 未配则走官方桌面端默认形态（global 换 `WorkBuddy AI` 平台段）。
+// defaultCLIUA 内置 CLI 的 UA（UserAgentHttpInterceptor）：
+// `<platform>/<ver> <applicationName>/<ver> CLI/<cli>`，platform 由桌面端固定传 "WorkBuddy"。
+// 国内版 `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`，国际版 `WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。
+func (c *Client) defaultCLIUA(a *auth.Auth) string {
+	v := c.clientVersion(a)
+	return "WorkBuddy/" + v + " " + applicationNameFor(a) + "/" + v + " CLI/" + c.cliVersion(a)
+}
+
+// defaultDaemonUA 桌面端后台服务的 UA（WorkbuddyUserAgentHttpInterceptor）：
+// `<applicationName>/<ver> <platform>/<ver> CLI/<cli>`。后台服务的 platform 取产品配置的
+// applicationName（WorkbuddyClientInfoProvider.initClientInfo）：桌面端只给内置 CLI 的进程设
+// CLIENT_INFO_PLATFORM=WorkBuddy，后台服务的子进程环境里没有（buildDaemonProcessEnv），所以两段都是
+// 应用名。国内版 `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`，和 CLI 的 UA 一样；国际版
+// `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。2026-10-31 读 5.8.3、5.9.4 安装包核对，同类项目
+// misakano7545/workbuddy2api-panel 的真机抓包也是这样；1.8.0 及以前国际版第二段发的是 WorkBuddy。
+func (c *Client) defaultDaemonUA(a *auth.Auth) string {
+	app, v := applicationNameFor(a), c.clientVersion(a)
+	return app + "/" + v + " " + app + "/" + v + " CLI/" + c.cliVersion(a)
+}
+
+// userAgent 内置 CLI 发的请求（对话、模型目录）的 UA。
+// config user_agent 显式覆盖优先（几类请求共用这一个值）。
 func (c *Client) userAgent(a *auth.Auth) string {
 	if c != nil && c.UserAgent != "" {
 		return c.UserAgent
 	}
-	return c.defaultWorkBuddyUAFor(a)
+	return c.defaultCLIUA(a)
 }
 
-// billingUA 白名单类（billing/checkin/banner）出站 UA：单段 `WorkBuddy/<clientVersion>`
-// （官方 banner 显式覆写形态，不带 CLI 段）。默认生效（伪造官方桌面端指纹）；
-// 显式 client_name="SaaS" 才不设 UA（还原旧行为，Go 默认 UA）。
-func (c *Client) billingUA() string {
-	if c == nil || c.attributionClientName() == "SaaS" {
+// daemonUserAgent 桌面端后台服务经请求框架发的请求（登录、刷新令牌、上报）的 UA。
+// config user_agent 显式覆盖优先；显式 client_name="SaaS"（旧行为）时不设 UA。
+func (c *Client) daemonUserAgent(a *auth.Auth) string {
+	if c != nil && c.UserAgent != "" {
+		return c.UserAgent
+	}
+	if c.attributionClientName() == "SaaS" {
 		return ""
 	}
-	return "WorkBuddy/" + c.clientVersion()
+	return c.defaultDaemonUA(a)
+}
+
+// refreshUserAgent 刷新令牌和刷新后取账号的 UA。桌面端的令牌由后台服务刷新（common2.js 里两个登录
+// 提供者的 refreshSession，走后台服务的请求框架），所以取后台服务的 UA；国内版和对话的 UA 一样，国际版
+// 两段都是 workbuddy-ai（1.8.0 及以前用的是对话的 UA）。client_name="SaaS"（旧行为）时后台服务的请求
+// 不带 UA，刷新仍照以前带对话的 UA。
+func (c *Client) refreshUserAgent(a *auth.Auth) string {
+	if ua := c.daemonUserAgent(a); ua != "" {
+		return ua
+	}
+	return c.userAgent(a)
 }
 
 // resolveDeviceToken 解析本次请求的 X-Device-Token 取值。
@@ -113,187 +146,73 @@ func (c *Client) resolveDeviceToken(a *auth.Auth) string {
 	return ""
 }
 
-// injectDeviceToken 在 req 注入 X-Device-Token 头（仅当取到非空 token）。
+// injectDeviceToken 在 req 注入 X-Device-Token 头（仅当取到非空 token）。用在签到
+// （官方 buildHeadersWithTuringToken）、登录前的 auth/state，以及对话上。官方的对话也带：桌面端后台
+// 服务每次提问前现取图灵盾设备令牌加在模型请求上（取不到时改发 X-Device-Token-Error，两样都没有
+// 时都不发）。网关在 Linux 做不出真令牌，对话只在使用者填了 device_token 时照发，没填就不发——对应
+// 官方「两样都没有」的状态，不造 X-Device-Token-Error，见 docs/official-client.md「几类请求」。
 func (c *Client) injectDeviceToken(req *http.Request, a *auth.Auth) {
 	if tok := c.resolveDeviceToken(a); tok != "" {
 		req.Header.Set("X-Device-Token", tok)
 	}
 }
 
-// deriveAccountStableID 按 uid + 用途盐稳定派生 36 hex 设备/会话标识。
-// 跨重启稳定（固定盐 "wb2a:"，不随进程换——这是与 session 包派生盐的本质差异：
-// 那是会话键维度的进程级随机盐，重启换新；本函数是账号维度，必须跨重启恒定）、
-// 账号间互异（uid 不同则不同）、同 uid 同用途恒同值（幂等）。用 sha256 与项目
-// 既有派生（session/ids.go、cache_key.go）保持一致；截 36 hex 提供更长熵。
-//
-// 两个用途：
-//   - purpose="machine" → X-Machine-ID（设备级，跨会话稳定）
-//   - purpose="session" → X-Session-ID（账号固定会话，跨重启稳定）
-//
-// 与 injectDeviceToken 的 X-Device-Token 并存不冲突：那是登录时上游签发的
-// 真实设备令牌（有则发，权威）；本对头是「每账号一台固定虚拟设备」的稳定指纹，
-// 防多号被上游按设备指纹缺失/漂移关联风控。两者是不同头族，官方桌面端都发。
-func deriveAccountStableID(uid, purpose string) string {
-	sum := sha256.Sum256([]byte("wb2a:" + purpose + ":" + uid))
-	return hex.EncodeToString(sum[:18]) // 36 hex chars
-}
-
-// injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
-// 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
-func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
-	if a == nil || a.UID == "" {
-		return
+// frameworkHeaders 官方请求框架（restOperations）给非对话请求加的头：axios 的 Accept、框架默认的
+// X-Requested-With，以及各拦截器补的头——CommonHeaderHttpInterceptor 的 X-Request-ID（32 位
+// 十六进制，每个请求新生成）、ProductEndpointHttpInterceptor 的 X-Product、UA、
+// AuthenticationHttpInterceptor 的账号头（Authorization、X-User-Id、企业号的 X-Enterprise-Id 与同值的
+// X-Tenant-Id、X-Domain，账号有部门全名时的 X-Department-Info）。
+// Content-Type 只在 GET 以外的请求上设（官方 GET 不带，POST 都带 JSON 体；网关几个不带体的 POST
+// 不是桌面端的接口，保持以前也带的样子）。官方不发的 Origin / Referer / Accept-Language /
+// X-CodeBuddy-Request / X-Machine-ID / X-Session-ID 一概不发；需要的个别请求（积分的
+// Accept-Language、签到的 X-Device-Token、刷新的 X-Refresh-Token）由调用方另加。ua 为空不设 UA。
+func (c *Client) frameworkHeaders(req *http.Request, a *auth.Auth, ua string) {
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Encoding", acceptEncodingAxios)
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
-	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
-}
-
-// desktopProfile 报告是否使用「WorkBuddy 桌面端 37.x」出站头形态。
-// 缺省（Profile 为空）即 desktop：这是从本机 app.asar 实测得到的当前真实形态。
-// 显式 "legacy" 回到停更前的 CodeBuddy IDE 5.x 形态（仅用于回滚对比）。
-func (c *Client) desktopProfile() bool {
-	if c == nil {
-		return true
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	if req.Header.Get("X-Request-ID") == "" {
+		req.Header.Set("X-Request-ID", session.NewMessageID())
 	}
-	return !strings.EqualFold(strings.TrimSpace(c.Profile), "legacy")
-}
-
-// ideVersion X-IDE-Version 取值。
-//
-// 权威来源是 WorkBuddy 桌面端 buildVlmGatewayHeaders：
-//
-//	n["X-IDE-Version"] = appVersion?.trim() || "0.0.0"
-//
-// 即真实产品版本（如 5.8.3）。applyGatewayHeaders 里 YN 常量表的
-// ["X-IDE-Version","0.0.0"] 只是 `e.set(n, e.get(n) || r)` 的**兜底**——真实值先设好
-// 就不会落到 0.0.0。所以这里必须跟随 clientVersion，写成 0.0.0 反而是错的。
-func (c *Client) ideVersion() string {
-	if c != nil && strings.TrimSpace(c.IDEVersion) != "" {
-		return c.IDEVersion
+	req.Header.Set("X-Product", deploymentType)
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
 	}
-	return c.clientVersion()
-}
-
-// product X-Product 取值。桌面端取 deploymentType，缺省 "SaaS"。
-// 写成 "WorkBuddy" 是最常见也最致命的错误——客户端从不发这个值。
-func (c *Client) product() string {
-	if c != nil && strings.TrimSpace(c.Product) != "" {
-		return c.Product
+	if at := a.AccessTokenValue(); at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
 	}
-	return "SaaS"
-}
-
-// uuidDashed 把 32 位 hex 转成 UUID v4 文本形态（8-4-4-4-12）。
-//
-// 只插横线不够：官方所有 ID 都出自 crypto.randomUUID()，第 13 位恒为 "4"
-// （版本位）、第 17 位恒为 8/9/a/b（变体位）。裸 hex 加横线会产出
-// "…-cd98-4a67-…" 这种版本位乱跳的值，一条正则就能和官方区分开。
-func uuidDashed(h string) string {
-	if len(h) != 32 {
-		return h
+	if a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
 	}
-	b := []byte(h)
-	b[12] = '4'
-	// 变体位：保留低 2 bit 熵，高位固定为 10b（即 8/9/a/b）。
-	i := strings.IndexByte("0123456789abcdef", b[16])
-	if i < 0 {
-		i = 0
-	}
-	b[16] = "89ab"[i&0x3]
-	return string(b[0:8]) + "-" + string(b[8:12]) + "-" + string(b[12:16]) + "-" + string(b[16:20]) + "-" + string(b[20:32])
-}
-
-// applyDesktopChatHeaders 把 ChatHeaders 的结果修正为桌面端真实形态。
-// 只作用于 chat 路径：refresh/billing 走的是插件域，形态本就不同，不在此列。
-//
-// 依据（2026-10-21 从 WorkBuddy 5.8.3 app.asar 的 buildVlmGatewayHeaders /
-// applyGatewayHeaders / applyTraceHeaders 提取，并用本机安装的 CodeBuddy IDE 4.12.2
-// 的 genie 扩展交叉验证）：
-//   - Origin / Referer 被客户端显式 strip（qN 集合含 origin），不发；
-//   - Accept-Language 不在构造里，不发；
-//   - X-Machine-ID 在 chat 链路零出现（WorkBuddy 与 CodeBuddy IDE 均无；
-//     IDE 侧只有 feedback 接口的 X-Machine-Id），纯造头，删；
-//   - X-Session-ID 只在 IDE 的代码补全链路发（来自 sessionId），chat 不发，删；
-//   - Accept 固定 application/json（流式也如此，响应侧才是 text/event-stream）；
-//   - Accept-Encoding 显式 identity（禁用压缩）；
-//   - 额外发 acp-connection-id / X-Private-Data / X-Agent-Intent（见各注入点）。
-func (c *Client) applyDesktopChatHeaders(req *http.Request, a *auth.Auth) {
-	req.Header.Del("Origin")
-	req.Header.Del("Referer")
-	req.Header.Del("Accept-Language")
-	req.Header.Del("X-Machine-ID")
-	req.Header.Del("X-Session-ID")
-	// X-No-* 是插件域（旧实现）的「显式声明缺省」约定，官方桌面端 chat 从不发。
-	// 官方是「有值才设」，没有对应的 X-No-* 头（buildVlmGatewayHeaders 全是
-	// `e.userId?.trim() && (...)` 这种短路写法）。留着就是可识别特征。
-	req.Header.Del("X-No-User-Id")
-	req.Header.Del("X-No-Enterprise-Id")
-	req.Header.Del("X-No-Department-Info")
-	req.Header.Set("Accept-Encoding", "identity")
-	// 设备身份三件套（X-Device-Token / X-Custom-Channel-Id / X-Device-Id-List）
-	// 由 WorkbuddyAuthStateHeaderProvider 产出，但**只喂给 app-server 的
-	// auth-state 与签到接口**，不在 chat 链路里：
-	//   - chat 的注入钩子 getRequestHeaders 接的是 buildVlmGatewayHeaders，
-	//     不是这个 provider（main/server.js @3526839 可证）；
-	//   - X-Device-Token 在桌面端只出现在 getCheckinRequestHeaders()。
-	// 所以 chat 一个都不能带。给 chat 补这三个头，等于把「反代特征」从
-	// 少发变成多发——和旧实现造 X-Machine-ID 是同一类错误。
-	req.Header.Del("X-Custom-Channel-Id")
-	req.Header.Del("X-Device-Id-List")
-	// X-Device-Token 例外：可用 upstream.chat_device_token 显式打开，
-	// 用于验证「上游是否按设备绑定账号」。默认关闭 = 与官方一致。
-	if !c.ChatDeviceToken {
-		req.Header.Del("X-Device-Token")
-	}
-	// 官方 chat 请求头 Accept 恒为 application/json（applyGatewayHeaders 写死），
-	// 流式与否只影响 body 的 stream 字段与响应类型。发 event-stream 属可识别偏差。
-	req.Header.Set("Accept", "application/json")
-	// 企业号在 chat 域也发 X-Tenant-Id（旧实现只在 billing 域发）。
-	if a != nil && a.EnterpriseID != "" {
+	if a.IsEnterprise() {
+		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
 	}
-	// ACP 连接标识：官方是每连接一个 randomUUID()（带连字符）。这里按账号稳定派生，
-	// 形态必须对齐（uuidDashed）——裸 36 hex 与官方 UUID 一眼可辨。
-	if a != nil && a.UID != "" {
-		req.Header.Set("acp-connection-id", uuidDashed(deriveAccountStableID(a.UID, "acp")[:32]))
+	injectDepartment(req, a)
+	if d := chatDomain(a); d != "" {
+		req.Header.Set("X-Domain", d)
 	}
 }
 
-// CommonHeaders 设置所有 API 共享的请求头。
-
-func (c *Client) CommonHeaders(req *http.Request, a *auth.Auth) {
-	req.Header.Set("Content-Type", "application/json")
-	// Accept 非流式默认 application/json（D6：去掉宽松的 text/plain, */*）。
-	// chat 流式路径在 ChatHeaders 覆盖为 event-stream。
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	origin := originRefererFor(a)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", c.userAgent(a))
-	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带，D1）。
-	req.Header.Set("X-CodeBuddy-Request", "1")
-	// Accept-Language 按 realm 切（D5）：CN zh-CN，global en-US。官方客户端按账号域
-	// 发对应语言标识，对齐避免上游风控按语言缺失误判。
-	req.Header.Set("Accept-Language", acceptLanguageFor(a))
-	// X-Machine-ID / X-Session-ID：按 uid 稳定派生的账号级设备头（见
-	// injectAccountStableHeaders）。注入在 CommonHeaders——chat 经 ChatHeaders
-	// 叠加 CommonHeaders 天然继承；billing 域另行注入，全出站覆盖。
-	c.injectAccountStableHeaders(req, a)
+// injectDepartment 账号有部门全名（企业号）时带 X-Department-Info，值原样（官方
+// AuthenticationHttpInterceptor：account.departmentFullName 非空才加）。官方用 Node 发请求，
+// 头的值里有超出 Latin-1 的字符时 Node 会直接报错；上游返回的部门全名是什么样子没有企业号
+// 实测过（未确认），网关照原样发 UTF-8。
+func injectDepartment(req *http.Request, a *auth.Auth) {
+	if d := a.DepartmentValue(); d != "" {
+		req.Header.Set("X-Department-Info", d)
+	}
 }
 
-// acceptLanguageFor 按账号 realm 返回 Accept-Language：global → en-US，cn → zh-CN。
-func acceptLanguageFor(a *auth.Auth) string {
+// billingAcceptLanguage 积分包查询的 Accept-Language：官方按界面语言只发 "zh" 或 "en"
+// （AuthService 的 resolveAcceptLanguage），国内版取 zh、国际版取 en。
+func billingAcceptLanguage(a *auth.Auth) string {
 	if a != nil && a.IsGlobal() {
-		return "en-US"
+		return "en"
 	}
-	return "zh-CN"
-}
-
-// injectCodeBuddyRequest 在 req 注入 X-CodeBuddy-Request: 1。
-// billing 域未走 CommonHeaders，单独注入保证全出站覆盖（D1）。
-func (c *Client) injectCodeBuddyRequest(req *http.Request) {
-	req.Header.Set("X-CodeBuddy-Request", "1")
+	return "zh"
 }
 
 // ChatMeta 一次 chat 出站的会话头族元数据（issue #35：后台按 X-Conversation-Request-ID
@@ -302,116 +221,157 @@ func (c *Client) injectCodeBuddyRequest(req *http.Request) {
 // 复用同值；TraceID 透传入站值（空 = 回落 conversationRequestID）。
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
-	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
-	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
-	TraceID               string // X-Trace-ID：legacy 形态透传入站值，空则回落 conversationRequestID（desktop 形态无视入站值，每请求新随机）
+	ConversationID        string // X-Conversation-ID：入站对话由 handler 定好（session.OutboundConversationID）；空则新生成
+	ConversationRequestID string // X-Conversation-Request-ID：聚合主键，必发
+	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	ExpertID              string // X-Expert-Id：专家对话的专家 id；空 = 普通对话，不发
+	ExpertTeamTask        bool   // X-Expert-Team-Task：专家团（市场 expert_type=team）为 true，只和 ExpertID 一起发
+	Protected             bool   // X-Moderation-Type: ["protected"]：云端 / 付费专家的对话才发（见 MarketExpert.Protected）
 }
 
-// ChatHeaders 在 common 之上加 chat 专属的账号头。
-// 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
+// ChatHeaders 设置 chat 出站请求头。形状对齐桌面端内置 CLI 的对话请求（两域都是 2.165.0，见文件头），
+// 10-19 生产用国内版、国际版个人号逐项实测均 200（当时两域都是 2.161.0）：
+//   - 官方对话请求不带 Origin / Referer / Accept-Language / X-CodeBuddy-Request / X-Machine-ID /
+//     X-Session-ID，也不带 X-No-*（那几个只在登录前的 auth/state、auth/token 上发）。
+//   - 账号头：Authorization、X-User-Id；企业号加 X-Enterprise-Id 与同值的 X-Tenant-Id，个人号
+//     两个都不发；有部门全名时加 X-Department-Info；X-Domain 取登录域（国际版固定
+//     www.workbuddy.ai），没有就不发。
+//   - X-Agent-Intent=craft、X-Agent-Type=main（主对话）、X-Private-Data（见 privateDataValue）。
+//   - X-Agent-Runtime=local-agent（见 agentRuntime）。
+//   - UA、X-IDE-* 取桌面端传给内置 CLI 的值（见 defaultCLIUA、injectAttribution）；X-Product 是
+//     请求框架给每个请求加的 deploymentType。
+//   - Accept 与 8 个 X-Stainless-* 照 OpenAI SDK 的 buildHeaders 发（见 injectSDKHeaders）：官方对话
+//     经 SDK 发出，这组头是 SDK 加的、出站适配器原样保留的。
+//   - X-Device-Token：官方后台服务每次提问前加（图灵盾令牌）；网关在 Linux 做不出真令牌，只在
+//     使用者填了 device_token 时照发（injectDeviceToken），没填不发。
+//   - X-Moderation-Type：官方后台对云端 / 付费专家的对话加（shouldProtectSession）；网关只在
+//     专家对话且该专家云端 / 付费时发（meta.Protected，见 MarketExpert.Protected），普通对话不带。
+//
 // clientIP 为本次请求的客户端 IP（按参数传递，不读共享字段——避免并发串扰）；
 // PassthroughIP=false 或 clientIP 为空时不注入 IP 头。
-// meta 为会话头族元数据（纯新增，不改既有头），见 injectConversationHeaders。
+// meta 为会话头族元数据，见 injectConversationHeaders。
 func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, meta ChatMeta) {
-	c.CommonHeaders(req, a)
-	// chat 流式 Accept 覆盖 CommonHeaders 的非流式默认（D6）。
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", acceptEncodingAxios)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("User-Agent", c.userAgent(a))
 	// AccessToken 加锁快照：keepalive 定时刷新会在 a.mu 内改写它，锁外直读构成数据竞争
 	// （见 auth.AccessTokenValue 注释）。
 	if at := a.AccessTokenValue(); at != "" {
 		req.Header.Set("Authorization", "Bearer "+at)
-	} else {
-		req.Header.Set("X-No-Authorization", "1")
 	}
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
-	} else {
-		req.Header.Set("X-No-User-Id", "1")
 	}
 	// 安全红线：绝不在 chat 请求里携带 X-Refresh-Token。
-	// 企业与域头按 realm 分发：CN 走既有分支（EnterpriseID/Domain 原样透传，缺省 X-No-*）；
-	// global 账号由 injectGlobalChatHeaders 统一覆写为国际客户端形态
-	// （X-No-Enterprise-Id=1 声明无企业 + X-Domain=www.workbuddy.ai 声明国际版域），
-	// 且不回退 X-Domain 到登录会话原值——对齐 intl 项目出站头。
-	if a != nil && !a.IsGlobal() {
-		if a.EnterpriseID != "" {
-			req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
-		} else {
-			req.Header.Set("X-No-Enterprise-Id", "1")
-		}
-		if d := a.DomainValue(); d != "" {
-			req.Header.Set("X-Domain", d)
-		} else {
-			req.Header.Set("X-No-Department-Info", "1")
-		}
-	} else {
-		c.injectGlobalChatHeaders(req, a)
+	// 企业号带企业 ID 与 cli2api、dsh-workbuddy-connect 的对话头一致；国际版企业号本仓库未实测。
+	if a.IsEnterprise() {
+		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
 	}
-	// 用量归属头：默认伪造 WorkBuddy 桌面端指纹（client_name="SaaS" 还原旧行为）。
-	c.injectAttribution(req)
+	injectDepartment(req, a)
+	if d := chatDomain(a); d != "" {
+		req.Header.Set("X-Domain", d)
+	}
+	req.Header.Set("X-Agent-Intent", "craft")
+	req.Header.Set("X-Agent-Type", "main")
+	req.Header.Set("X-Agent-Runtime", agentRuntime)
+	req.Header.Set("X-Private-Data", c.privateDataValue(a))
+	req.Header.Set("X-Product", deploymentType)
+	// 用量归属头（X-Agent-Purpose / X-IDE-*）与 OpenAI SDK 的对话头（Accept、X-Stainless-*）：
+	// 默认都伪装官方桌面端；client_name="SaaS" 还原旧行为（见各自函数注释）。
+	c.injectAttribution(req, a)
+	c.injectSDKHeaders(req, a)
+	// X-Device-Token：官方后台服务每次提问前现取图灵盾设备令牌加在模型请求上；网关在 Linux
+	// 做不出真令牌，只在使用者填了 device_token（账号 / config / 文件）时照发，没填就不发——
+	// 对应官方「令牌和错误码都没有时都不发」的状态，不凭空造 X-Device-Token-Error。
+	// ChatDeviceToken 是本地开关（默认 false）：官方桌面端 chat 链路的注入钩子是
+	// buildVlmGatewayHeaders，本就不含设备头；只有使用者做 A/B 验证时才显式打开。
+	if c.ChatDeviceToken {
+		c.injectDeviceToken(req, a)
+	}
+	// X-Expert-Id 是官方专家插件激活时追加的内部请求头，专家团另带 X-Expert-Team-Task: true
+	// （桌面端 applyPreparedExpertSettings：expertType === "team"）；普通对话都不带。
+	if meta.ExpertID != "" {
+		req.Header.Set("X-Expert-Id", meta.ExpertID)
+		if meta.ExpertTeamTask {
+			req.Header.Set("X-Expert-Team-Task", "true")
+		}
+	}
+	// X-Moderation-Type: ["protected"]：官方后台对云端 / 付费专家的对话加（shouldProtectSession）；
+	// 网关只在专家对话且该专家云端 / 付费时发（meta.Protected，见 MarketExpert.Protected）。普通对话不发。
+	if meta.Protected {
+		req.Header.Set("X-Moderation-Type", `["protected"]`)
+	}
 	// 客户端 IP 透传（仅 PassthroughIP=true 且本次请求带 IP）。
 	c.injectClientIP(req, clientIP)
-	// 设备风控头：auth 每号 > config 全局 > 文件兜底；空则不注入。
-	c.injectDeviceToken(req, a)
-	// 会话头族（对话/请求/消息/B3 链路），见 injectConversationHeaders。
+	// X-Conversation-ID 官方每条都发（值是整段对话不变的会话 id）。国际版不带一律 400
+	// code=11128 "request illegal"（10-19 生产实测），国内版不带也能用，同样补上对齐官方。
+	// 入站对话的 id 由 handler 定好（同一段对话不变，换号也不变，上游据此命中前缀缓存，
+	// 见 session/convids.go）；调用方没给就新生成一个，形状同官方新会话的 id（带连字符的 UUID v7）。
+	if meta.ConversationID == "" {
+		meta.ConversationID = session.NewUUIDv7()
+	}
+	// 会话头族（对话/请求/消息/链路），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
-	// 桌面端形态修正放在最后：以「覆盖/删除」的方式收敛，不改动 common 与选号链路。
-	if c.desktopProfile() {
-		c.applyDesktopChatHeaders(req, a)
-	}
 }
 
-// injectGlobalChatHeaders global 账号（无企业 ID）的 chat 专属声明头，对齐 intl 项目
-// （ANALYSIS-global-chat-solutions.md）：
-//   - X-No-Enterprise-Id: 1  个人账号无企业 ID，显式声明（避免上游按缺省/可疑判定）
-//   - X-Domain: www.workbuddy.ai  显式声明国际版域（与 Origin/Referer 同域）
-//
-// 仅 global realm 注入；CN 账号走既有 X-No-Department-Info 等分支，零回归。
-func (c *Client) injectGlobalChatHeaders(req *http.Request, a *auth.Auth) {
-	if a == nil || !a.IsGlobal() {
-		return
+// agentRuntime 对话和联网搜索的 X-Agent-Runtime：2.165.0 每条都带，取会话的 agentRuntime，两域桌面端
+// （国内版 5.9.3、国际版 5.9.4）给本地对话（含专家对话）设的都是 local-agent。国际版 5.8.4 内置的
+// 2.161.0 没有这个头，网关 2026-10-31 随国际版换到 5.9.4 起两域都发。
+const agentRuntime = "local-agent"
+
+// chatDomain chat 出站的 X-Domain：国际版固定 www.workbuddy.ai（与国际版登录域相同，不回退
+// 登录会话原值——对齐 intl 项目出站头）；国内版取登录域，没有就不发。
+func chatDomain(a *auth.Auth) string {
+	if a.IsGlobal() {
+		return "www.workbuddy.ai"
 	}
-	req.Header.Set("X-No-Enterprise-Id", "1")
-	req.Header.Set("X-Domain", "www.workbuddy.ai")
+	return a.DomainValue()
 }
 
-// injectConversationHeaders 注入官方客户端会话头族（issue #35 后台聚合）。
-// 头族分四层，各司其职：
-//   - X-Conversation-ID：会话级，多轮稳定（body 的 conversationId）。空则不发——
-//     透传客户端原值优先，客户端没给就不伪造，避免误导后台建错会话。
+// privateDataValue X-Private-Data 取值，告诉上游这段对话能不能拿去做模型优化。默认一律
+// "true"（不允许）。两域内置的 2.165.0 在用户没动过「模型优化」开关时按产品开关
+// DefaultModelOptimizationOff 算：国际版 5.9.4 包里是 true，个人版、企业版都发 "true"，和网关的默认
+// 一样；国内版 5.9.3 包里是 false，个人版发 "false"、企业版发 "true"，所以对国内版来说网关的默认
+// 等于用户在桌面端手动关了这个开关。2026-10-28 用户定：默认仍不允许。
+// upstream.model_optimization 打开后个人版发 "false"；企业版（有企业 id，或账号类型是 ultimate /
+// exclusive，同官方 isEnterpriseEditionAccount）仍发 "true"，和官方没动过开关时一样。
+func (c *Client) privateDataValue(a *auth.Auth) string {
+	if c != nil && c.ModelOptimization.Load() && isPersonalEdition(a.EnterpriseID, a.AccountTypeValue()) {
+		return "false"
+	}
+	return "true"
+}
+
+// injectConversationHeaders 注入官方客户端会话头族（issue #35 后台聚合），各司其职：
+//   - X-Conversation-ID：会话级（ChatHeaders 已保证非空：客户端给的会话 id、派生的或新生成的）。
 //   - X-Conversation-Request-ID：**对话轮级聚合主键**，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
-//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
-//   - X-Root-Request-ID：= conversationRequestID（根请求追踪）。
+//   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（去掉连字符的 UUID v7）。
 //   - X-Trace-ID：入站透传或 = conversationRequestID。
-//   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
-//     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
-//     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
+//   - 链路族：X-B3-TraceId / X-B3-SpanId / X-B3-Sampled，外加官方同发的 W3C traceparent
+//     与单行 b3（同一组 trace/span id）。B3 规范只认 16/32 hex TraceId 与 16 hex SpanId；
+//     入站 conversationRequestID 非法时 TraceId 回落 messageID（恒 32 hex），SpanId 每条消息
+//     随机新生成。traceparent 只认 32 位小写 hex，16 位的左补零。
+//
+// 官方主对话不发 X-Root-Request-ID（只有子代理带），这里也不发。
 func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
-	if c.desktopProfile() {
-		c.injectDesktopConversationHeaders(req, meta)
-		return
-	}
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
-		// 零值 meta（直接调 ChatHeaders 的调用方/测试）也要保证聚合主键必发：
-		// 本级补一个 32 hex，调用方（handler）已生成稳定的不走到这里。
-		convReqID = session.NewMessageID()
+		// 零值 meta（直接调 injectConversationHeaders 的测试）也要保证聚合主键必发：
+		// 本级补一个，ChatHeaders 已生成稳定的不走到这里。
+		convReqID = session.NewUUIDv7Hex()
 	}
-	messageID := session.NewMessageID()
-	// 会话头三元组必须齐全：国际端点收紧通道校验后，缺 X-Conversation-ID 的
-	// 请求会直接 400 / 11128（conversation id missing）。入站没带会话 ID 时
-	// 本级补一个 32 hex（与 X-Conversation-Request-ID 的零值兜底同口径），
-	// 不再因为「透传优先」而漏发该头（issue #190）。
-	conversationID := meta.ConversationID
-	if conversationID == "" {
-		conversationID = session.NewMessageID()
+	// 消息 id 同官方 uuidv7() 去掉连字符；span id 是链路自己的随机 16 位（UUID v7 的前 16 位是
+	// 时间戳，截它当 span id 会让同一毫秒的两条消息撞上）。
+	messageID := session.NewUUIDv7Hex()
+	if meta.ConversationID != "" {
+		req.Header.Set("X-Conversation-ID", meta.ConversationID)
 	}
-	req.Header.Set("X-Conversation-ID", conversationID)
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)
-	req.Header.Set("X-Root-Request-ID", convReqID)
 	traceID := meta.TraceID
 	if traceID == "" {
 		traceID = convReqID
@@ -421,61 +381,16 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	if !validTraceID(b3Trace) {
 		b3Trace = messageID // 非法 B3 TraceId → 回落恒 32 hex 的消息级 ID
 	}
+	spanID := session.NewMessageID()[:16]
 	req.Header.Set("X-B3-TraceId", b3Trace)
-	req.Header.Set("X-B3-SpanId", messageID[:16])
-	req.Header.Set("X-B3-Sampled", "1")
-}
-
-// injectDesktopConversationHeaders 桌面端 37.x 的会话/链路头族。
-// 与 legacy 的差异：
-//   - 消息级 ID 用带连字符 UUID（客户端用 randomUUID()）
-//   - 不发 X-Root-Request-ID（网关路径没有这个头，多发即特征）
-//   - 补全 W3C traceparent + 单头 b3 + X-B3-ParentSpanId
-func (c *Client) injectDesktopConversationHeaders(req *http.Request, meta ChatMeta) {
-	// 官方这两个 ID 都出自 metadata 里的 randomUUID()（VlmSessionLedger.acquire
-	// 一次生成、按 session 缓存），**恒为带连字符的 8-4-4-4-12**。网关内部的聚合键
-	// （TurnRequestID / RequestIDForKey）是 32 位裸 hex，直接透传就是一处形态差异：
-	// 同一字段官方永远是 36 字符带横线，我们永远是 32 字符裸 hex，一条正则即可区分。
-	// 只改出站字符串形态，不动内部聚合键（日志/面板分组口径不变）。
-	convReqID := uuidDashed(meta.ConversationRequestID)
-	if convReqID == "" {
-		convReqID = uuidDashed(session.NewMessageID())
-	}
-	messageID := uuidDashed(session.NewMessageID())
-	// 官方 applyGatewayHeaders 是两次独立的 randomUUID()：
-	//   X-Conversation-Message-ID = randomUUID()
-	//   X-Request-ID              = randomUUID()
-	// 不能复用同一个值——「消息 ID 与请求 ID 恒等」是真实客户端不会出现的形态。
-	requestID := uuidDashed(session.NewMessageID())
-	// X-Conversation-ID 官方取的是 ACP sessionId（同样是 randomUUID 形态）。
-	// 本网关的会话键是 32 位裸 hex（sessKey / 客户端透传值），同样规范成 UUID 形态。
-	conversationID := uuidDashed(meta.ConversationID)
-	if conversationID == "" {
-		conversationID = uuidDashed(session.NewMessageID())
-	}
-	// 链路 trace：官方 applyTraceHeaders **每次请求都重新 randomBytes(16)**，
-	// 与 conversationRequestId 无任何关系，也不看入站值。早期实现拿 convReqID
-	// 当兜底，结果 X-Trace-ID 恒等于 X-Conversation-Request-ID（仅去掉横线）——
-	// 两个本应独立的随机值永远相等，一条比对就能和真实客户端区分开。
-	// 入站 X-Trace-ID 一律无视：客户端若发常量大，透传就等于把随机值变成固定值。
-	traceID := strings.ReplaceAll(session.NewMessageID(), "-", "")
-	if !validTraceID(traceID) {
-		traceID = strings.ReplaceAll(messageID, "-", "")
-	}
-	spanID := strings.ReplaceAll(session.NewMessageID(), "-", "")[:16]
-	parentID := strings.ReplaceAll(session.NewMessageID(), "-", "")[:16]
-
-	req.Header.Set("X-Conversation-ID", conversationID)
-	req.Header.Set("X-Conversation-Request-ID", convReqID)
-	req.Header.Set("X-Conversation-Message-ID", messageID)
-	req.Header.Set("X-Request-ID", requestID)
-	req.Header.Set("X-Trace-ID", traceID)
-	req.Header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
-	req.Header.Set("b3", traceID+"-"+spanID+"-1-"+parentID)
-	req.Header.Set("X-B3-TraceId", traceID)
-	req.Header.Set("X-B3-ParentSpanId", parentID)
 	req.Header.Set("X-B3-SpanId", spanID)
 	req.Header.Set("X-B3-Sampled", "1")
+	w3cTrace := strings.ToLower(b3Trace)
+	if len(w3cTrace) == 16 {
+		w3cTrace = strings.Repeat("0", 16) + w3cTrace
+	}
+	req.Header.Set("traceparent", "00-"+w3cTrace+"-"+spanID+"-01")
+	req.Header.Set("b3", strings.ToLower(b3Trace)+"-"+spanID+"-1")
 }
 
 // validTraceID 判断 B3 TraceId 是否合法：16 或 32 位 hex（大小写均可）。
@@ -487,7 +402,7 @@ func validTraceID(s string) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
 			return false
 		}
 	}
@@ -503,37 +418,94 @@ func (c *Client) attributionClientName() string {
 	return "WorkBuddy"
 }
 
-// injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
-// 仅在 chat/completions 路径生效（ChatHeaders 调用）。
+// injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-*）。仅在 chat/completions 路径生效
+// （ChatHeaders 调用；X-Product 由 ChatHeaders 自己设）。
 //
-// 默认（ClientName 空）即对齐官方 WorkBuddy 桌面端指纹：X-Agent-Purpose="conversation"
-// + X-IDE-Name/Type/Product="WorkBuddy" + X-IDE-Version=client_version，上游用量归因
-// 不再出现 client/agentPurpose 为空的「网关特征」。显式 ClientName="SaaS" 还原旧行为
-// （仅 X-Product="SaaS"，不设 X-IDE-*）；配其他值则四头跟随该值。
-func (c *Client) injectAttribution(req *http.Request) {
-	// 桌面端 5.8.3：X-IDE-* 恒为 WorkBuddy，X-IDE-Version 取 appVersion（真实版本），
-	// X-Product 取 deploymentType（缺省 SaaS），并额外带 X-Private-Data / X-Agent-Intent。
-	// 这四个头官方**每个 chat 请求都发**，缺任何一个都比版本号写错更显眼。
-	if c.desktopProfile() {
-		req.Header.Set("X-Agent-Purpose", "conversation")
-		req.Header.Set("X-Agent-Intent", "craft")
-		req.Header.Set("X-IDE-Type", "WorkBuddy")
-		req.Header.Set("X-IDE-Name", "WorkBuddy")
-		req.Header.Set("X-IDE-Version", c.ideVersion())
-		req.Header.Set("X-Product", c.product())
-		req.Header.Set("X-Private-Data", "true")
-		return
-	}
+// 默认（ClientName 空）同官方桌面端：X-Agent-Purpose="conversation"，X-IDE-Name / X-IDE-Type
+// 为桌面端传给 CLI 的 IDE_TYPE "WorkBuddy"，X-IDE-Version 为桌面端版本。显式 ClientName="SaaS"
+// 还原旧行为（不设 X-Agent-Purpose 与 X-IDE-*）；配其他值则 X-IDE-Name / X-IDE-Type 跟随该值。
+func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	name := c.attributionClientName()
 	if name == "SaaS" {
-		req.Header.Set("X-Product", "SaaS")
 		return
 	}
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
-	req.Header.Set("X-IDE-Version", c.clientVersion())
-	req.Header.Set("X-Product", name)
+	req.Header.Set("X-IDE-Version", c.clientVersion(a))
+}
+
+// injectSDKHeaders 注入官方对话经 OpenAI SDK 发出时 SDK 自带的头：Accept 与 8 个 X-Stainless-*。
+// 官方内置 CLI 用 OpenAI SDK 的 fetch 适配器发对话，SDK buildHeaders 给每个请求加 Accept:
+// application/json（chat/completions 不是二进制端点，走默认 Accept；这版 SDK 流式也不改 Accept，
+// 由请求体 stream:true 决定流式）与这组 X-Stainless-* 指纹头，适配器只删 authorization 与
+// user-agent，其余原样发出。取值见 stainless* 常量；OS / Arch 由设备指纹（deviceOS / deviceArch）
+// 按 SDK 的 normalizePlatform / normalizeArch 映射而来，与 desktop.go 的设备信息同源，不会自相矛盾；
+// Runtime-Version 取对应域桌面端 Electron 内置的 Node 版本。
+//
+// client_name="SaaS"（旧行为）不伪装桌面端：不发 X-Stainless-*，Accept 保持 1.x 起的两值。
+func (c *Client) injectSDKHeaders(req *http.Request, a *auth.Auth) {
+	if c.attributionClientName() == "SaaS" {
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Stainless-Retry-Count", stainlessRetryCount)
+	req.Header.Set("X-Stainless-Timeout", stainlessTimeout)
+	req.Header.Set("X-Stainless-Lang", "js")
+	req.Header.Set("X-Stainless-Package-Version", stainlessPackageVersion)
+	req.Header.Set("X-Stainless-OS", stainlessOS(deviceOS))
+	req.Header.Set("X-Stainless-Arch", stainlessArch(deviceArch))
+	req.Header.Set("X-Stainless-Runtime", "node")
+	req.Header.Set("X-Stainless-Runtime-Version", nodeRuntimeVersion(a))
+}
+
+// nodeRuntimeVersion 本次对话 X-Stainless-Runtime-Version 的取值：按账号域取桌面端 Electron 的 Node 版本。
+func nodeRuntimeVersion(a *auth.Auth) string {
+	if a != nil && a.IsGlobal() {
+		return nodeRuntimeVersionGlobal
+	}
+	return nodeRuntimeVersionCN
+}
+
+// stainlessOS 复刻 OpenAI SDK 的 normalizePlatform（lazy-lite-wb/3043）：把 Node 的 process.platform
+// 映射成 X-Stainless-OS。设备指纹是 darwin（→ MacOS），这里一并覆盖桌面端可能的取值，换指纹时跟着变。
+func stainlessOS(platform string) string {
+	switch strings.ToLower(platform) {
+	case "darwin":
+		return "MacOS"
+	case "win32":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	case "freebsd":
+		return "FreeBSD"
+	case "openbsd":
+		return "OpenBSD"
+	case "":
+		return "Unknown"
+	default:
+		return "Other:" + strings.ToLower(platform)
+	}
+}
+
+// stainlessArch 复刻 OpenAI SDK 的 normalizeArch（lazy-lite-wb/3043）：把 Node 的 process.arch
+// 映射成 X-Stainless-Arch。设备指纹是 arm64（→ arm64）。
+func stainlessArch(arch string) string {
+	switch arch {
+	case "x32":
+		return "x32"
+	case "x64", "x86_64":
+		return "x64"
+	case "arm":
+		return "arm"
+	case "arm64", "aarch64":
+		return "arm64"
+	case "":
+		return "unknown"
+	default:
+		return "other:" + arch
+	}
 }
 
 // injectClientIP 在 PassthroughIP 开启时把 clientIP 参数透传给上游（三等价头）。
@@ -565,43 +537,82 @@ func ExtractClientIP(r *http.Request) string {
 	return ""
 }
 
-// BillingHeaders billing 接口请求头。
-// UA 语义：默认**不设置**（保持现状，Go 客户端自带默认 UA）；仅当显式配置
-// c.UserAgent 非空才覆盖——避免默认路径给 billing 引入新的 UA 指纹。
+// BillingHeaders 桌面端后台服务经请求框架发的请求（上报）的请求头：官方请求框架的形状
+// （frameworkHeaders）+ 后台服务的 UA。积分、签到不走这里，见 authServiceHeaders。
 func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
-	// AccessToken 加锁快照（同 ChatHeaders：keepalive 可在 a.mu 内改写）。
-	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
+	c.frameworkHeaders(req, a, c.daemonUserAgent(a))
+}
+
+// axiosUserAgent 桌面端后台进程打包的 axios（1.16.1）不设 UA 时自带的 User-Agent。AuthService 的积分、
+// 签到和容量排队的查询、取消都是它。
+const axiosUserAgent = "axios/1.16.1"
+
+// authServiceHeaders 桌面端后台服务 AuthService 发的请求（积分查询的汇总与两个逐包列表、企业用量、
+// 签到状态与签到）的请求头。官方这几个请求不走请求框架，用 AuthService 自己的 axios 实例
+// （authority-snapshot.js 的 get http：axios.create，keepAlive、proxy:false），头只有 buildHeaders 的
+// Accept: application/json、Authorization、Content-Type: application/json、X-User-Id（没有 uid 时是
+// 空串）、企业号的 X-Enterprise-Id 与同值的 X-Tenant-Id、X-Domain，加上拦截器补的 X-Request-ID 和
+// axios 自带的 User-Agent、Accept-Encoding；没有请求框架的 X-Requested-With、X-Product、
+// X-Department-Info。积分查询另带 Accept-Language、签到另带 X-Device-Token，由调用方加。
+//
+// 5.8.3 起就是这样（2026-10-31 读 5.8.3、5.9.4 安装包核对，同类项目 misakano7545/workbuddy2api-panel
+// 的真机抓包里这几个请求的 UA 也是 axios/1.16.1）；1.8.0 及以前网关按请求框架发（BillingHeaders）。
+// config user_agent 显式覆盖照样生效；client_name="SaaS"（旧行为）时同以前不带 UA。
+func (c *Client) authServiceHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", acceptEncodingAxios)
 	req.Header.Set("Content-Type", "application/json")
-	c.injectCodeBuddyRequest(req)
-	// Accept-Language 按 realm 切（D5，billing 域未走 CommonHeaders，单独注入）。
-	req.Header.Set("Accept-Language", acceptLanguageFor(a))
-	if c != nil && c.UserAgent != "" {
+	req.Header.Set("X-Request-ID", session.NewMessageID())
+	switch {
+	case c != nil && c.UserAgent != "":
 		req.Header.Set("User-Agent", c.UserAgent)
-	} else if ua := c.billingUA(); ua != "" {
-		req.Header.Set("User-Agent", ua)
+	case c.attributionClientName() != "SaaS":
+		req.Header.Set("User-Agent", axiosUserAgent)
 	}
-	if a.UID != "" {
-		req.Header.Set("X-User-Id", a.UID)
+	if at := a.AccessTokenValue(); at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
 	}
-	if a.EnterpriseID != "" {
+	req.Header.Set("X-User-Id", a.UID)
+	if a.IsEnterprise() {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
 	}
-	if d := a.DomainValue(); d != "" {
+	if d := chatDomain(a); d != "" {
 		req.Header.Set("X-Domain", d)
 	}
-	// 设备风控头：billing 域（report/travel/balance/checkin）同样注入。
-	c.injectDeviceToken(req, a)
 }
 
-// RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
+// RefreshHeaders 刷新令牌的请求头（X-Refresh-Token 只允许出现在这里）。官方后台服务的 refreshSession
+// （内置 CLI 里也有同一份）：请求框架的头 + X-Domain（登录域，没有就用产品入口域）+ X-Refresh-Token +
+// X-Auth-Refresh-Source: plugin，UA 见 refreshUserAgent。官方另带的链路头（X-Trace-ID、b3、X-B3-*）由
+// RefreshToken 按这次刷新的根 span 补上（trace.go）。
 func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
-	c.CommonHeaders(req, a)
-	req.Header.Set("X-Refresh-Token", a.RefreshToken)
-	if a.EnterpriseID != "" {
-		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+	c.frameworkHeaders(req, a, c.refreshUserAgent(a))
+	d := chatDomain(a)
+	if d == "" {
+		d = "www.workbuddy.cn" // 国内版产品入口 https://www.workbuddy.cn 的 authority
 	}
-	// X-Auth-Refresh-Source 对齐官方客户端 refresh 渠道标识 "plugin"（D3）。
+	req.Header.Set("X-Domain", d)
+	req.Header.Set("X-Refresh-Token", a.RefreshToken)
 	req.Header.Set("X-Auth-Refresh-Source", "plugin")
+}
+
+// uuidDashed 把 32 位 hex 转成 UUID v4 文本形态（8-4-4-4-12）。
+//
+// 只插横线不够：官方所有 ID 都出自 crypto.randomUUID()，第 13 位恒为 "4"
+// （版本位）、第 17 位恒为 8/9/a/b（变体位）。裸 hex 加横线会产出
+// "…-cd98-4a67-…" 这种版本位乱跳的值，一条正则就能和官方区分开。
+func uuidDashed(h string) string {
+	if len(h) != 32 {
+		return h
+	}
+	b := []byte(h)
+	b[12] = '4'
+	// 变体位：保留低 2 bit 熵，高位固定为 10b（即 8/9/a/b）。
+	i := strings.IndexByte("0123456789abcdef", b[16])
+	if i < 0 {
+		i = 0
+	}
+	b[16] = "89ab"[i&0x3]
+	return string(b[0:8]) + "-" + string(b[8:12]) + "-" + string(b[12:16]) + "-" + string(b[16:20]) + "-" + string(b[20:32])
 }

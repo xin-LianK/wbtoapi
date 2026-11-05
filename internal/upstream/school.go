@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // school.go 开学季活动（school-season，活动期 2026-09-13 ~ 09-24）纯 API 自动化。
 //
 // 判据（2026-09-13 小程序 MCP 逆向 + 三账号实测，protocol.md §7.11）：
@@ -7,11 +11,12 @@
 //     webchat 普通会话不计数，纯 API 不做（需小程序内人工对话）。
 //   - 抽奖：POST /wheel/draw {draw_uuid}（前端生成 uuid，消耗 1 chance）。
 //
-// 端点基址 www.codebuddy.cn（billing 同域）；信封 {code,msg,data}，code=0 成功。
+// 端点基址 billingBase（国内版 www.workbuddy.cn）；信封 {code,msg,data}，code=0 成功。
 package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,7 +33,7 @@ func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]a
 	if body != nil {
 		raw, _ = json.Marshal(body)
 	}
-	req, err := http.NewRequest(method, c.billingBase(a)+schoolBase+path, bytes.NewReader(raw))
+	req, err := newAccountRequest(context.Background(), a, method, c.billingBase(a)+schoolBase+path, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -38,6 +43,8 @@ func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]a
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// 小程序里的请求由微信发，UA 是微信的（同 ReportMPEvent）。
+	req.Header.Set("User-Agent", c.miniProgramUserAgent())
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err
@@ -79,7 +86,7 @@ func mpEventBase(a *auth.Auth) map[string]any {
 	}
 }
 
-// ReportMPEvent 以小程序指纹向 www.codebuddy.cn/v2/report 批量上报事件。
+// ReportMPEvent 以小程序指纹向 billingBase（国内版 www.workbuddy.cn）的 /v2/report 批量上报事件。
 func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if len(events) == 0 {
 		return fmt.Errorf("mp report: no events")
@@ -100,7 +107,7 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BillingBaseCN+mpReportPath, bytes.NewReader(raw))
+	req, err := newAccountRequest(context.Background(), a, http.MethodPost, c.BillingBaseCN+mpReportPath, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -114,13 +121,16 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	req.Header.Set("X-Client-Version", "2.4.0")
 	req.Header.Set("X-Client-Platform", "mp-weixin")
 	req.Header.Set("X-Platform", "wechatmp")
+	// 小程序里的 wx.request 由微信发，UA 是微信的；没设时 Go 会发 Go-http-client/1.1。用和小程序
+	// 网页请求同一个 UA（miniProgramUA，未抓包）。
+	req.Header.Set("User-Agent", c.miniProgramUserAgent())
 	_, err = c.doJSON(req)
 	return err
 }
 
 // SchoolChatTimesEvents 构造一条 chat_request_send 事件（chat_3_times 计数）。
 func SchoolChatTimesEvents(conversationID string) map[string]any {
-	rid := NewEventID()
+	rid := NewRequestID() // 小程序没有源码可对照，形状按桌面端
 	return map[string]any{
 		"eventCode":   "chat_request_send",
 		"inputLength": 14, "isPlan": false, "isAutoExecuteTerminal": false,
@@ -205,7 +215,7 @@ func MiniPlaybookEvents(caseID, caseName string) []map[string]any {
 	send := map[string]any{
 		"eventCode": "playbook_prompt_send", "source": "discover",
 		"promptLength": 96, "isOfficial": 1,
-		"conversationId": NewEventID(),
+		"conversationId": NewConversationID(),
 		"extVersion":     "2.2.8",
 	}
 	for k, v := range base {

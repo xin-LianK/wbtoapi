@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package pace 控制出站到上游的请求节奏（账号维度）。
 //
 // 为什么需要这一层：pool 的在途租约（max_in_flight）限制的是「同时有几个请求

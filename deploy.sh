@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+# SPDX-License-Identifier: AGPL-3.0-only
+# 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 # workbuddy2api-panel 本地部署脚本（Git Bash / Linux / macOS / 飞牛 NAS 通用）
 #
 #   ./deploy.sh           编译 + 起容器

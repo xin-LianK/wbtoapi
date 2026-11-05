@@ -1,12 +1,20 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package main
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 )
 
 func TestDefault(t *testing.T) {
@@ -48,6 +56,24 @@ func TestPanelPackageDetailLimit(t *testing.T) {
 	}
 }
 
+func TestPanelUpdateCheck(t *testing.T) {
+	// 更新检查缺省开启：键缺席时保持 true，只有显式 false 才关闭。
+	c, err := ParseConfig([]byte(`{"panel":{"package_detail_limit":5}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Panel.UpdateCheck {
+		t.Fatal("update_check should default to true")
+	}
+	off, err := ParseConfig([]byte(`{"panel":{"update_check":false}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.Panel.UpdateCheck {
+		t.Fatal("explicit update_check=false should disable it")
+	}
+}
+
 func TestLoggingDefaults(t *testing.T) {
 	c := Default()
 	if err := c.normalize(); err != nil {
@@ -74,12 +100,45 @@ func TestLoggingDefaults(t *testing.T) {
 	if off.Logging.RequestClientInfo {
 		t.Fatalf("explicit false ignored: %+v", off.Logging)
 	}
-	fallback, err := ParseConfig([]byte(`{"logging":{"request_retention_days":0,"request_archive_max_mb":0}}`))
+	// 保留天数 0 = 永久保留（不再回落 7 天），负值回落默认；容量 <=0 回落默认。
+	fallback, err := ParseConfig([]byte(`{"logging":{"request_retention_days":0,"request_archive_max_mb":0,
+		"task_log_retention_days":-1,"task_log_max_mb":0,"system_log_retention_days":-5,"system_log_max_mb":-1,
+		"usage_retention_days":-3,"credit_log_retention_days":-2,"credit_log_max_mb":0}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback.Logging.RequestRetentionDays != 7 || fallback.Logging.RequestArchiveMaxMB != 100 {
-		t.Fatalf("logging fallback = %+v", fallback.Logging)
+	l := fallback.Logging
+	if l.RequestRetentionDays != 0 || l.RequestArchiveMaxMB != 100 || l.TaskLogRetentionDays != 30 || l.TaskLogMaxMB != 20 ||
+		l.SystemLogRetentionDays != 30 || l.SystemLogMaxMB != 50 || l.UsageRetentionDays != 0 ||
+		l.CreditLogRetentionDays != 0 || l.CreditLogMaxMB != 20 {
+		t.Fatalf("logging fallback = %+v", l)
+	}
+}
+
+// 任务日志、系统日志、用量统计、积分获取的留存：缺省开、30 / 30 天、20 / 50 MiB、用量和积分获取永久、
+// 积分获取 20 MiB；显式值照用。
+func TestLoggingRetentionDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	l := c.Logging
+	if !l.TaskLogEnabled || l.TaskLogRetentionDays != 30 || l.TaskLogMaxMB != 20 ||
+		!l.SystemLogEnabled || l.SystemLogRetentionDays != 30 || l.SystemLogMaxMB != 50 || l.UsageRetentionDays != 0 ||
+		!l.CreditLogEnabled || l.CreditLogRetentionDays != 0 || l.CreditLogMaxMB != 20 {
+		t.Fatalf("留存缺省值不对: %+v", l)
+	}
+	set, err := ParseConfig([]byte(`{"logging":{"task_log_enabled":false,"task_log_retention_days":0,"task_log_max_mb":5,
+		"system_log_enabled":false,"system_log_retention_days":3,"system_log_max_mb":8,"usage_retention_days":90,
+		"credit_log_enabled":false,"credit_log_retention_days":365,"credit_log_max_mb":2}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l = set.Logging
+	if l.TaskLogEnabled || l.TaskLogRetentionDays != 0 || l.TaskLogMaxMB != 5 ||
+		l.SystemLogEnabled || l.SystemLogRetentionDays != 3 || l.SystemLogMaxMB != 8 || l.UsageRetentionDays != 90 ||
+		l.CreditLogEnabled || l.CreditLogRetentionDays != 365 || l.CreditLogMaxMB != 2 {
+		t.Fatalf("显式值应照用: %+v", l)
 	}
 }
 
@@ -663,6 +722,36 @@ func TestBalanceRefreshDefaults(t *testing.T) {
 	}
 }
 
+// TestLivenessDefaults 定时测活：缺省开、每 30 分钟；可改分钟数；关掉时间隔为 0；开着但分钟数 <=0 回落 30。
+func TestLivenessDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedule.LivenessEnabled || c.LivenessInterval != 30*time.Minute {
+		t.Errorf("缺省: enabled=%v interval=%v", c.Schedule.LivenessEnabled, c.LivenessInterval)
+	}
+	fp := filepath.Join(t.TempDir(), "c.json")
+	for body, want := range map[string]time.Duration{
+		`{"schedule":{"liveness_minutes":10}}`:       10 * time.Minute,
+		`{"schedule":{"liveness_enabled":false}}`:    0,
+		`{"schedule":{"liveness_minutes":-5}}`:       30 * time.Minute,
+		`{"schedule":{"liveness_minutes":0}}`:        30 * time.Minute,
+		`{"schedule":{"balance_refresh_minutes":1}}`: 30 * time.Minute,
+	} {
+		if err := os.WriteFile(fp, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.LivenessInterval != want {
+			t.Errorf("%s: interval=%v want %v", body, c.LivenessInterval, want)
+		}
+	}
+}
+
 // TestPromptDefaultPassthrough 默认 prompt.mode=passthrough（对齐上游：透传客户端
 // 原始 system 是更保守的缺省）；custom 由用户显式选择，此时 PromptText 为内置默认（非空）。
 func TestPromptDefaultPassthrough(t *testing.T) {
@@ -925,5 +1014,102 @@ func TestNotifyDefaultFormatBark(t *testing.T) {
 	}
 	if c.Notify.Format != "generic" {
 		t.Errorf("非法 format 应回落 generic，got %q", c.Notify.Format)
+	}
+}
+
+// TestModelRoutes 模型路由：去两端空白；match / target 空着、target 带 * 都在加载时报错。
+func TestModelRoutes(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"model_routes":[{"match":" claude-* ","target":" glm-5.2"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ModelRoutes) != 1 || c.ModelRoutes[0].Match != "claude-*" || c.ModelRoutes[0].Target != "glm-5.2" {
+		t.Errorf("routes=%+v", c.ModelRoutes)
+	}
+	for raw, want := range map[string]string{
+		`{"model_routes":[{"match":"a","target":"b"},{"match":" ","target":"b"}]}`: "model_routes[1]",
+		`{"model_routes":[{"match":"a"}]}`:                                         "都不能为空",
+		`{"model_routes":[{"match":"a","target":"glm-*"}]}`:                        "不能带 *",
+	} {
+		if _, err := ParseConfig([]byte(raw)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err=%v want %q", raw, err, want)
+		}
+	}
+}
+
+// TestDNSServers dns_servers：去空白与空项，IP、IP:端口、IPv6 都认；写域名或端口不对在加载时报错；
+// WB2A_DNS 逗号分隔覆盖。
+func TestDNSServers(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"dns_servers":[" 223.5.5.5 ","","119.29.29.29:5353","2400:3200::1","[::1]:53"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"223.5.5.5", "119.29.29.29:5353", "2400:3200::1", "[::1]:53"}; !reflect.DeepEqual(c.DNSServers, want) {
+		t.Errorf("DNSServers=%v want %v", c.DNSServers, want)
+	}
+	for raw, want := range map[string]string{
+		`{"dns_servers":["dns.example.com"]}`: "不是 IP",
+		`{"dns_servers":["1.2.3.4:0"]}`:       "端口不对",
+		`{"dns_servers":["1.2.3.4:dns"]}`:     "端口不对",
+	} {
+		if _, err := ParseConfig([]byte(raw)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err=%v want %q", raw, err, want)
+		}
+	}
+	t.Setenv("WB2A_DNS", "223.5.5.5, 119.29.29.29")
+	c, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"223.5.5.5", "119.29.29.29"}; !reflect.DeepEqual(c.DNSServers, want) {
+		t.Errorf("WB2A_DNS 覆盖后 DNSServers=%v want %v", c.DNSServers, want)
+	}
+	if !slices.Contains(restartRequiredFields(c), "dns_servers") {
+		t.Error("配了 dns_servers 时应列为需重启")
+	}
+}
+
+// TestCrossRealmModes pool.cross_realm 三档：老布尔 true 读成合池、false 和 null 读成关，没写也是关；
+// 字符串只认三档，别的值和别的类型加载时报错。
+func TestCrossRealmModes(t *testing.T) {
+	for raw, want := range map[string]crossRealmMode{
+		`{}`:                                  livecfg.CrossRealmOff,
+		`{"pool":{"cross_realm":true}}`:       livecfg.CrossRealmMerge,
+		`{"pool":{"cross_realm":false}}`:      livecfg.CrossRealmOff,
+		`{"pool":{"cross_realm":null}}`:       livecfg.CrossRealmOff,
+		`{"pool":{"cross_realm":""}}`:         livecfg.CrossRealmOff,
+		`{"pool":{"cross_realm":"off"}}`:      livecfg.CrossRealmOff,
+		`{"pool":{"cross_realm":"merge"}}`:    livecfg.CrossRealmMerge,
+		`{"pool":{"cross_realm":"cn_first"}}`: livecfg.CrossRealmCNFirst,
+	} {
+		c, err := ParseConfig([]byte(raw))
+		if err != nil {
+			t.Errorf("%s: %v", raw, err)
+			continue
+		}
+		if c.Pool.CrossRealm != want {
+			t.Errorf("%s: CrossRealm=%q want %q", raw, c.Pool.CrossRealm, want)
+		}
+	}
+	for raw, want := range map[string]string{
+		`{"pool":{"cross_realm":"on"}}`:    `不认 "on"`,
+		`{"pool":{"cross_realm":"Merge"}}`: `不认 "Merge"`,
+		`{"pool":{"cross_realm":1}}`:       "不认 1",
+	} {
+		if _, err := ParseConfig([]byte(raw)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err=%v want %q", raw, err, want)
+		}
+	}
+	// 面板读到的是规范化后的值：老配置 true 显示成 "merge"。
+	c, err := ParseConfig([]byte(`{"pool":{"cross_realm":true}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(c.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"cross_realm":"merge"`) {
+		t.Errorf("序列化结果=%s，应含 \"cross_realm\":\"merge\"", b)
 	}
 }

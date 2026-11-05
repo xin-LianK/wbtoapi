@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // 冷却与熔断：Cooldown（固定时长账号级冷却）、CooldownSoftRate（账号级软冷却，对齐
 // 上游重置时间或有界退避）、CooldownSoftForModel（模型级软冷却，对齐重置墙钟）、
 // BlockModelBackoff/Clear（11102 负缓存）、软冷却封顶、熔断失败累计、签到解冻。
@@ -191,7 +195,11 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
-		e.until = time.Now().Add(d)
+		now := time.Now()
+		if e.wavePausedLocked(now) && now.Add(d).Before(e.until) {
+			return // 风控波暂停期内，更短的冷却不覆盖暂停
+		}
+		e.until = now.Add(d)
 		e.coolKind = kind
 		e.reason = reason
 		// 非模型级冷却入口：清空会参与路由的模型级冷却，避免上一次
@@ -228,7 +236,7 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
-		} else {
+		} else if !e.wavePausedLocked(now) { // 风控波暂停期内不记账号级软冷却
 			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
 			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
 			if e.coolKind != CoolSoft || !now.Before(e.until) {
@@ -242,6 +250,31 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 		}
 		p.dirty.Store(true)
 	}
+}
+
+// CooldownModel 只冷却 (账号, 模型)：写 modelCooldowns[model]，不动账号级冷却，这个号的
+// 别的模型照常可选。用于几秒到几十秒就会过去的限流（14003「模型繁忙」、每秒/每分钟限额）。
+// 截止封顶 soft_rate_max；该模型已有更晚的冷却（比如 6004 对齐到上游重置时间）时不缩短它。
+func (p *Pool) CooldownModel(uid, model string, d time.Duration, reason string) {
+	if uid == "" || model == "" || d <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	until := p.cappedSoftUntilLocked(now, now.Add(d))
+	if old, exists := e.modelCooldowns[model]; exists && !old.AuditOnly && old.Until.After(until) {
+		return
+	}
+	if e.modelCooldowns == nil {
+		e.modelCooldowns = map[string]modelCooldown{}
+	}
+	e.modelCooldowns[model] = modelCooldown{Until: until, Reason: reason}
+	p.dirty.Store(true)
 }
 
 // RecordModelRateLimitAudit 记录无法参与模型路由的 6004 展示项。
@@ -356,9 +389,16 @@ func (p *Pool) BlockModelBackoff(uid, model, reason string) {
 	p.dirty.Store(true)
 }
 
-// BlockModelClear 清除 (账号, 模型) 的确定性模型拒绝负缓存（11102/11158；该模型
-// 实测又通了）。半开探测或正常请求对该模型成功后调用（handler 成功路径）。只清
-// 这两类条目、不碰 6004 独立冷却表——6004 有自身上游重置墙钟语义，成功不该抹掉。
+// modelDenied 台账条目是不是确定性的模型拒绝（11102 后端没有这个模型、11158 这类账号无权用）：
+// reason 恒以业务码开头（见 upstream.ModelBlockReason / ModelForbiddenReason），与 6004 等
+// 限额条目互不干扰。
+func modelDenied(reason string) bool {
+	return strings.HasPrefix(reason, "11102") || strings.HasPrefix(reason, "11158")
+}
+
+// BlockModelClear 清除 (账号, 模型) 的确定性模型拒绝负缓存（11102，以及不接的模型名单里 11158
+// 自动加的项；该模型实测又通了）。半开探测、正常请求或指定模型测活成功后调用（handler 成功路径）。
+// 只清这两类、不碰 6004 独立冷却表和手动加的名单——6004 有自身上游重置墙钟语义，成功不该抹掉。
 func (p *Pool) BlockModelClear(uid, model string) {
 	if uid == "" || model == "" {
 		return
@@ -366,11 +406,12 @@ func (p *Pool) BlockModelClear(uid, model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
-	if !ok || len(e.modelCooldowns) == 0 {
+	if !ok {
 		return
 	}
+	p.clearAutoBlockLocked(e, model)
 	mc, exists := e.modelCooldowns[model]
-	if !exists || (!strings.HasPrefix(mc.Reason, "11102") && !strings.HasPrefix(mc.Reason, "11158")) {
+	if !exists || !modelDenied(mc.Reason) {
 		return
 	}
 	delete(e.modelCooldowns, model)
@@ -427,11 +468,23 @@ func (p *Pool) ModelBlockedForRealm(model, realm string) ModelBlockStatus {
 		if e.disabled || e.paused {
 			continue // 禁用/暂停号不参与：它们的不可用与模型无关
 		}
-		if !e.modelCooled(now, model) {
+		// 暂停选号（paused）、被代理池拦着的号与禁用号同口径跳过：它此刻不可选，「能服务」的
+		// 证明不成立——否则一个暂停的健康号会掩盖「其余号全被模型级冷却挡住」。
+		if e.excluded() {
+			continue // 禁用/暂停/被拦的号不参与：它们的不可用与模型无关
+		}
+		if !p.servesModel(e, model) {
+			continue // 按目录本就接不了这个模型（如企业专属模型之于个人号）：不算「能服务」
+		}
+		refused := e.refusedBy(model)
+		if !e.modelCooled(now, model) && refused == nil {
 			// 还有账号能服务这个模型 → 不是模型级阻塞。
 			return ModelBlockStatus{}
 		}
 		st.Count++
+		if refused != nil && refused.Auto && st.Reason == "" {
+			st.Reason = refused.Reason // 名单里上游拒绝后自动加的：一直屏蔽，没有解封时刻
+		}
 		if mc, ok := e.modelCooldowns[model]; ok {
 			if st.Reason == "" {
 				st.Reason = mc.Reason
@@ -468,6 +521,9 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		now := time.Now()
+		if e.wavePausedLocked(now) {
+			return // 风控波暂停期内不记账号级软冷却：暂停结束后真被限流会再记
+		}
 		if !resetAt.IsZero() {
 			e.until = p.cappedSoftUntilLocked(now, resetAt)
 		} else if e.coolKind != CoolSoft || !now.Before(e.until) {

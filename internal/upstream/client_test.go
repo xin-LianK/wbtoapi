@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package upstream
 
 import (
@@ -13,6 +17,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 func TestClassify(t *testing.T) {
@@ -60,7 +65,10 @@ func TestClassify(t *testing.T) {
 		{500, `rate-limited upstream`, ErrSoftRate}, // 限流文案优先于 5xx 分类
 		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
-		{400, `{"code":"11-128","msg":"blocked by security policy"}`, ErrContentBlocked},
+		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		// 11128 + request illegal 是请求被拦截（10-19 生产：国际版缺 X-Conversation-ID），
+		// 不是 11140 那种账号授权封禁，不能落到账号故障去禁用账号。
+		{400, `{"code":11128,"msg":"request illegal","displayMsg":{"en":"Request blocked. Please send it again"}}`, ErrContentBlocked},
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
@@ -249,14 +257,28 @@ func jsonResp(status int, body string) *http.Response {
 
 func testClient(fn rtFunc) *Client {
 	return &Client{
-		HTTP:          &http.Client{Transport: fn},
+		// 网页登录态的两个端点统一在这里答复，用例只关心业务请求。
+		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+			if resp, ok := upstreamtest.WebSessionRoundTrip(r); ok {
+				return resp, nil
+			}
+			return fn(r)
+		})},
 		ChatBaseCN:    "https://chat.example",
 		BillingBaseCN: "https://billing.example",
+		WebBaseCN:     "https://web.example",
 	}
 }
 
 func TestRefreshSuccess(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v2/plugin/account" {
+			// 刷新后的取账号用新令牌。
+			if r.Header.Get("Authorization") != "Bearer newat" {
+				return nil, errors.New("account fetch should use the new token")
+			}
+			return jsonResp(200, `{"code":0,"data":{"uid":""}}`), nil
+		}
 		if !strings.HasSuffix(r.URL.Path, "/v2/plugin/auth/token/refresh") {
 			return nil, errors.New("wrong path: " + r.URL.Path)
 		}
@@ -338,9 +360,6 @@ func TestChatStreamSendsHeadersAndStreamTrue(t *testing.T) {
 		t.Errorf("200 response should carry nil body, got %q", respBody)
 	}
 	rc.Close()
-	// X-Product 走 desktop profile 的 deploymentType 缺省值 "SaaS"。
-	// 旧断言是 "WorkBuddy"——那是把产品名当成 deploymentType 的误判，
-	// 官方客户端从不发该值（见 headers_desktop_test.go）。
 	if gotAuth != "Bearer at" || gotUID != "u1" || gotProduct != "SaaS" {
 		t.Errorf("headers: auth=%q uid=%q product=%q", gotAuth, gotUID, gotProduct)
 	}
@@ -353,12 +372,13 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	var outbound []byte
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
+		case strings.Contains(r.URL.Path, "/console/enterprises/"):
+			t.Errorf("个人号不应探企业端点")
+			return jsonResp(500, `{}`), nil
+		case strings.HasSuffix(r.URL.Path, "/v3/config"):
 			return jsonResp(200, `{"code":0,"data":{"models":[
 				{"id":"glm-5.2","name":"GLM-5.2","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":["low","high"]}}
-			],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
-		case strings.HasSuffix(r.URL.Path, "/v3/config"):
-			return jsonResp(200, `{"code":0,"data":{"models":[]}}`), nil
+			]}}`), nil
 		default:
 			outbound, _ = io.ReadAll(r.Body)
 			return &http.Response{
@@ -462,22 +482,21 @@ func TestChatStreamReadsMultipleChunksOverRealTransport(t *testing.T) {
 	}
 }
 
+// TestUserResourceAggregation 汇总查不到时按逐包合计：付费包与免费包两个列表相加。
 func TestUserResourceAggregation(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
-			return nil, errors.New("wrong path: " + r.URL.Path)
-		}
 		if r.Method != http.MethodPost {
 			return nil, errors.New("want POST")
 		}
-		body, _ := io.ReadAll(r.Body)
-		if !bytes.Contains(body, []byte(`"ProductCode":"p_tcaca"`)) {
-			return nil, errors.New("missing ProductCode: " + string(body))
+		switch r.URL.Path {
+		case resourceSummaryPath:
+			return jsonResp(404, `{"code":404,"msg":"not found"}`), nil
+		case resourcePaidPath:
+			return jsonResp(200, resourceList(`{"PackageName":"专业版","CycleCapacitySizePrecise":"2000","CycleCapacityRemainPrecise":"1200"}`)), nil
+		case resourceFreePath:
+			return jsonResp(200, resourceList(`{"PackageName":"体验包","CycleCapacitySizePrecise":"1000","CycleCapacityRemainPrecise":"300"}`)), nil
 		}
-		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"TotalCount":2,"TotalDosage":3000,"Accounts":[
-			{"PackageName":"签到包","CapacitySize":2000,"CapacityRemain":1200,"CapacityUsed":800,"CycleCapacitySize":2000,"CycleCapacityRemain":1200,"CycleCapacityUsed":800},
-			{"PackageName":"体验包","CapacitySize":1000,"CapacityRemain":300,"CapacityUsed":700,"CycleCapacitySize":1000,"CycleCapacityRemain":300,"CycleCapacityUsed":700}
-		]}}}}`), nil
+		return nil, errors.New("wrong path: " + r.URL.Path)
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	remain, total, err := c.UserResource(a)
@@ -493,11 +512,7 @@ func TestUserResourceAggregation(t *testing.T) {
 }
 
 func TestUserResourceNegativeClamped(t *testing.T) {
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		return jsonResp(200, `{"code":0,"data":{"Response":{"Data":{"Accounts":[
-			{"PackageName":"p","CycleCapacitySize":100,"CycleCapacityRemain":-50,"CycleCapacityUsed":150}
-		]}}}}`), nil
-	})
+	c := testClient(resourceRT(`{"PackageName":"p","CycleCapacitySizePrecise":"100","CycleCapacityRemainPrecise":"-50"}`))
 	remain, total, err := c.UserResource(&auth.Auth{AccessToken: "at"})
 	if err != nil || remain != 0 {
 		t.Errorf("remain=%d err=%v, want 0 (clamped)", remain, err)
@@ -508,8 +523,8 @@ func TestUserResourceNegativeClamped(t *testing.T) {
 }
 
 func TestDailyCheckinAlready(t *testing.T) {
-	c := testClient(func(r *http.Request) (*http.Response, error) {
-		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/daily-checkin") {
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != dailyCheckinPath {
 			return nil, errors.New("wrong path")
 		}
 		return jsonResp(200, `{"code":14001,"msg":"今日已签到"}`), nil
@@ -541,14 +556,15 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Timeout != 0 {
 		t.Errorf("ChatHTTP.Timeout=%v want 0 (no total cap)", c.ChatHTTP.Timeout)
 	}
-	// 共享同一个 Transport 实例，连接池不重复。
+	// 共享同一个按号选线路的 Transport（route.go），连接池不重复。
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
-		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
+		t.Errorf("ChatHTTP and HTTP must share the same Transport")
 	}
-	htr, ok := c.ChatHTTP.Transport.(*http.Transport)
-	if !ok {
+	rt, ok := c.ChatHTTP.Transport.(routedTransport)
+	if !ok || rt.t != c.routes {
 		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
 	}
+	htr := c.routes.base
 	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
 		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)
 	}
@@ -658,21 +674,17 @@ func TestModelRateCacheEffectiveAndNormalized(t *testing.T) {
 }
 
 func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
-	// CLI 目录给 flash 精简字段（128K / 固定 high）；IDE /v3/config 给完整能力。
-	var sawIDE bool
+	// 个人号只拉 /v3/config（桌面端内置 CLI 的请求形状），不再探企业端点、不换 IDE UA。
+	var sawV3 bool
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
-			return jsonResp(200, `{"code":0,"data":{"models":[
-				{"id":"deepseek-v4.1-flash","name":"Deepseek-V4.1-Flash","maxInputTokens":1000000,"maxOutputTokens":128000,"credits":"x0.03 credits","supportsReasoning":true,"onlyReasoning":true,"reasoning":{"effort":"high","summary":"auto"}}
-			],"agents":[{"name":"cli","models":["deepseek-v4.1-flash"]}]}}`), nil
 		case strings.HasSuffix(r.URL.Path, "/v3/config"):
-			sawIDE = true
-			if r.Header.Get("User-Agent") != codeBuddyIDEUA {
-				t.Errorf("v3/config UA=%q want %s", r.Header.Get("User-Agent"), codeBuddyIDEUA)
+			sawV3 = true
+			if want := "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"; r.Header.Get("User-Agent") != want {
+				t.Errorf("v3/config UA=%q want %s", r.Header.Get("User-Agent"), want)
 			}
-			if r.Header.Get("X-Product") != "SaaS" {
-				t.Errorf("X-Product=%q want SaaS", r.Header.Get("X-Product"))
+			if r.Header.Get("X-Product") != "SaaS" || !r.Close {
+				t.Errorf("X-Product = %q want SaaS（请求框架给每个请求都加），且应 Connection: close（%v）", r.Header.Get("X-Product"), r.Close)
 			}
 			if r.Header.Get("X-User-Id") != "u1" {
 				t.Errorf("X-User-Id=%q want u1", r.Header.Get("X-User-Id"))
@@ -690,7 +702,7 @@ func TestFetchModelsOverlaysV3ConfigCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch models: %v", err)
 	}
-	if !sawIDE {
+	if !sawV3 {
 		t.Fatal("expected /v3/config request")
 	}
 	if len(infos) != 1 {

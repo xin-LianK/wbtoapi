@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // responses.go OpenAI Responses API 兼容层：POST /v1/responses。
 //
 // 存在理由：Codex CLI 与新版 OpenAI Agent SDK 走的是 Responses API（`input` /
@@ -419,12 +423,12 @@ func (r *responsesTranslator) responseObject(status string, output []any) map[st
 		output = []any{}
 	}
 	obj := map[string]any{
-		"id":         r.id,
-		"object":     "response",
-		"created_at": time.Now().Unix(),
-		"status":     status,
-		"model":      r.model,
-		"output":     output,
+		"id":                  r.id,
+		"object":              "response",
+		"created_at":          time.Now().Unix(),
+		"status":              status,
+		"model":               r.model,
+		"output":              output,
 		"parallel_tool_calls": true,
 	}
 	if status == "completed" {

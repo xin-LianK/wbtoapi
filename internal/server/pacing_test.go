@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // pacing_test.go 出站节奏在 handler 主链路上的端到端回归。
 //
 // 为什么必须端到端测：pacer.Wait 的单元行为已由 internal/pace 覆盖，但那只证明

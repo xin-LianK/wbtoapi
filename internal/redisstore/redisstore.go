@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // Package redisstore 封装 Upstash（Redis）持久化，并提供内存降级（Noop）。
 //
 // 设计约束：Upstash 走公网 TLS，单次 RTT 可能 50~300ms，因此所有写操作都是
@@ -38,6 +42,11 @@ type Store interface {
 	SaveState(data []byte)
 	// LoadState 读池状态快照；仅在启动时调用（同步）。
 	LoadState() ([]byte, bool)
+	// SaveSessions 异步写会话记录快照（出站会话 id 与每段对话用过的号，见 session.Persist），
+	// 与本地 sessions.json 并存，仅作恢复备份。
+	SaveSessions(data []byte)
+	// LoadSessions 读会话记录快照；仅在启动时调用（同步）。
+	LoadSessions() ([]byte, bool)
 	// Close 关停 Store：Upstash 等待已提交的异步写全部执行完再关底层连接
 	// （停机语义：最后一笔 Redis 镜像必须写完），之后新提交的写直接丢弃；幂等。
 	// Noop 为空操作。进程退出前在 pool.Close() 之后调用。
@@ -47,6 +56,7 @@ type Store interface {
 const (
 	bindPrefix  = "wb2api:bind:"
 	stateKey    = "wb2api:state"
+	sessionsKey = "wb2api:sessions"
 	readTimeout = 3 * time.Second
 )
 
@@ -162,6 +172,9 @@ func (u *Upstash) closeOnceGuard() {
 	}
 }
 
+// closeWaitTimeout 关停时等待在途写的上限；测试调短以便覆盖超时兜底。
+var closeWaitTimeout = 10 * time.Second
+
 // Close 等待已提交的异步写全部执行完毕，再关底层 redis 连接；幂等。
 // 之后新提交的写直接丢弃（goWrite 的 done 检查）。停机路径在 pool.Close() 后调用：
 // pool 的最后一次 Flush→SaveState 已提交，本方法保证它写完才返回。
@@ -177,7 +190,7 @@ func (u *Upstash) Close() error {
 	go func() { u.wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(closeWaitTimeout):
 		// 兜底超时（单写上限 5s，10s 富余）：卡死的写不应阻塞进程退出。
 		log.Printf("[redisstore] WARN: Close 等待在途写超时，放弃（镜像可能未写完）")
 	}
@@ -220,21 +233,31 @@ func (u *Upstash) DelBind(key string) {
 }
 
 // SaveState 异步写池状态 JSON 快照。
-func (u *Upstash) SaveState(data []byte) {
+func (u *Upstash) SaveState(data []byte) { u.saveSnapshot("SaveState", stateKey, data) }
+
+// LoadState 同步读池状态快照。
+func (u *Upstash) LoadState() ([]byte, bool) { return u.loadSnapshot(stateKey) }
+
+// SaveSessions 异步写会话记录快照。
+func (u *Upstash) SaveSessions(data []byte) { u.saveSnapshot("SaveSessions", sessionsKey, data) }
+
+// LoadSessions 同步读会话记录快照。
+func (u *Upstash) LoadSessions() ([]byte, bool) { return u.loadSnapshot(sessionsKey) }
+
+func (u *Upstash) saveSnapshot(op, key string, data []byte) {
 	u.goWrite(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := u.client.Set(ctx, stateKey, data, keyTTL).Err(); err != nil {
-			log.Printf("[redisstore] debug: SaveState: %v", err)
+		if err := u.client.Set(ctx, key, data, keyTTL).Err(); err != nil {
+			log.Printf("[redisstore] debug: %s: %v", op, err)
 		}
 	})
 }
 
-// LoadState 同步读池状态快照。
-func (u *Upstash) LoadState() ([]byte, bool) {
+func (u *Upstash) loadSnapshot(key string) ([]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
-	v, err := u.client.Get(ctx, stateKey).Bytes()
+	v, err := u.client.Get(ctx, key).Bytes()
 	if err != nil {
 		return nil, false
 	}
@@ -266,4 +289,6 @@ func (Noop) DelBind(string)                        {}
 func (Noop) LoadBinds() map[string]string          { return nil }
 func (Noop) SaveState([]byte)                      {}
 func (Noop) LoadState() ([]byte, bool)             { return nil, false }
+func (Noop) SaveSessions([]byte)                   {}
+func (Noop) LoadSessions() ([]byte, bool)          { return nil, false }
 func (Noop) Close() error                          { return nil }

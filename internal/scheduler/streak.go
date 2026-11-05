@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // streak.go 连登管家：签到排程后自动检查连登兑换档位 → 可兑换即兑换 → 按抽奖次数抽奖。
 //
 // 背景（2026-09-12）：成长中心连登档位（7d/14d/28d）按连续登录天数解锁，兑换发
@@ -10,6 +14,7 @@ import (
 	"encoding/json"
 	"log"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -21,6 +26,9 @@ func (s *Scheduler) RunStreakBonusNow() {
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
 			continue
+		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.AccessTokenValue() == "" {
@@ -44,11 +52,19 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	if credit, err := s.cfg.Upstream.ClaimGift(a); err == nil {
 		log.Printf("streak-bonus %s: 🎊 新手礼包 +%dc", logfmt.Label(a.UID, a.Nickname), credit)
 	}
-	// 补偿改为「先查状态 → 待领才领」（issue #189）：旧写法 `if credit, err :=
-	// ClaimCompensation(...); err == nil` 把「没有补偿」「已经领过」与「领取真的
-	// 失败」压成同一形态，补偿带截止日（实测那次为 10/22）时签到一旦停摆就静默
-	// 过期。现在无待领不记日志，但状态查询失败与领取失败一律显式告警。
-	s.claimCompensationQuiet(a)
+	if result, err := s.cfg.Upstream.ClaimAvailableCompensation(a); err != nil {
+		log.Printf("streak-bonus %s: 补偿检查/领取失败: %v", logfmt.Label(a.UID, a.Nickname), err)
+	} else if result.NewlyClaimed {
+		log.Printf("streak-bonus %s: 🎊 补偿领取 +%dc", logfmt.Label(a.UID, a.Nickname), result.Credit)
+		// 签到的余额查询在连登管家之前；补偿到账后再读一次，立即更新余额与解冻状态。
+		remain, total, expiring, earliestAt, earliestRemaining, balanceErr := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, s.ExpiringSoonWindow())
+		if balanceErr != nil {
+			log.Printf("streak-bonus %s: 补偿已领取，余额刷新失败: %v", logfmt.Label(a.UID, a.Nickname), balanceErr)
+		} else {
+			s.cfg.Pool.ReenableIfCredits(a.UID, remain, total)
+			s.cfg.Pool.SetCreditsDetailed(a.UID, remain, total, expiring, earliestAt, earliestRemaining)
+		}
+	}
 
 	full, err := s.cfg.Upstream.GrowthStreakFull(a)
 	if err != nil {
@@ -65,7 +81,7 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 		if status == "locked" || status == "claimed" {
 			continue
 		}
-		if err := s.cfg.Upstream.GrowthRedeemTier(a, tier.Tier); err != nil {
+		if err := s.cfg.Upstream.GrowthRedeemTier(a, tier.Tier, int64(tier.Credit)); err != nil {
 			// 未解锁（403）属预期，静默；其余记日志。
 			log.Printf("streak-bonus %s: redeem %s: %v", logfmt.Label(a.UID, a.Nickname), tier.Tier, err)
 			continue
@@ -92,14 +108,22 @@ func (s *Scheduler) streakBonusAccount(a *auth.Auth) {
 	}
 }
 
-// compactJSON 裁剪奖品载荷（日志单行可读）。
+// compactJSON 裁剪奖品载荷（日志单行可读）。按字节截到 220 后退回到字符边界，
+// 不把中文奖品名切成半个字。
 func compactJSON(raw json.RawMessage) string {
 	s := string(raw)
-	if len(s) > 220 {
-		return s[:220] + "…"
+	if len(s) <= 220 {
+		return s
 	}
-	return s
+	cut := 220
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
+
+// streakNow 供测试固定时钟（默认 time.Now）：补签日期与“昨天”的判定基准。
+var streakNow = time.Now
 
 // makeupYesterday 昨日漏签且有补签卡时自动补签（保住连登连续天数）。
 // 无卡 / 无漏签 / 查询失败均静默（不影响主流程）。
@@ -112,7 +136,7 @@ func (s *Scheduler) makeupYesterday(a *auth.Auth) {
 	if err != nil || full.MakeupCards.Balance <= 0 {
 		return
 	}
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	yesterday := streakNow().AddDate(0, 0, -1).Format("2006-01-02")
 	if err := s.cfg.Upstream.UseMakeupCard(a, yesterday); err != nil {
 		log.Printf("streak-bonus %s: 补签 %s 失败: %v", logfmt.Label(a.UID, a.Nickname), yesterday, err)
 		return

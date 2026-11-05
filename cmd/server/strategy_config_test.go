@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package main
 
 import (
@@ -50,7 +54,7 @@ func TestSaveRegionSchedulingHotAppliesAndRejectsInvalid(t *testing.T) {
 	up := upstream.New()
 	sch := scheduler.New(scheduler.Config{})
 	raw := []byte(`{"pool":{"strategy":{"domestic":"round_robin"},"account_order":{"domestic":["b","a"]}}}`)
-	restart, err := saveConfig(raw, fp, live, p, up, sch, nil)
+	restart, err := saveConfig(raw, fp, live, p, up, sch, nil, logStores{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +79,7 @@ func TestSaveRegionSchedulingHotAppliesAndRejectsInvalid(t *testing.T) {
 	if cfg.Pool.Strategy.International != pool.SequentialExhaust || !strings.Contains(string(saved), "keep") {
 		t.Fatalf("merge lost config: %s", saved)
 	}
-	_, err = saveConfig([]byte(`{"pool":{"strategy":{"domestic":"bad"}}}`), fp, live, p, up, sch, nil)
+	_, err = saveConfig([]byte(`{"pool":{"strategy":{"domestic":"bad"}}}`), fp, live, p, up, sch, nil, logStores{})
 	if err == nil {
 		t.Fatal("invalid strategy accepted")
 	}

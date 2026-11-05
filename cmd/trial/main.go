@@ -1,10 +1,16 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // trial 一次性批量领取 global trial 加油包：遍历 auths 下全部账号，
 // 仅对 global 账号执行 /billing/ide/trial（CN 无此端点，明确提示不适用）。
 //
 // 用法：
 //
 //	# 本地：在项目根目录（需 config.json + auths/ + data/）直接 run
-//	go run ./cmd/trial
+//	go run ./cmd/trial [-proxies data/proxies.json] [凭证目录]
+//
+// 号按网关代理池里的绑定走代理（-proxies 指网关的 proxies.json，只读）；被代理池拦着的号记 SKIP。
 //
 //	# 容器内：先 cp 进去再 exec
 //	docker cp trial workbuddy2api:/tmp/trial
@@ -17,15 +23,19 @@
 //	... | GLOBAL | OK | trial granted
 //	... | GLOBAL | ALREADY | 已领取过（幂等，不算失败）
 //	... | CN     | N/A   | not applicable
+//	... | GLOBAL | SKIP  | 代理：代理「甲」连不上（…）
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/proxies"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -50,6 +60,7 @@ const (
 	trialAlready trialStatus = "ALREADY"
 	trialNotApp  trialStatus = "N/A" // CN 账号不适用
 	trialFailed  trialStatus = "FAIL"
+	trialSkipped trialStatus = "SKIP" // 代理池拦着：请求出不去
 )
 
 type trialRow struct {
@@ -59,19 +70,37 @@ type trialRow struct {
 	detail string
 }
 
+// exitFunc 供测试替换（默认 os.Exit；测试换成 panic 以进程内捕获退出码）。
+var exitFunc = os.Exit
+
 func main() {
+	exitFunc(run(os.Args[1:], os.Stdout, os.Stderr, upstream.New()))
+}
+
+func run(args []string, stdout, stderr io.Writer, up *upstream.Client) int {
+	fs := flag.NewFlagSet("trial", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	proxiesPath := fs.String("proxies", filepath.Join("data", "proxies.json"), "网关的代理池文件（只读），号按绑定走代理；文件不存在就都走默认线路")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 	authDir := "auths"
-	if len(os.Args) > 1 {
-		authDir = os.Args[1]
+	if fs.NArg() > 0 {
+		authDir = fs.Arg(0)
 	}
 	files, err := filepath.Glob(filepath.Join(authDir, "workbuddy-*.json"))
 	if err != nil || len(files) == 0 {
-		fmt.Fprintf(os.Stderr, "no auth files in %s\n", authDir)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "no auth files in %s\n", authDir)
+		return 1
 	}
 	sort.Strings(files)
+	reg, err := proxies.OpenReadOnly(*proxiesPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	up.SetRouter(reg)
 
-	up := upstream.New()
 	// trial 是 global 专属端点：必须开启 global realm 路由，否则 upstream.New() 的
 	// GlobalEnabled 零值 false 会把请求路由到 CN base（codebuddy.cn）而必然失败。
 	up.GlobalEnabled = true
@@ -99,16 +128,22 @@ func main() {
 			rows = append(rows, r)
 			continue
 		}
+		reg.Track(a, false)
+		if reason := reg.Blocked(a.UID); reason != "" {
+			r.status, r.detail = trialSkipped, "代理："+reason
+			rows = append(rows, r)
+			continue
+		}
 
 		r.status, r.detail = classifyTrial(up.ClaimTrial(a))
 		rows = append(rows, r)
 	}
 
-	var okN, alreadyN, notAppN, failN int
-	fmt.Printf("uid                                  | nick        | status  | detail\n")
-	fmt.Printf("-------------------------------------+-------------+---------+------------------------------\n")
+	var okN, alreadyN, notAppN, skipN, failN int
+	fmt.Fprintf(stdout, "uid                                  | nick        | status  | detail\n")
+	fmt.Fprintf(stdout, "-------------------------------------+-------------+---------+------------------------------\n")
 	for _, r := range rows {
-		fmt.Printf("%-36s | %-11s | %-7s | %s\n",
+		fmt.Fprintf(stdout, "%-36s | %-11s | %-7s | %s\n",
 			trunc(r.uid, 36), trunc(r.nick, 11), r.status, r.detail)
 		switch r.status {
 		case trialOK:
@@ -117,12 +152,15 @@ func main() {
 			alreadyN++
 		case trialNotApp:
 			notAppN++
+		case trialSkipped:
+			skipN++
 		default:
 			failN++
 		}
 	}
-	fmt.Printf("\ntotal=%d ok=%d already=%d na=%d fail=%d\n",
-		len(rows), okN, alreadyN, notAppN, failN)
+	fmt.Fprintf(stdout, "\ntotal=%d ok=%d already=%d na=%d fail=%d skip=%d\n",
+		len(rows), okN, alreadyN, notAppN, failN, skipN)
+	return 0
 }
 
 func trunc(s string, n int) string {

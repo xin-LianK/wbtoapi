@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // logging.go 请求级表格日志：每个 /v1/chat/completions 请求结束后打印一行到 stdout。
 package server
 
@@ -27,6 +31,13 @@ import (
 // 否则一条请求就能把归档行撑大。截断只影响展示，不影响请求处理。
 const maxUserAgentLen = 200
 
+// maxFailureReasonRunes 请求记录里失败原因保留的字数；maxErrorBodyCapture 为提取原因
+// 最多留下的失败响应正文字节数（只看开头，错误 JSON 的 message 一般就在前面）。
+const (
+	maxFailureReasonRunes = 200
+	maxErrorBodyCapture   = 4 << 10
+)
+
 // chatSeq 进程级请求序号。
 var chatSeq atomic.Int64
 
@@ -34,12 +45,12 @@ var chatSeq atomic.Int64
 // 测试包经 TestMain 置 false 关闭 stdout 噪音，需要断言行输出的测试用 withChatLog 临时开启（R5）。
 var chatLogEnabled = true
 
-// chatLogOut 聊天表格日志的输出目标。生产默认 os.Stdout；main 在启用管理面板时
-// 经 SetChatLogOutput 注入 MultiWriter，把每行镜像进 /panel/api/logs 的环形缓冲，
-// stdout 行为不变。需在开始服务前调用一次（无并发竞争窗口）。
+// chatLogOut 聊天表格日志的输出目标，生产就是 os.Stdout。面板的运行日志不收这些行：
+// 同样的信息在「请求记录」里，混进日志环还会把任务和系统日志挤掉。
+// 测试经 SetChatLogOutput 换成缓冲区，需在开始服务前调用（无并发竞争窗口）。
 var chatLogOut io.Writer = os.Stdout
 
-// SetChatLogOutput 替换聊天表格日志输出目标（仅 main 启动期调用一次）。
+// SetChatLogOutput 替换聊天表格日志输出目标（测试用）。
 func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 
 // chatStat 单个 chat 请求的日志统计；handler 挂 defer，请求出口后落一行。
@@ -49,6 +60,7 @@ type chatStat struct {
 	mode             string // "stream" | "sync"
 	uid              string // 完整 uid，展示时只取前 8 位
 	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	proxy            string // 号走的代理名（只进请求记录，不进流水行：没起名的代理名字就是 IP）
 	ttfb             time.Duration
 	toks             int // <0 表示 usage 缺失 → 显示 "-"
 	status           int
@@ -70,6 +82,11 @@ type chatStat struct {
 	// 关闭，或非 chat 路径），展示层一律以 "-" 兜底。
 	clientIP  string
 	userAgent string
+
+	// errMsg 流已开始后才出错时的原因（HTTP 头已发出、状态码是 200，响应观察器截不到
+	// 失败正文），或请求记录里要写得比回给客户端的更具体的原因（号的代理连不上：客户端不该看到代理名）；
+	// 其余失败的原因从回给客户端的错误响应里取，见 failureReason。
+	errMsg string
 
 	logged bool
 }
@@ -111,13 +128,12 @@ type chatStatsReader struct {
 	hasCredit  bool
 	credit     float64
 	errorFrame bool
-	// cacheHit/cacheMiss 上游末帧 usage.prompt_cache_hit_tokens / miss_tokens，
-	// 供用量桶的命中率维度与 reqlog 逐次记录（issue #92）。
-	hasCacheHit  bool
-	cacheHit     int
-	cacheMiss    int
-	hasCacheMiss bool
-	pend         []byte // 已读未返回的行缓存
+	// cacheHit/cacheMiss 上游末帧 usage 里的前缀缓存命中 / 未命中（口径同非流式，见
+	// upstream.UsageCacheTokens），供用量桶的命中率维度与 reqlog 逐次记录（issue #92）。
+	hasCache  bool
+	cacheHit  int64
+	cacheMiss int64
+	pend      []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -165,47 +181,49 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	}
 	var chunk struct {
 		Error json.RawMessage `json:"error"`
-		Usage *struct {
-			PromptTokens         *int     `json:"prompt_tokens"`
-			CompletionTokens     *int     `json:"completion_tokens"`
-			TotalTokens          *int     `json:"total_tokens"`
-			Credit               *float64 `json:"credit"`
-			PromptCacheHitTokens *int     `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTok   *int     `json:"prompt_cache_miss_tokens"`
-		} `json:"usage"`
+		Usage json.RawMessage `json:"usage"`
 	}
-	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
-		if json.Unmarshal([]byte(payload), &chunk) == nil && len(chunk.Error) > 0 {
-			s.errorFrame = true
-		}
+	if json.Unmarshal([]byte(payload), &chunk) != nil {
 		return
 	}
 	if len(chunk.Error) > 0 {
 		s.errorFrame = true
 	}
-	if chunk.Usage.PromptTokens != nil {
+	if len(chunk.Usage) == 0 || string(chunk.Usage) == "null" {
+		return
+	}
+	var usage struct {
+		PromptTokens     *int     `json:"prompt_tokens"`
+		CompletionTokens *int     `json:"completion_tokens"`
+		TotalTokens      *int     `json:"total_tokens"`
+		Credit           *float64 `json:"credit"`
+	}
+	if json.Unmarshal(chunk.Usage, &usage) != nil {
+		return
+	}
+	if usage.PromptTokens != nil {
 		s.hasPromptTokens = true
-		s.promptTokens = *chunk.Usage.PromptTokens
+		s.promptTokens = *usage.PromptTokens
 	}
-	if chunk.Usage.CompletionTokens != nil {
+	if usage.CompletionTokens != nil {
 		s.hasCompletionTokens = true
-		s.completionTokens = *chunk.Usage.CompletionTokens
+		s.completionTokens = *usage.CompletionTokens
 	}
-	if chunk.Usage.TotalTokens != nil {
+	if usage.TotalTokens != nil {
 		s.hasTotalTokens = true
-		s.totalTokens = *chunk.Usage.TotalTokens
+		s.totalTokens = *usage.TotalTokens
 	}
-	if chunk.Usage.Credit != nil {
+	if usage.Credit != nil {
 		s.hasCredit = true
-		s.credit = *chunk.Usage.Credit
+		s.credit = *usage.Credit
 	}
-	if chunk.Usage.PromptCacheHitTokens != nil {
-		s.hasCacheHit = true
-		s.cacheHit = *chunk.Usage.PromptCacheHitTokens
-	}
-	if chunk.Usage.PromptCacheMissTok != nil {
-		s.hasCacheMiss = true
-		s.cacheMiss = *chunk.Usage.PromptCacheMissTok
+	// 缓存字段各家写法不一（prompt_cache_hit_tokens、prompt_tokens_details.cached_tokens 等），
+	// 和非流式共用一套别名口径。
+	var m map[string]any
+	if json.Unmarshal(chunk.Usage, &m) == nil {
+		if hit, miss, ok := upstream.UsageCacheTokens(m); ok {
+			s.hasCache, s.cacheHit, s.cacheMiss = true, int64(hit), int64(miss)
+		}
 	}
 }
 
@@ -215,20 +233,17 @@ func (s *chatStatsReader) parseSSELine(line string) {
 // 不反推会被误判为整段未命中）。两个方向都推导不出时 ok=false（不参与命中率
 // 统计）。
 func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
-	if !s.hasCacheHit && !s.hasCacheMiss {
+	if !s.hasCache {
 		return 0, 0, false
 	}
-	hit = int64(s.cacheHit)
-	miss = int64(s.cacheMiss)
-	if !s.hasCacheMiss {
-		if !s.hasPromptTokens || s.promptTokens < s.cacheHit {
-			return hit, 0, true
-		}
-		miss = int64(s.promptTokens - s.cacheHit)
-	} else if s.cacheHit == 0 && s.hasPromptTokens && s.promptTokens > s.cacheMiss {
-		// hit 为 0 / 缺失但 miss 可信（prompt > miss，即确有命中量）→ 反推。
-		// prompt <= miss 时保持 hit=0，那是真实的整段未命中。
-		hit = int64(s.promptTokens - s.cacheMiss)
+	hit, miss = s.cacheHit, s.cacheMiss
+	prompt := int64(s.promptTokens)
+	// miss 缺失时按 prompt - hit 推导；对称地，hit 为 0 而 miss 可信（prompt > miss）
+	// 时按 prompt - miss 反推 hit（issue #170：上游「接近全命中」可能回 hit=0 + miss=3）。
+	if miss == 0 && s.hasPromptTokens && prompt > hit {
+		miss = prompt - hit
+	} else if hit == 0 && s.hasPromptTokens && prompt > miss {
+		hit = prompt - miss
 	}
 	return hit, miss, true
 }
@@ -379,10 +394,11 @@ type requestTrace struct {
 	// model 非 chat 路径的模型标识（搜索写 "WorkBuddy搜索工具"）。chat 路径由
 	// chatStat.model 覆盖，二者不会同时生效。
 	model string
-	stat    *chatStat
+	stat  *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
+	apiKey    string // 认出的密钥名（见 principal.label）
 }
 
 // captureClientInfo 采集调用来源（客户端 IP + 截断后的 UA）。开关关闭时保持空串：
@@ -440,7 +456,15 @@ func requestTraceFromContext(ctx context.Context) *requestTrace {
 	return tr
 }
 
-func (t *requestTrace) event(status int) reqlog.Event {
+// proxyName 号走的代理名（请求记录用），没装代理池为空。
+func (h *Handler) proxyName(uid string) string {
+	if h.cfg.ProxyName == nil {
+		return ""
+	}
+	return h.cfg.ProxyName(uid)
+}
+
+func (t *requestTrace) event(status int, errBody []byte) reqlog.Event {
 	path := t.path
 	if path == "" {
 		path = "/v1/chat/completions"
@@ -465,7 +489,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 	if t.stat != nil {
 		s := t.stat
 		e.Account = logfmt.Label(s.uid, s.nick)
-		// chat 路径以 stat 的模型为准（覆盖 trace.model）。
+		e.Proxy = s.proxy
 		e.Model = s.model
 		e.Outcome = s.outcome
 		e.TTFBMs = s.ttfb.Milliseconds()
@@ -480,6 +504,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 	}
 	e.ClientIP = t.clientIP
 	e.UserAgent = t.userAgent
+	e.APIKey = t.apiKey
 	if e.Outcome == "" {
 		if status >= 200 && status < 300 {
 			e.Outcome = reqlog.OutcomeSuccess
@@ -488,14 +513,63 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		}
 	}
 	e.OK = status >= 200 && status < 300 && e.Outcome == reqlog.OutcomeSuccess
+	if !e.OK {
+		e.Error = failureReason(t.stat, errBody)
+	}
 	return e
 }
 
+// failureReason 失败原因：流中途出错用 chatStat 记下的原因，其余取回给客户端的错误消息。
+// 合并空白后截到 maxFailureReasonRunes 字；客户端中途断开这类没有错误响应的返回空串。
+func failureReason(st *chatStat, errBody []byte) string {
+	reason := ""
+	if st != nil && st.errMsg != "" {
+		reason = errorMessage(st.errMsg)
+	} else if len(errBody) > 0 {
+		reason = errorMessage(string(errBody))
+	}
+	reason = strings.Join(strings.Fields(reason), " ")
+	if r := []rune(reason); len(r) > maxFailureReasonRunes {
+		reason = string(r[:maxFailureReasonRunes]) + "…"
+	}
+	return reason
+}
+
+// errorMessage 从错误 JSON 里取消息：聊天、Codex 与 Claude Code 入口是 {"error":{"message"}}，
+// Responses 流式失败是 {"response":{"error":{"message"}}}，上游原文常见 {"msg"} / {"message"}。
+// 不是 JSON 或没有这些字段时原样返回。
+func errorMessage(body string) string {
+	var v map[string]any
+	if json.Unmarshal([]byte(body), &v) != nil {
+		return body
+	}
+	if r, ok := v["response"].(map[string]any); ok {
+		v = r
+	}
+	switch e := v["error"].(type) {
+	case map[string]any:
+		if m, ok := e["message"].(string); ok && m != "" {
+			return m
+		}
+	case string:
+		if e != "" {
+			return e
+		}
+	}
+	for _, k := range []string{"message", "msg"} {
+		if m, ok := v[k].(string); ok && m != "" {
+			return m
+		}
+	}
+	return body
+}
+
 // responseObserver 捕获 handler 实际写出的 HTTP 状态，同时保留 Flusher/Unwrap，
-// 避免破坏 SSE 逐帧刷新。
+// 避免破坏 SSE 逐帧刷新。失败响应（状态 ≥ 400）顺带留下正文开头，供请求记录提取失败原因。
 type responseObserver struct {
 	http.ResponseWriter
-	status int
+	status  int
+	errBody []byte
 }
 
 func (o *responseObserver) WriteHeader(code int) {
@@ -508,6 +582,9 @@ func (o *responseObserver) WriteHeader(code int) {
 func (o *responseObserver) Write(p []byte) (int, error) {
 	if o.status == 0 {
 		o.status = http.StatusOK
+	}
+	if o.status >= http.StatusBadRequest && len(o.errBody) < maxErrorBodyCapture {
+		o.errBody = append(o.errBody, p[:min(len(p), maxErrorBodyCapture-len(o.errBody))]...)
 	}
 	return o.ResponseWriter.Write(p)
 }
@@ -615,48 +692,123 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 	)
 }
 
-// cacheMissSignal 低命中率告警信号（issue #92 P1 轻量化）：同一模型此前观测到过
-// 命中、本次大前缀（≥1000 tok）整段未命中（命中率 <10%）时打一条 WARN，每模型
-// 10 分钟冷却。只报「本可命中却重算」的可行动信号——新模型/新会话的首请求天然
-// 全 miss，不在此列。
+// cacheMissSignal 前缀缓存整段未命中的提示（issue #92 起；issue #2 改成按对话判断）。
+//
+// 上游的前缀缓存有的模型按号存（deepseek），有的按会话 id 存、换号也接得上（glm-5.3-flash），
+// 见 docs/official-client.md：新对话的头一轮、换了号、换了会话 id 都可能整段未命中，这些是预期内的。以前按模型笼统判断
+// 「此前命中过」，把它们都报成了异常（issue #2）。现在按对话（会话键）记下上一轮的模型、号、
+// 会话 id 和消息条数；这段对话命中过、这一轮大前缀（≥1000 token）却一点没命中时，对照上一轮说原因：
+//   - 换了模型 / 换了号 / 会话 id 变了 / 消息比上一轮少（客户端压缩或改写了历史）：预期内，记 INFO；
+//   - 都没变：同一个号、同一个会话 id，上游没留住缓存，记 WARN，带上距上一轮多久。
+//
+// 每段对话 10 分钟内最多记一行。没有会话键的请求认不出是哪段对话，不判断。
 type cacheMissSignal struct {
-	mu      sync.Mutex
-	everHit map[string]bool
-	last    map[string]time.Time
+	mu    sync.Mutex
+	convs map[string]convCacheState
 }
 
-var cacheMissWarn = &cacheMissSignal{everHit: map[string]bool{}, last: map[string]time.Time{}}
+// convCacheState 一段对话上一轮的缓存观测。
+type convCacheState struct {
+	model, uid, acct, convID string
+	msgs                     int
+	at                       time.Time
+	hit                      bool      // 这段对话命中过
+	logged                   time.Time // 上次记日志的时刻
+}
 
-// cacheMissWarnEvery 冷却间隔；变量供测试缩短。
-var cacheMissWarnEvery = 10 * time.Minute
+// cacheObservation 一跳成功请求的前缀缓存观测。key 是会话键，acct 是日志里的号（uid + 昵称）。
+type cacheObservation struct {
+	key, model, uid, acct, convID string
+	msgs                          int
+	prompt, hit, miss             int64
+}
 
-// noteCacheTokens 记录一次观测：有命中 → 标记该模型可命中；整段未命中且此前
-// 命中过 → 触发 WARN（冷却内不重复）。
-func (c *cacheMissSignal) noteCacheTokens(model string, prompt, hit, miss int64) {
-	if model == "" {
+func newCacheMissSignal() *cacheMissSignal {
+	return &cacheMissSignal{convs: map[string]convCacheState{}}
+}
+
+var cacheMissWarn = newCacheMissSignal()
+
+var (
+	// cacheMissWarnEvery 每段对话的冷却间隔；变量供测试缩短。
+	cacheMissWarnEvery = 10 * time.Minute
+	// cacheMissNow 时钟，供测试替换。
+	cacheMissNow = time.Now
+)
+
+// cacheMissTrackMax 最多记多少段对话，超了先清一天没动的，再随便清掉一成。
+const cacheMissTrackMax = 10000
+
+// note 记下这一跳的观测，整段未命中时按上面的规则记一行日志。
+func (c *cacheMissSignal) note(o cacheObservation) {
+	if o.key == "" || o.model == "" {
 		return
 	}
+	now := cacheMissNow()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if hit > 0 {
-		c.everHit[model] = true
+	prev, seen := c.convs[o.key]
+	if !seen && len(c.convs) >= cacheMissTrackMax {
+		c.evictLocked(now)
+	}
+	cur := convCacheState{model: o.model, uid: o.uid, acct: o.acct, convID: o.convID, msgs: o.msgs, at: now,
+		hit: prev.hit || o.hit > 0, logged: prev.logged}
+	c.convs[o.key] = cur
+	// 命中了、小前缀、头一次见到的对话、这段对话从没命中过（模型不缓存或还没缓存上）都不提示。
+	if o.hit > 0 || o.prompt < 1000 || !seen || !prev.hit || now.Sub(prev.logged) < cacheMissWarnEvery {
 		return
 	}
-	// hit==0 才可能是整段重算。小前缀（<1000 tok）的 miss 无告警价值；上游未回
-	// miss 字段时按 prompt 全量视为未命中。
-	if prompt < 1000 {
-		return
-	}
+	cur.logged = now
+	c.convs[o.key] = cur
+	miss := o.miss
 	if miss <= 0 {
-		miss = prompt
+		miss = o.prompt
 	}
-	if !c.everHit[model] {
+	if reason := cacheMissReason(prev, o); reason != "" {
+		log.Printf("INFO: [server] cache miss: model=%s acct=%s 这一轮大前缀未命中（prompt=%d miss=%d）：%s，属预期", o.model, o.acct, o.prompt, miss, reason)
 		return
 	}
-	now := time.Now()
-	if t, ok := c.last[model]; ok && now.Sub(t) < cacheMissWarnEvery {
-		return
+	log.Printf("WARN: [server] cache miss: model=%s acct=%s 同一个号、同一个会话 id 这一轮大前缀仍未命中（prompt=%d miss=%d，距上一轮 %s）；上游没留住这段对话的前缀缓存，这一轮按未命中计费",
+		o.model, o.acct, o.prompt, miss, gapText(now.Sub(prev.at)))
+}
+
+// cacheMissReason 对照上一轮说出预期内的未命中原因；都对得上返回 ""。
+func cacheMissReason(prev convCacheState, o cacheObservation) string {
+	switch {
+	case prev.model != o.model:
+		return "换了模型（上一轮是 " + prev.model + "）"
+	case prev.uid != o.uid:
+		return "换了号（上一轮在 " + prev.acct + "），部分模型按号缓存"
+	case prev.convID != o.convID:
+		return "会话 id 变了，部分模型按会话 id 缓存"
+	case o.msgs < prev.msgs:
+		return fmt.Sprintf("消息比上一轮少（%d → %d 条），客户端压缩或改写了历史", prev.msgs, o.msgs)
 	}
-	c.last[model] = now
-	log.Printf("WARN: [server] cache miss: model=%s 本次大前缀未命中（prompt=%d miss=%d，此前观测到过命中）；上游前缀缓存重算，费用会显著升高", model, prompt, miss)
+	return ""
+}
+
+func (c *cacheMissSignal) evictLocked(now time.Time) {
+	for k, s := range c.convs {
+		if now.Sub(s.at) > 24*time.Hour {
+			delete(c.convs, k)
+		}
+	}
+	for k := range c.convs {
+		if len(c.convs) < cacheMissTrackMax*9/10 {
+			break
+		}
+		delete(c.convs, k)
+	}
+}
+
+// gapText 两轮之间隔了多久，日志里看的粗略写法。
+func gapText(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d 秒", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%.1f 小时", d.Hours())
+	}
 }

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package server
 
 import (
@@ -21,6 +25,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
@@ -168,10 +173,10 @@ func TestChatBadParamsFailsFastWithoutPenalty(t *testing.T) {
 	}
 }
 
-// TestChatQueueFullFailsFastWithoutPenalty 上游 429 + code 6021「queue.full.title」
-// 是渠道级容量满载（推理集群排队打满），**不是账号问题**（2026-10-15 实案：按
-// 限流逐号软冷却，2 秒绞杀整池健康号）。端到端断言：不轮转（只打一次上游）、
-// 直接回 503 + upstream_busy（可重试语义）、账号零惩罚（无冷却/无熔断/无连败）。
+// TestChatQueueFullFailsFastWithoutPenalty 上游 429 + code 6021（容量排队满）是渠道级的，
+// **不是账号问题**（上游 linguo2625469 2026-10-15 实测：按限流逐号软冷却，2 秒内整池健康号
+// 全被冷却）。端到端断言：不轮转（只打一次上游）、直接回 503 + upstream_busy（可重试语义）、
+// 账号零惩罚（无冷却/无熔断/无连败）。
 func TestChatQueueFullFailsFastWithoutPenalty(t *testing.T) {
 	calls := map[string]int{}
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
@@ -1148,10 +1153,27 @@ func TestChatModelForbiddenByAccountTypeReturns400(t *testing.T) {
 	if st := p.ModelBlockedForRealm("gpt-5.6-sol", "global"); !st.Blocked || st.Count != 1 {
 		t.Fatalf("global 账号应写入模型级避让: %+v", st)
 	}
+	// 11158 按账号类型定死：加进号不接的模型名单一直屏蔽，不进到期避让表。
+	if st, _ := p.Status("g1"); len(st.BlockedModels) != 1 || !st.BlockedModels[0].Auto || st.BlockedModels[0].Model != "gpt-5.6-sol" || len(st.RateLimitedModels) != 0 {
+		t.Fatalf("g1 应自动把 gpt-5.6-sol 加进名单: %+v", st)
+	}
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	// 模型目录是包级缓存：前后都清空，不读别的用例留下的目录，也不让空缓存去连真实上游
+	resetModels := func() {
+		dynamicModelsCache.Lock()
+		dynamicModelsCache.ids = nil
+		dynamicModelsCache.fetched = time.Time{}
+		dynamicModelsCache.lastFail = time.Time{}
+		dynamicModelsCache.Unlock()
+	}
+	resetModels()
+	t.Cleanup(resetModels)
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, `{"code":0,"data":{"models":[{"id":"glm-5.2"},{"id":"glm-5.1"},{"id":"deepseek-v3.2"},{"id":"kimi-k2"},{"id":"hunyuan-t1"}],"agents":[{"name":"cli","models":["glm-5.2","glm-5.1","deepseek-v3.2","kimi-k2","hunyuan-t1"]}]}}`, false
+	})
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: up})
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -1317,7 +1339,7 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
 
-	var calls atomic.Int32 // FetchModels 企业/v3 两路并发探测回调，计数须原子
+	var calls atomic.Int32 // 企业号会两路并发探测，计数统一用原子
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls.Add(1)
 		return 500, `boom`, false
@@ -1334,9 +1356,9 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 			t.Fatalf("req %d: code=%d body=%s", i, rec.Code, rec.Body)
 		}
 	}
-	// 一轮探测 = 2 次上游调用（企业端点 + /v3/config 并发，两路全失败才进负缓存）。
-	if got := calls.Load(); got != 2 {
-		t.Errorf("want 2 probes (console + v3), got %d", got)
+	// 个人号一轮探测 = 1 次 /v3/config。
+	if got := calls.Load(); got != 1 {
+		t.Errorf("want 1 probe (v3), got %d", got)
 	}
 
 	// 冷却期结束（把失败时间戳拨回 10 分钟前）→ 应重新 fetch。
@@ -1348,8 +1370,8 @@ func TestModelsNegativeCacheOnFetchFailure(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("after cooldown: code=%d", rec.Code)
 	}
-	if got := calls.Load(); got != 4 {
-		t.Errorf("want 4 probes after cooldown (2 rounds x 2), got %d", got)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("want 2 probes after cooldown (2 rounds x 1), got %d", got)
 	}
 }
 
@@ -1485,6 +1507,40 @@ func TestStatusPortraitFields(t *testing.T) {
 	}
 	if st.LastErrTime.IsZero() {
 		t.Error("last_err should be set")
+	}
+}
+
+// TestReadyz 就绪探针：平时 200（与账号是否可用无关，空池也是 200）；停机开始后 503，/healthz 不受影响。
+func TestReadyz(t *testing.T) {
+	t.Cleanup(func() { draining.Store(false) })
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New(), APIKey: "k"})
+	get := func(path string) (int, map[string]any) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		var resp map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("%s not json: %v body=%s", path, err, rec.Body)
+		}
+		if rec.Header().Get("X-Service") != ServiceName {
+			t.Errorf("%s X-Service=%q", path, rec.Header().Get("X-Service"))
+		}
+		return rec.Code, resp
+	}
+
+	// 空池：/healthz 503（暂不可服务），/readyz 仍 200（实例没在停机，不该被摘流量）；无需鉴权
+	if code, resp := get("/readyz"); code != http.StatusOK || resp["ready"] != true {
+		t.Fatalf("readyz before drain code=%d resp=%v want 200 ready=true", code, resp)
+	}
+	if code, _ := get("/healthz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("healthz code=%d want 503 (empty pool)", code)
+	}
+
+	SetDraining()
+	if code, resp := get("/readyz"); code != http.StatusServiceUnavailable || resp["ready"] != false || resp["draining"] != true {
+		t.Fatalf("readyz after drain code=%d resp=%v want 503 ready=false draining=true", code, resp)
+	}
+	if code, _ := get("/healthz"); code != http.StatusServiceUnavailable {
+		t.Fatalf("healthz after drain code=%d want 503 (unchanged semantics)", code)
 	}
 }
 
@@ -1837,10 +1893,8 @@ func TestCustomModeFingerprintSanitizePreserved(t *testing.T) {
 	if !strings.Contains(out, customSys) {
 		t.Errorf("out body should contain custom system prompt: %s", out)
 	}
-	if strings.Contains(out, "official CLI for Claude.") && strings.Contains(out, "You are Claude Code, Anthropic's") {
-		// 旧 system 原文（含句点）不应以 system 角色出现；但 sanitize 把它改写为
-		// "...official CLI tool for Claude."，所以原文 fingerprint 串应消失。
-	}
+	// 旧 system 原文（含句点）不应以 system 角色出现；sanitize 把它改写为
+	// "...official CLI tool for Claude."，所以原文 fingerprint 串应消失。
 	// 原始指纹串（逐字精确匹配）在出站 body 中应被改写：
 	// "official CLI for Claude." → "official CLI tool for Claude."
 	// "Main branch (" → "Default branch ("
@@ -2236,8 +2290,9 @@ func TestModelsHiddenFiltered(t *testing.T) {
 }
 
 // TestBanAlertNotifiesWithReviveHint 封禁必须推告警，且告警正文要写清两件事：
-//   1. 这是**本地规则判定**，可能误判；
-//   2. 核实后可在面板一键解封（Pool.Revive 会一并清冷却/熔断）。
+//  1. 这是**本地规则判定**，可能误判；
+//  2. 核实后可在面板一键解封（Pool.Revive 会一并清冷却/熔断）。
+//
 // 只推「账号被禁用」会让运维以为只能申诉/重登，把可能健康的号白白丢掉。
 func TestBanAlertNotifiesWithReviveHint(t *testing.T) {
 	got := make(chan string, 4)
@@ -2280,5 +2335,150 @@ func TestBanAlertNotifiesWithReviveHint(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("封禁后没有收到告警（notify 未触发）")
+	}
+}
+
+// TestChatConversationIDFromFirstReply 客户端没给 conversation_id 时的出站 X-Conversation-ID：
+// 对话第一个请求新生成一个（官方新会话的形状，不是轮次 id），之后多轮不变；开头逐字相同、第一条
+// 回复不同的两段对话第二轮起各用各的（见 session/convids.go）。客户端给的 conversation_id 原样
+// 透传。网关不再自动补 prompt_cache_key，客户端自己带的照转。
+func TestChatConversationIDFromFirstReply(t *testing.T) {
+	var mu sync.Mutex
+	var convIDs, turnIDs, cacheKeys []string
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/chat/completions") {
+				raw, _ := io.ReadAll(r.Body)
+				var obj struct {
+					PromptCacheKey *string `json:"prompt_cache_key"`
+				}
+				_ = json.Unmarshal(raw, &obj)
+				key := "<无>"
+				if obj.PromptCacheKey != nil {
+					key = *obj.PromptCacheKey
+				}
+				mu.Lock()
+				convIDs = append(convIDs, r.Header.Get("X-Conversation-ID"))
+				turnIDs = append(turnIDs, r.Header.Get("X-Conversation-Request-ID"))
+				cacheKeys = append(cacheKeys, key)
+				mu.Unlock()
+			}
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sseOK)),
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at-1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Minute})
+	for _, body := range []string{
+		// 0：对话第一个请求
+		`{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}`,
+		// 1、2：同一段对话的第 2、3 轮
+		`{"model":"glm-5.2","messages":[{"role":"user","content":"你好"},{"role":"assistant","content":"你好！有什么可以帮你？"},{"role":"user","content":"写一首诗"}]}`,
+		`{"model":"glm-5.2","messages":[{"role":"user","content":"你好"},{"role":"assistant","content":"你好！有什么可以帮你？"},{"role":"user","content":"写一首诗"},{"role":"assistant","content":"春眠不觉晓"},{"role":"user","content":"再来一首"}]}`,
+		// 3：开头相同、第一条回复不同的另一段对话
+		`{"model":"glm-5.2","messages":[{"role":"user","content":"你好"},{"role":"assistant","content":"嗨，今天想聊点什么？"},{"role":"user","content":"写一首诗"}]}`,
+		// 4：客户端给了会话 id，也自带 prompt_cache_key
+		`{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"metadata":{"conversation_id":"conv-client"},"prompt_cache_key":"client-key"}`,
+	} {
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(convIDs) != 5 {
+		t.Fatalf("want 5 chat calls, got %d", len(convIDs))
+	}
+	if !upstreamtest.UUIDv7.MatchString(convIDs[0]) || !upstreamtest.UUIDv7Hex.MatchString(turnIDs[0]) {
+		t.Fatalf("对话第一个请求：X-Conversation-ID = %q、轮次 id = %q，应是官方新会话的形状", convIDs[0], turnIDs[0])
+	}
+	if convIDs[1] == "" || convIDs[1] == turnIDs[1] || convIDs[1] != convIDs[2] {
+		t.Fatalf("有了第一条回复后会话 id 应固定且不是轮次 id: %q / %q（轮次 %q）", convIDs[1], convIDs[2], turnIDs[1])
+	}
+	if convIDs[3] == convIDs[1] {
+		t.Fatalf("第一条回复不同的两段对话不应共用会话 id: %q", convIDs[3])
+	}
+	if convIDs[4] != "conv-client" {
+		t.Fatalf("客户端的 conversation_id 应原样透传: got %q", convIDs[4])
+	}
+	for i := 0; i < 4; i++ {
+		if cacheKeys[i] != "<无>" {
+			t.Fatalf("第 %d 次：网关不应自动补 prompt_cache_key，got %q", i+1, cacheKeys[i])
+		}
+	}
+	if cacheKeys[4] != "client-key" {
+		t.Fatalf("客户端自带的 prompt_cache_key 应原样转发: got %q", cacheKeys[4])
+	}
+}
+
+// TestChatConversationIDSameAcrossAccounts 客户端没给 conversation_id 时，换号重试、换号续聊都用这段
+// 对话原来的出站会话 id：上游有的模型按会话 id 缓存、不认号（2026-10-28 生产实测，见 session/convids.go）。
+// 三轮对话每轮第一次出站都失败、换号重试，所有出站请求的会话 id 都相同。
+func TestChatConversationIDSameAcrossAccounts(t *testing.T) {
+	type call struct {
+		turn        int
+		uid, convID string
+	}
+	var mu sync.Mutex
+	var calls []call
+	turn := 0
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			status, ct, body := 200, "text/event-stream", sseOK
+			if strings.Contains(r.URL.Path, "/chat/completions") {
+				mu.Lock()
+				first := len(calls) == 0 || calls[len(calls)-1].turn != turn
+				calls = append(calls, call{turn, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer at-"), r.Header.Get("X-Conversation-ID")})
+				mu.Unlock()
+				if first {
+					status, ct, body = 500, "application/json", `{"code":500}`
+				}
+			}
+			return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{ct}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	var auths []*auth.Auth
+	for _, u := range []string{"u1", "u2", "u3", "u4"} {
+		auths = append(auths, &auth.Auth{UID: u, AccessToken: "at-" + u, ExpiresAt: 9999999999})
+	}
+	h := NewHandler(Config{Pool: testPoolWith(auths...), Upstream: up, SoftCooldown: time.Minute})
+	// 开头带上测试名：会话 id 记录是进程内共用的，免得和别的测试撞上。
+	head := `{"model":"glm-5.2","messages":[{"role":"user","content":"你好 ` + t.Name() + `"}`
+	for i, body := range []string{
+		head + `]}`,
+		head + `,{"role":"assistant","content":"你好！"},{"role":"user","content":"写一首诗"}]}`,
+		head + `,{"role":"assistant","content":"你好！"},{"role":"user","content":"写一首诗"},{"role":"assistant","content":"春眠不觉晓"},{"role":"user","content":"再来一首"}]}`,
+	} {
+		mu.Lock()
+		turn = i + 1
+		mu.Unlock()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+		if rec.Code != 200 {
+			t.Fatalf("第 %d 轮：code=%d body=%s", i+1, rec.Code, rec.Body)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 6 || !upstreamtest.UUIDv7.MatchString(calls[0].convID) {
+		t.Fatalf("三轮应各失败一次、换号成功一次，会话 id 是官方新会话的形状: %+v", calls)
+	}
+	for i, c := range calls {
+		if c.convID != calls[0].convID {
+			t.Fatalf("换号后出站会话 id 应不变: %+v", calls)
+		}
+		if i%2 == 1 && c.uid == calls[i-1].uid {
+			t.Fatalf("第 %d 轮失败后应换号重试: %+v", c.turn, calls)
+		}
 	}
 }

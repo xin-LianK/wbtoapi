@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 // blackcat.go 夜猫子任务执行器：23:00–08:00 窗口内对池内账号补足 glm-5.2 对话
 // 并上报事件链（black_cat 判据）。窗口外触发则直接跳过（只观测，不报错）。
 package scheduler
@@ -30,6 +34,9 @@ func (s *Scheduler) RunBlackcatNow() {
 		// 与「让位防风控」正面冲突。旅行/成长任务都是纯上报或领奖 RPC，照常跑。
 		if st.Disabled || st.Paused {
 			continue
+		}
+		if st.ProxyBlocked != "" {
+			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.AccessTokenValue() == "" {

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package pool
 
 import (
@@ -35,7 +39,7 @@ func TestCountsPausedSeparate(t *testing.T) {
 	}
 
 	// --- 分开口径（面板概况）：禁用与暂停各自计数 ---
-	t2, h2, _, dis, pz, _ := p.CountsDetailedWithPaused()
+	t2, h2, _, dis, pz, _, _ := p.CountsDetailedWithPaused()
 	if t2 != total || h2 != healthy {
 		t.Errorf("两种口径的 total/healthy 必须一致：WithPaused=(%d,%d) Counts=(%d,%d)",
 			t2, h2, total, healthy)

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
 package session
 
 import (
@@ -381,23 +385,23 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 func TestLookupForModelOnlyReusesValidBinding(t *testing.T) {
 	available := []string{"a", "b"}
 	store := newCountingStore()
-	r := New(Config{TTL: time.Minute, Store: store, AvailableForModel: func(model string) []string { return available }})
-	if _, ok := r.LookupForModel("new", "m"); ok || r.Count() != 0 {
+	r := New(Config{TTL: time.Minute, Store: store, AvailableForModel: func(model, realm string, skip map[string]bool) []string { return available }})
+	if _, ok := r.ResolveForModel("new", "m", "", nil); ok || r.Count() != 0 {
 		t.Fatal("lookup allocated a new binding")
 	}
 	r.Bind("key", "a")
-	if uid, ok := r.LookupForModel("key", "m"); !ok || uid != "a" {
+	if uid, ok := r.ResolveForModel("key", "m", "", nil); !ok || uid != "a" {
 		t.Fatalf("valid lookup=%s %v", uid, ok)
 	}
 	available = []string{"b"}
-	if _, ok := r.LookupForModel("key", "m"); ok {
+	if _, ok := r.ResolveForModel("key", "m", "", nil); ok {
 		t.Fatal("unavailable binding reused")
 	}
 	available = []string{"a", "b"}
 	r.mu.Lock()
 	r.entries["key"] = entry{uid: "a", lastActive: time.Now().Add(-2 * time.Minute)}
 	r.mu.Unlock()
-	if _, ok := r.LookupForModel("key", "m"); ok {
+	if _, ok := r.ResolveForModel("key", "m", "", nil); ok {
 		t.Fatal("expired binding reused")
 	}
 	if r.Count() != 1 {

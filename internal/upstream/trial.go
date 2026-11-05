@@ -1,4 +1,9 @@
-// trial.go global 专属「一次性 trial 加油包」领取：POST {billingBase}/billing/ide/trial。
+// SPDX-FileCopyrightText: 2026 yreidev 与贡献者（见 NOTICE）
+// SPDX-License-Identifier: AGPL-3.0-only
+// 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
+
+// trial.go global 专属「一次性 trial 加油包」领取：POST {webBase}/billing/ide/trial
+// （官网网页形状，个人主页 referer，无请求体）。
 // 仅 global 账号适用（CN 无此端点）；幂等码 14051 = 已领过（视为正常，非错误）。
 // 这是 global 唯一天然的积分增益动作（无签到/任务中心，见 PLAN D4）。
 package upstream
@@ -27,7 +32,7 @@ func (c *Client) ClaimTrial(a *auth.Auth) (claimed bool, err error) {
 	if a == nil || a.Realm() != "global" {
 		return false, fmt.Errorf("claim trial: only global accounts")
 	}
-	_, err = c.billingJSON(a, http.MethodPost, trialPath, nil)
+	_, err = c.webJSON(a, http.MethodPost, trialPath, webPageProfile, nil)
 	if err != nil {
 		var ue *Error
 		if errors.As(err, &ue) && trialAlreadyErr(ue.Msg) {
