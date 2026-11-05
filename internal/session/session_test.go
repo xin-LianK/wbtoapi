@@ -386,22 +386,22 @@ func TestLookupForModelOnlyReusesValidBinding(t *testing.T) {
 	available := []string{"a", "b"}
 	store := newCountingStore()
 	r := New(Config{TTL: time.Minute, Store: store, AvailableForModel: func(model, realm string, skip map[string]bool) []string { return available }})
-	if _, ok := r.ResolveForModel("new", "m", "", nil); ok || r.Count() != 0 {
+	if _, ok := r.LookupForModel("new", "m", "", nil); ok || r.Count() != 0 {
 		t.Fatal("lookup allocated a new binding")
 	}
 	r.Bind("key", "a")
-	if uid, ok := r.ResolveForModel("key", "m", "", nil); !ok || uid != "a" {
+	if uid, ok := r.LookupForModel("key", "m", "", nil); !ok || uid != "a" {
 		t.Fatalf("valid lookup=%s %v", uid, ok)
 	}
 	available = []string{"b"}
-	if _, ok := r.ResolveForModel("key", "m", "", nil); ok {
+	if _, ok := r.LookupForModel("key", "m", "", nil); ok {
 		t.Fatal("unavailable binding reused")
 	}
 	available = []string{"a", "b"}
 	r.mu.Lock()
 	r.entries["key"] = entry{uid: "a", lastActive: time.Now().Add(-2 * time.Minute)}
 	r.mu.Unlock()
-	if _, ok := r.ResolveForModel("key", "m", "", nil); ok {
+	if _, ok := r.LookupForModel("key", "m", "", nil); ok {
 		t.Fatal("expired binding reused")
 	}
 	if r.Count() != 1 {
