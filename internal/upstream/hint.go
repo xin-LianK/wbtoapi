@@ -54,7 +54,7 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrWafBlock:
 		// 账号级 WAF 403 / 边缘网关 HTML 401 与 IP 级 fail-fast 同 hint：对客户端的
 		// 动作一致（等待窗口过去再试，换号/立刻重试无意义）。
-		return "upstream edge gateway blocked the request (WAF 403 or openresty/APISIX 401 page); check egress IP or retry after the block window"
+		return "upstream WAF blocked the gateway; retry after the block window"
 	case ErrSoftRate:
 		switch code := BizCode(msg); {
 		case isTransientRateCode(code):

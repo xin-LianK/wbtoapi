@@ -24,6 +24,12 @@ import (
 func TestRefreshTokenSingleFlightPerAccount(t *testing.T) {
 	var hits, inFlight, maxInFlight int32
 	c := testClient(func(r *http.Request) (*http.Response, error) {
+		// 只统计**刷新**这一跳。合入 1.16.0 后刷新按官方改成两步：POST token/refresh
+		// 成功后再 GET /v2/plugin/account 取账号（refreshTokenOnce 的 refreshAccountCheck），
+		// 后者不是刷新本身，不该计入单飞次数。
+		if !strings.Contains(r.URL.Path, "/auth/token/refresh") {
+			return jsonResp(200, `{"code":0,"data":{"uid":"uid-a"}}`), nil
+		}
 		atomic.AddInt32(&hits, 1)
 		n := atomic.AddInt32(&inFlight, 1)
 		for {
@@ -117,6 +123,11 @@ func TestRefreshAdoptsNewerDiskTokenAfterSessionDead(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
 	c := testClient(func(r *http.Request) (*http.Response, error) {
+		// 刷新成功后的取账号（GET /v2/plugin/account）不是一次刷新尝试，单独放行：
+		// 返回空账号列表即可（身份核对用 hdrSnapshot 兜底）。
+		if !strings.Contains(r.URL.Path, "/auth/token/refresh") {
+			return jsonResp(200, `{"code":0,"data":{"uid":"uid-a"}}`), nil
+		}
 		rt := r.Header.Get("X-Refresh-Token")
 		mu.Lock()
 		seen = append(seen, rt)

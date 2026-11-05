@@ -8,6 +8,8 @@
 package upstream
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"strings"
 
@@ -308,12 +310,93 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	// X-Conversation-ID 官方每条都发（值是整段对话不变的会话 id）。国际版不带一律 400
 	// code=11128 "request illegal"（10-19 生产实测），国内版不带也能用，同样补上对齐官方。
 	// 入站对话的 id 由 handler 定好（同一段对话不变，换号也不变，上游据此命中前缀缓存，
-	// 见 session/convids.go）；调用方没给就新生成一个，形状同官方新会话的 id（带连字符的 UUID v7）。
+	// 见 session/convids.go）；调用方没给就新生成一个，形状同官方新会话的 id
+	// （uuidv7()，带连字符的 36 位，见 docs/official-client.md）。
 	if meta.ConversationID == "" {
 		meta.ConversationID = session.NewUUIDv7()
 	}
 	// 会话头族（对话/请求/消息/链路），见 injectConversationHeaders。
 	c.injectConversationHeaders(req, meta)
+	// 两个形态的最后收敛（只做覆盖/删除，不动选号与流式链路）。
+	// 调用方传入的会话键常是 32 位裸 hex（sessKey / RequestIDForKey），官方同字段是
+	// 带连字符的 uuidv7，必须补上横线再发（只补横线，不改版本位）。
+	if c.desktopProfile() {
+		if id := meta.ConversationID; isHex32(id) {
+			req.Header.Set("X-Conversation-ID", session.DashUUID(id))
+		}
+		c.applyDesktopChatHeaders(req, a)
+	} else {
+		c.applyLegacyChatHeaders(req, a)
+	}
+}
+
+// desktopProfile 当前用桌面端（5.9.3 / 5.9.4）形态；显式 "legacy" 回到旧形态（回滚对照用）。
+func (c *Client) desktopProfile() bool {
+	return !strings.EqualFold(strings.TrimSpace(c.Profile), "legacy")
+}
+
+// isHex32 32 位十六进制（UUID 去横线的形态）。
+func isHex32(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		switch ch := s[i]; {
+		case ch >= '0' && ch <= '9', ch >= 'a' && ch <= 'f', ch >= 'A' && ch <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// deriveAccountStableID 按 uid + 用途盐稳定派生 32 hex 标识：跨重启恒定、账号间互异、
+// 同 uid 同用途幂等。盐里的项目缩写只参与哈希、不出站，产物与官方 UUID 在形态上不可区分。
+func deriveAccountStableID(uid, purpose string) string {
+	sum := sha256.Sum256([]byte("wb2a:" + purpose + ":" + uid))
+	return hex.EncodeToString(sum[:16])
+}
+
+// applyDesktopChatHeaders 桌面端 chat 的收敛：官方不发的头一律删掉，再补 ACP 连接标识。
+//
+// 依据 2026-10-21 从 app.asar 提取的 buildVlmGatewayHeaders：chat 的注入钩子只有它，
+// 设备身份三件套属于 WorkbuddyAuthStateHeaderProvider（只喂 auth-state 与签到），
+// X-No-* 是插件域旧约定，官方 chat 全是「有值才设」。
+func (c *Client) applyDesktopChatHeaders(req *http.Request, a *auth.Auth) {
+	req.Header.Del("Origin")
+	req.Header.Del("Referer")
+	req.Header.Del("Accept-Language")
+	req.Header.Del("X-Machine-ID")
+	req.Header.Del("X-Session-ID")
+	req.Header.Del("X-No-User-Id")
+	req.Header.Del("X-No-Enterprise-Id")
+	req.Header.Del("X-No-Department-Info")
+	req.Header.Del("X-Custom-Channel-Id")
+	req.Header.Del("X-Device-Id-List")
+	if !c.ChatDeviceToken {
+		req.Header.Del("X-Device-Token")
+	}
+	// ACP 连接标识：官方每连接一个 randomUUID()。这里按账号稳定派生（重连不换号），
+	// 形态必须对齐带连字符的 UUID——裸 32 hex 与官方一眼可辨。
+	if a != nil && a.UID != "" {
+		req.Header.Set("acp-connection-id", uuidDashed(deriveAccountStableID(a.UID, "acp")))
+	}
+}
+
+// applyLegacyChatHeaders legacy 形态：恢复停更前那套头（Origin/Referer/X-Machine-ID、
+// X-Product=WorkBuddy、不带 X-Private-Data），只在 desktop 形态被上游拒绝时回滚对照。
+func (c *Client) applyLegacyChatHeaders(req *http.Request, a *auth.Auth) {
+	base := "https://www.codebuddy.cn"
+	if a != nil && a.IsGlobal() {
+		base = "https://www.workbuddy.ai"
+	}
+	req.Header.Set("Origin", base)
+	req.Header.Set("Referer", base+"/")
+	req.Header.Set("X-Product", "WorkBuddy")
+	req.Header.Del("X-Private-Data")
+	if a != nil && a.UID != "" {
+		req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
+	}
 }
 
 // agentRuntime 对话和联网搜索的 X-Agent-Runtime：2.165.0 每条都带，取会话的 agentRuntime，两域桌面端
@@ -365,6 +448,9 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	}
 	// 消息 id 同官方 uuidv7() 去掉连字符；span id 是链路自己的随机 16 位（UUID v7 的前 16 位是
 	// 时间戳，截它当 span id 会让同一毫秒的两条消息撞上）。
+	// 官方 withModelMessageCorrelation 把同一个消息 id 同时写进 X-Conversation-Message-ID
+	// 与 X-Request-ID（docs/official-client.md「对话请求另有这些头和字段」），两者同值是
+	// 官方形态，不是偷懒复用。
 	messageID := session.NewUUIDv7Hex()
 	if meta.ConversationID != "" {
 		req.Header.Set("X-Conversation-ID", meta.ConversationID)
@@ -384,6 +470,8 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	spanID := session.NewMessageID()[:16]
 	req.Header.Set("X-B3-TraceId", b3Trace)
 	req.Header.Set("X-B3-SpanId", spanID)
+	// 父跨度：单跳请求没有真正的父，官方桌面端仍会带这个头，缺了就少一个特征。
+	req.Header.Set("X-B3-ParentSpanId", spanID)
 	req.Header.Set("X-B3-Sampled", "1")
 	w3cTrace := strings.ToLower(b3Trace)
 	if len(w3cTrace) == 16 {

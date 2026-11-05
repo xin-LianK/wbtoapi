@@ -33,7 +33,9 @@ func TestDesktopProfileHeaders(t *testing.T) {
 		"X-Private-Data":  "true",
 		"X-Agent-Intent":  "craft",
 		"X-Agent-Purpose": "conversation",
-		"Accept-Encoding": "identity",
+		// 官方对话经 axios 的 http 适配器发出，压缩协商就是 axios 默认那组
+		// （docs/official-client.md 第 136 行：官方没有在哪个请求上改写）。
+		"Accept-Encoding": acceptEncodingAxios,
 		// 官方 applyGatewayHeaders 里是小写 x-requested-with，HTTP 头名大小写不敏感。
 		"X-Requested-With": "XMLHttpRequest",
 		// 官方 chat 的 Accept 恒为 application/json，流式也一样。
@@ -67,46 +69,57 @@ func TestDesktopProfileHeaders(t *testing.T) {
 		}
 	}
 
-	// 两个 ID 必须独立：官方 applyGatewayHeaders 是两次 randomUUID()。
-	if req.Header.Get("X-Request-ID") == req.Header.Get("X-Conversation-Message-ID") {
-		t.Error("X-Request-ID 与 X-Conversation-Message-ID 不应同值")
+	// 官方 withModelMessageCorrelation 用同一个 uuidv7()（去连字符）填
+	// X-Conversation-Message-ID 与 X-Request-ID——两者同值是官方形态，不是复用偷懒。
+	if req.Header.Get("X-Request-ID") != req.Header.Get("X-Conversation-Message-ID") {
+		t.Error("X-Request-ID 应与 X-Conversation-Message-ID 同值（官方同一消息 id）")
 	}
-	// 链路 trace 也必须独立：官方 applyTraceHeaders 每次 randomBytes(16)，
-	// 与 conversationRequestId 无关。恒等即暴露反代。
-	if trace, conv := req.Header.Get("X-Trace-ID"), strings.ReplaceAll(req.Header.Get("X-Conversation-Request-ID"), "-", ""); trace == conv {
-		t.Error("X-Trace-ID 不应等于 X-Conversation-Request-ID")
+	// 入站没给 trace id 时以轮次 id 作 trace id（docs/official-client.md 只写了
+	// 「链路头 traceparent、b3 与 X-B3-*」，未细化来源，沿用网关一直以来的口径）。
+	if trace, conv := req.Header.Get("X-Trace-ID"), req.Header.Get("X-Conversation-Request-ID"); trace != conv {
+		t.Errorf("X-Trace-ID = %q，应为轮次 id %q", trace, conv)
 	}
-	// 官方 ID 全部出自 crypto.randomUUID()，必须是 v4：第 13 位 = 4，
-	// 第 17 位 ∈ 8/9/a/b。只对齐「带连字符」而版本位乱跳，仍可被一条正则识别。
+	// 形状（docs/official-client.md「对话请求另有这些头和字段」）：
+	//   会话 id = uuidv7() 带连字符的 36 位；轮次/消息 id = uuidv7() 去掉连字符的 32 hex。
 	// 这里用空 ChatMeta 触发网关自己生成全部 ID（调用方显式传入的会话 ID 不在此列）。
-	uuidV4Re := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	v7Dashed := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	hex32Re := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	anyUUID := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	gen, _ := http.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
 	c.ChatHeaders(gen, testAuth(), "", ChatMeta{})
+	if v := strings.ToLower(gen.Header.Get("X-Conversation-ID")); !v7Dashed.MatchString(v) {
+		t.Errorf("X-Conversation-ID = %q，应为带连字符的 UUID v7 形态", v)
+	}
 	for _, k := range []string{
-		"acp-connection-id", "X-Conversation-ID", "X-Conversation-Request-ID",
-		"X-Conversation-Message-ID", "X-Request-ID",
+		"X-Conversation-Request-ID", "X-Conversation-Message-ID", "X-Request-ID",
 	} {
-		if v := gen.Header.Get(k); !uuidV4Re.MatchString(strings.ToLower(v)) {
-			t.Errorf("%s = %q, want UUID v4 形态", k, v)
+		if v := gen.Header.Get(k); !hex32Re.MatchString(strings.ToLower(v)) {
+			t.Errorf("%s = %q，应为去连字符的 UUID v7（32 hex）", k, v)
 		}
 	}
-	// 调用方传入的聚合键是 32 位裸 hex（TurnRequestID / RequestIDForKey / sessKey），
-	// 官方同字段恒为 randomUUID 的 8-4-4-4-12 形态，必须规范化后再发。
+	// ACP 连接标识是网关按账号稳定派生的，形态必须仍是合法 UUID（不能是裸 hex）。
+	if v := strings.ToLower(gen.Header.Get("acp-connection-id")); !anyUUID.MatchString(v) {
+		t.Errorf("acp-connection-id = %q，应为带连字符的 UUID 形态", v)
+	}
+	// 调用方传入的会话键常是 32 位裸 hex（sessKey / RequestIDForKey），官方同字段恒为
+	// 带连字符的 36 位，必须补上横线再发。
 	hexed, _ := http.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
 	c.ChatHeaders(hexed, testAuth(), "", ChatMeta{
 		ConversationID:        strings.Repeat("a", 32),
 		ConversationRequestID: strings.Repeat("b", 32),
 	})
-	for _, k := range []string{"X-Conversation-ID", "X-Conversation-Request-ID"} {
-		if v := hexed.Header.Get(k); !uuidV4Re.MatchString(strings.ToLower(v)) {
-			t.Errorf("%s = %q，32 hex 入参应规范成 UUID v4 形态", k, v)
-		}
+	if v := strings.ToLower(hexed.Header.Get("X-Conversation-ID")); !anyUUID.MatchString(v) {
+		t.Errorf("X-Conversation-ID = %q，32 hex 入参应规范成带连字符的 36 位形态", v)
 	}
-	// 入站 X-Trace-ID 一律无视：官方每请求 randomBytes(16)，透传常量即变成固定值。
+	// 轮次 id 是 32 hex 的聚合主键，原样发（官方就是去连字符形态）。
+	if v := hexed.Header.Get("X-Conversation-Request-ID"); v != strings.Repeat("b", 32) {
+		t.Errorf("X-Conversation-Request-ID = %q，应为原样的 32 hex", v)
+	}
+	// 入站 X-Trace-ID 有值时透传（官方链路头带的是调用方给的 trace）。
 	fixed, _ := http.NewRequest(http.MethodPost, "https://copilot.tencent.com/v2/chat/completions", nil)
 	c.ChatHeaders(fixed, testAuth(), "", ChatMeta{TraceID: strings.Repeat("c", 32)})
-	if got := fixed.Header.Get("X-Trace-ID"); strings.Contains(got, "cccc") {
-		t.Errorf("X-Trace-ID 不该透传入站值，得到 %q", got)
+	if got := fixed.Header.Get("X-Trace-ID"); got != strings.Repeat("c", 32) {
+		t.Errorf("X-Trace-ID = %q，应透传入站值", got)
 	}
 }
 

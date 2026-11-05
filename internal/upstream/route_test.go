@@ -243,6 +243,9 @@ func TestRouteAllAccountMethods(t *testing.T) {
 		"UserResourceDetailedWithExpiry": func(c *Client) {
 			_, _, _, _, _, _ = c.UserResourceDetailedWithExpiry(a, time.Hour)
 		},
+		"UserResourceSnapshot": func(c *Client) {
+			_, _, _, _, _, _, _ = c.UserResourceSnapshot(a, time.Hour)
+		},
 	}
 
 	// 带号参数的公开方法都要在表里（或者在 routeExempt 里说明为什么不发号的请求）。

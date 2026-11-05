@@ -6,6 +6,7 @@ package upstream
 
 import (
 	"encoding/json"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"net/http"
 	"os"
@@ -361,6 +362,7 @@ func TestModelCatalogLoadBranches(t *testing.T) {
 // TestModelCatalogPutSave 写入与落盘：格式（source/fetched_at）、原子落盘、
 // 重新加载可读；目录不可写时内存缓存仍生效；改名失败静默。
 func TestModelCatalogPutSave(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	t.Run("落盘格式与重新加载", func(t *testing.T) {
 		mdReset(t)
 		path := filepath.Join(t.TempDir(), "nested", "model.json") // 目录不存在，覆盖 MkdirAll

@@ -243,6 +243,13 @@ func failoverIsInfraError(err error) bool {
 			return true
 		}
 	}
+	// Windows 的 syscall.ECONN* 是伪常量，真实套接字错误是 WSA* 码，另比一轮
+	// （见 errno_windows.go；非 Windows 平台该表为空）。
+	for _, target := range platformInfraErrnos() {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
 	var ne net.Error
 	return errors.As(err, &ne) && ne.Timeout()
 }

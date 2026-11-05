@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -90,10 +91,15 @@ func TestProxyFromEnv(t *testing.T) {
 			if p == nil {
 				t.Fatalf("没读到代理，应为 %s", c.want)
 			}
-			if p.String() != c.want || p.env != c.from {
+			// Windows 的环境变量名大小写不敏感：只设了 https_proxy 时 os.Getenv("HTTPS_PROXY")
+			// 也会读到同一个变量，日志里「取自哪个变量名」无法区分大小写，故这条断言只在
+			// 大小写敏感的平台上校验（代理地址/noProxy 的取值断言在两端都照跑）。
+			if p.String() != c.want || (runtime.GOOS != "windows" && p.env != c.from) {
 				t.Errorf("得到 %s（取自 %s），应为 %s（取自 %s）", p, p.env, c.want, c.from)
 			}
-			if !reflect.DeepEqual(p.noProxy, c.noProxy) {
+			// NO_PROXY / no_proxy 在 Windows 上是同一个变量，用例里两个都设时后写的会覆盖
+			// 前一个（无法构造「两个都在」的场景），这条断言同样只在大小写敏感的平台上校验。
+			if runtime.GOOS != "windows" && !reflect.DeepEqual(p.noProxy, c.noProxy) {
 				t.Errorf("noProxy = %q，应为 %q", p.noProxy, c.noProxy)
 			}
 		})

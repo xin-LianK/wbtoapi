@@ -75,6 +75,16 @@ func dashUUID(h string) string {
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
 }
 
+// DashUUID 把 32 位十六进制会话键排成官方的 8-4-4-4-12 形态，**不改版本位**：
+// 网关内部的会话键来自 uuidV7Hex，加横线后仍是合法的 UUID v7（官方新会话 id 的形状），
+// 若像 uuidDashed 那样强改成 v4 反而把时间序版本位写坏。非 32 hex 原样返回。
+func DashUUID(h string) string {
+	if len(h) != 32 {
+		return h
+	}
+	return dashUUID(h)
+}
+
 // NewUUIDv7Hex 去掉连字符的 UUID v7（32 位十六进制）。官方的轮次 id（generateConversationRequestId）
 // 和模型消息 id（X-Conversation-Message-ID、事件里的 messageId）都是 uuidv7() 去掉连字符。
 func NewUUIDv7Hex() string { return uuidV7Hex(time.Now()) }

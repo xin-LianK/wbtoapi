@@ -158,8 +158,10 @@ func TestDeviceTokenFromConfigOrFile_Overrides(t *testing.T) {
 				DeviceToken:     tc.cfg,
 				DeviceTokenFile: fp,
 			}
+			// 通用 billing 请求不带设备头（对齐官方：只有签到带）。这里要测的是
+			// 「令牌从哪来」的优先级，直接用签到那条注入钩子。
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v2/report", nil)
-			c.BillingHeaders(req, a)
+			c.withDeviceToken(a)(req)
 			resp, err := c.HTTP.Do(req)
 			if err != nil {
 				t.Fatalf("do: %v", err)

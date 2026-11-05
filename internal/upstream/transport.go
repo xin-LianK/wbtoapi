@@ -94,8 +94,10 @@ func newTransport(px *outboundProxy) *http.Transport {
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		IdleConnTimeout:       idleConnTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
-		// 自动读取环境变量中的代理配置
-		Proxy: http.ProxyFromEnvironment,
+		// 不设 Transport.Proxy：出站代理统一在拨号层（proxy.go 的 proxyDial / outboundProxy）处理。
+		// 若这里再挂 ProxyFromEnvironment，进程带了 HTTP(S)_PROXY 时标准库会先挑出环境代理、
+		// 再把「代理地址」交给已经套了一层代理的 DialContext，两层代理叠加必然连错目标
+		// （测试里表现为 10s 后拿到 502 Bad Gateway）。
 	}
 }
 

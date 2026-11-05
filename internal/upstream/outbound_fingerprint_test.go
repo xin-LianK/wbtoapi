@@ -27,7 +27,10 @@ import (
 func TestNoSelfIdentifyingPrefixInOutbound(t *testing.T) {
 	root := filepath.Join("..", "..", "internal")
 	badPrefixes := []string{`"wb2api-`, `"wb2a-`}
-	skipDirs := map[string]bool{"testdata": true, "node_modules": true}
+	// selfupdate 是本仓库自带的发版自更新功能：那里的 "wb2api-panel-v…" 是 GitHub
+	// Release 资产文件名（下载 URL 的组成部分），不出现在任何上游请求里，与本守卫
+	// 要防的「上游出站标识带项目缩写」无关，故排除。
+	skipDirs := map[string]bool{"testdata": true, "node_modules": true, "selfupdate": true}
 
 	var hits []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {

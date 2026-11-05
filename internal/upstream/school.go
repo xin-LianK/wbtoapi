@@ -141,7 +141,9 @@ func SchoolChatTimesEvents(conversationID string) map[string]any {
 		"recommendId": "", "skillId": "", "skillCount": 0, "totalCount": 0,
 		"traceId": rid, "rootRequestId": rid,
 		"parentConversationId": conversationID, "conversationId": conversationID,
-		"messageId": "msg-" + clientToken()[:8],
+		// messageId 与 traceId 同源派生（用例钉住 msg-<请求 id 末 8 位>）：
+		// 上游按请求 id 关联事件链，随机串会对不上。
+		"messageId": "msg-" + rid[len(rid)-8:],
 		"agentName": "mp", "agentType": "main",
 		"codebuddy.session_id":              conversationID,
 		"codebuddy.conversation_request_id": rid,
