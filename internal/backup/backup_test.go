@@ -7,6 +7,7 @@ package backup
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -105,7 +106,7 @@ func TestDisabledManager(t *testing.T) {
 	if m.List() != nil {
 		t.Error("nil manager List 应返回 nil")
 	}
-	m.Start(nil, 0) // 不应 panic
+	m.Start(context.Background(), 0) // 不应 panic
 }
 
 func tarNames(t *testing.T, path string) []string {

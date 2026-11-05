@@ -196,7 +196,7 @@ func (c *Checker) fetch(ctx context.Context) (string, releaseInfo, error) {
 	}
 	tag := strings.TrimSpace(rel.TagName)
 	if tag == "" {
-		return "", releaseInfo{}, fmt.Errorf("Release 缺少 tag_name")
+		return "", releaseInfo{}, fmt.Errorf("release 缺少 tag_name")
 	}
 	return tag, releaseInfo{htmlURL: rel.HTMLURL, name: rel.Name, publishedAt: rel.PublishedAt}, nil
 }

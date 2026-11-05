@@ -74,7 +74,6 @@ type Notifier struct {
 	cfg    Config
 	client *http.Client
 	queue  chan Message
-	once   sync.Once
 
 	mu   sync.Mutex
 	last map[string]time.Time // 去重键 → 上次发送时刻

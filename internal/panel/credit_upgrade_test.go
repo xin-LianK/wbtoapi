@@ -104,12 +104,6 @@ func (f *upgFakeBilling) setEnterprise(uid string, used, limit int64) {
 	f.entLim[uid] = limit
 }
 
-func (f *upgFakeBilling) callCount(uid string) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.calls[uid]
-}
-
 func (f *upgFakeBilling) handle(w http.ResponseWriter, r *http.Request) {
 	if upstreamtest.WebSession(w, r) {
 		return

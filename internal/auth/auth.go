@@ -362,10 +362,6 @@ func parseJWTClaims(token string) jwtClaims {
 	return c
 }
 
-// jwtTokenSource 解出 token_source 声明（parseJWTClaims 的窄封装，保留给
-// 仅关心标记来源的调用点）。
-func jwtTokenSource(token string) string { return parseJWTClaims(token).TokenSource }
-
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
 func isGlobalDomain(d string) bool {

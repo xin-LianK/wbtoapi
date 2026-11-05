@@ -44,12 +44,6 @@ func embeddedDist() fs.FS {
 	return sub
 }
 
-//go:embed mobile.css
-var mobileCSS []byte
-
-//go:embed mobile.js
-var mobileJS []byte
-
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
 //   - script-src 'self'         只跑同源脚本（dist/assets/*.js、theme-init.js）；页面无内联脚本
@@ -198,21 +192,4 @@ func (p *Panel) gzipOnce(name string, b []byte) []byte {
 	out := buf.Bytes()
 	p.gzipped.Store(name, out)
 	return out
-}
-
-// mobileStyle 输出手机端适配样式（同源样式表，CSP style-src 'self' 加载）。
-// 单独成文而非写进 index.html：上游频繁改 index.html，独立文件可避免同步上游时反复冲突。
-func (p *Panel) mobileStyle(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(mobileCSS)
-}
-
-// mobileScript 输出手机端联动逻辑（同源脚本，须在 app.js 之后加载）。
-func (p *Panel) mobileScript(w http.ResponseWriter, r *http.Request) {
-	setSecurityHeaders(w)
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(mobileJS)
 }

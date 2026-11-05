@@ -2780,22 +2780,6 @@ type ExpiryBucket struct {
 	Remain   int64     `json:"remain"`
 }
 
-// packageEffectiveEnd 返回套餐的真实失效时刻：DeductionEndTime（可抵扣窗口结束，
-// epoch 毫秒）优先，缺失依次回落 ExpiredTime / PackageEndTime / CycleEndTime。
-// 与 CreditPackages 的字段优先级必须一致——快照与逐包明细两条路径口径分叉过一次
-// （快照把体验版的周期重置日 10-31 当成到期日，实际 DeductionEndTime 在 2035 年）。
-func packageEffectiveEnd(deductionEndMS int64, expired, packageEnd, cycleEnd string) (time.Time, bool) {
-	if deductionEndMS > 0 {
-		return time.UnixMilli(deductionEndMS).In(softRateResetLoc), true
-	}
-	for _, raw := range []string{expired, packageEnd, cycleEnd} {
-		if t, ok := parsePackageEndTime(raw); ok {
-			return t, true
-		}
-	}
-	return time.Time{}, false
-}
-
 // CreditPackages 返回账号当前的逐包构成。remain/size 为各包求和。
 //
 // 包来自官方的付费包、免费包两个逐包接口，单包额度按官方算法（见 resources.go）。

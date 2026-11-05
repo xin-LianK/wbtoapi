@@ -235,25 +235,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-// tracedRequest 判断该请求是否需要请求日志记账（指标 + JSONL 归档）。
-//
-// 搜索与 chat 共用同一份账本：搜索同样消耗账号额度、同样会因上游/账号问题失败，
-// 不记账等于在面板「请求记录」里完全看不见搜索流量（此前正是如此——只挂
-// /v1/chat/completions 一个硬编码路径）。
-func (h *Handler) tracedRequest(r *http.Request) bool {
-	if r.Method != http.MethodPost {
-		return false
-	}
-	// 协议兼容端点（Anthropic Messages / OpenAI Responses）与 chat 共用同一份账本：
-	// 它们走的是同一条 chat 流水线（见 anthropic.go / responses.go），漏记会让面板
-	// 「请求记录」对这类客户端的流量完全失明。
-	switch r.URL.Path {
-	case "/v1/chat/completions", "/v1/messages", "/v1/responses":
-		return true
-	}
-	return isSearchPath(r.URL.Path)
-}
-
 // isSearchPath 判断是否为搜索端点。
 func isSearchPath(path string) bool {
 	return path == "/v1/search/messages"

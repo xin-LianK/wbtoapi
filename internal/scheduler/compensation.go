@@ -271,11 +271,3 @@ func SummarizeCompensation(results []CompensationResult) CompensationSummary {
 	}
 	return s
 }
-
-// claimCompensationQuiet 签到排程用：待领才领，无待领不记日志（避免每日刷屏），
-// 但**真实失败一律记日志**——这正是旧盲领实现丢掉的信息。
-//
-// 与面板手动按钮共用 claimOne，避免两条路径的分支/日志漂移。
-func (s *Scheduler) claimCompensationQuiet(a *auth.Auth) {
-	_ = s.claimOne(a)
-}

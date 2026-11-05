@@ -899,24 +899,6 @@ func (p *Panel) balanceAll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "accounts": p.cfg.Pool.List()})
 }
 
-// refreshCreditsQuiet 领取成功后刷新该号余额，失败不影响领取结果回传。
-//
-// 失败只记日志不返回：领取本身已经成功并落到上游，余额刷新失败只是展示滞后，
-// 前端紧接着还会拉一次 overview。静默吞掉会让「积分没变」看起来像没领到。
-func (p *Panel) refreshCreditsQuiet(uid string) {
-	a := p.cfg.Pool.AuthByUID(uid)
-	if a == nil {
-		return
-	}
-	remain, total, expiring, earliestAt, earliestRemaining, err :=
-		p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
-	if err != nil {
-		log.Printf("panel: compensation 后刷新余额失败 uid=%s: %v", uid, err)
-		return
-	}
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
-}
-
 // syncNicknames 手动刷新时的昵称同步（issue #94：上游改名免重登）。
 // 只在面板手动「刷新」路径调用——后台余额定时器不触发（用户明确要求资料接口
 // 仅手动触达）。逐号拉 /console/account，只取 nickname（手机号等敏感字段在

@@ -6,7 +6,6 @@ package pool
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"path/filepath"
 	"sync"
@@ -202,7 +201,7 @@ func TestRoundRobinConcurrentFairnessAndLeases(t *testing.T) {
 	}
 	for _, uid := range []string{"a", "b", "c", "d", "e", "f", "g"} {
 		if counts[uid] != 100 {
-			t.Fatal(fmt.Sprintf("unfair counts: %v", counts))
+			t.Fatalf("unfair counts: %v", counts)
 		}
 	}
 	p.SetMaxInFlight(1)
