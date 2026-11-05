@@ -284,7 +284,7 @@
 
 ### 变更
 
-- 更新开源许可，见仓库的 [NOTICE](https://github.com/yreidev/workbuddy2api-panel/blob/main/NOTICE)；发布包和 Docker 镜像附带许可文件，「版本信息」窗口列出许可和源码地址。
+- 更新开源许可，见仓库的 [NOTICE](../NOTICE)；发布包和 Docker 镜像附带许可文件，「版本信息」窗口列出许可和源码地址。
 
 ## [1.3.0] - 2026-10-21
 

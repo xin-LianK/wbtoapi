@@ -2,9 +2,17 @@
 
 ## 来源
 
+本仓库 `xin-LianK/wbtoapi` 是**三条代码线合并**的产物，不是其中任何一条的直接 fork。三条线的版权与许可声明都保留在 [NOTICE](../NOTICE)。
+
 1. **[Sliverkiss](https://github.com/Sliverkiss)/workbuddy2api**：原始项目，奠定了网关、账号池调度、错误分类与提示词体系（仓库已删除，链接指向作者主页）。
-2. **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)**：本仓库的直接上游，加入了 Web 管理面板、积分任务体系、请求指标等大量能力，已于 2026-10-21 停止维护，停更前的最后一次提交是 `73a7560`。
-3. **[yreidev/workbuddy2api-panel](https://github.com/yreidev/workbuddy2api-panel)**：本仓库，面板用 React + HeroUI 重写，独立维护。
+2. **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)**：在原始项目上加入 Web 管理面板、积分任务体系、请求指标等大量能力，已于 2026-10-21 停止维护，停更前的最后一次提交是 `73a7560`。
+3. **[yreidev/workbuddy2api-panel](https://github.com/yreidev/workbuddy2api-panel)**：在 linguo 的基础上把面板换成 React + HeroUI，继续逐项对齐官方客户端的出站形态，自己发到 `1.13.1`。2026-11 合并它的 tip（`f506537`，149 个提交，两个分支的共同祖先是 `6b31db6`），合并后本仓库发 `1.16.0-panel`。
+
+| 代码线 | 给了什么 | 目前状态 |
+|---|---|---|
+| Sliverkiss | 网关骨架、账号池调度、错误分类、提示词体系 | 仓库已删除，代码保留在本仓库的提交历史里 |
+| linguo2625469 | Web 管理面板、积分任务体系、请求指标 | 2026-10-21 停更，本仓库在其后继续演进 |
+| yreidev | React + HeroUI 面板、出站指纹对齐、149 个提交 | 2026-11 三方合并进本仓库（`f506537`），成为当前代码基线 |
 
 上游停更前，本仓库定期合并 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 的后端改动，并把上游对旧版面板的改动移植到新面板。整体合并到 `6b31db6`（见下方[同步记录](#同步记录)）；`6b31db6` 之后到停更的 `73a7560` 之间的最后一批改动不再整体合并，修复类的逐个挑进来（见[停更前最后一批](#停更前最后一批)），功能类逐项决定。原始项目的设计（账号池调度、错误分类、提示词体系）原样保留。
 
@@ -12,18 +20,38 @@
 
 上游也用 `vx.y.z` 打标签，和本仓库的发版标签会撞名，所以本地拉上游时不带标签：`git config remote.upstream.tagOpt --no-tags`。本仓库的标签只以 origin 上的为准。
 
-Go 模块路径从 2026-10-19 起是 `github.com/yreidev/workbuddy2api-panel`（此前沿用上游的 `github.com/linguo2625469/workbuddy2api-panel`）。上游代码仍按旧路径导入，合并时先不提交，换完导入路径、编译通过再提交：
+Go 模块路径当前是 `github.com/linguo2625469/workbuddy2api-panel`，沿用 linguo 基线，**没有随 yreidev 改名**（yreidev 那边改成了 `github.com/yreidev/workbuddy2api-panel`，合并时保留了本仓库的旧路径）。合并上游时，冲突的 import 块一律保留本仓库的路径，上游新增文件里的自引用 import 也要换回来，换完编译通过再提交：
 
 ```bash
 git fetch upstream
 git merge --no-ff --no-commit upstream/main
-# 冲突的 import 块保留本仓库的路径；上游新增或改动的文件用下面这条换过来
-git grep -lz 'github.com/linguo2625469/workbuddy2api-panel' -- '*.go' \
-  | xargs -0 -r sed -i 's#github.com/linguo2625469/workbuddy2api-panel#github.com/yreidev/workbuddy2api-panel#g'
+# 冲突的 import 块保留本仓库的路径；上游新增或改动的文件用下面这条换回来
+git grep -lz 'github.com/yreidev/workbuddy2api-panel' -- '*.go' \
+  | xargs -0 -r sed -i 's#github.com/yreidev/workbuddy2api-panel#github.com/linguo2625469/workbuddy2api-panel#g'
 gofmt -l ./cmd ./internal   # 换路径可能改变 import 排序
 go build ./... && go test ./...
 git commit   # 标题写 chore(upstream): 同步上游 <上游短 SHA>，正文列上游的主要改动，见提交规则
 ```
+
+## 2026-11 三方合并（yreidev `f506537`）
+
+本仓库此前的基线是 linguo 停更后的 WIP（`01bcb43`）。2026-11 把 yreidev 分支的 tip（`f506537`，其 `1.13.1` 发布提交，共 149 个提交）合进来，形成三条代码线的合流，合并提交 `6a2173a`；本仓库自己发的版本是 `1.16.0-panel`，与 yreidev 的版本号没有对应关系。
+
+**两处不能简单并列、必须排先后**：
+
+| 位置 | 冲突规模 | 处理原则 |
+|---|---|---|
+| `internal/upstream` | 20 个文件 | 两边的出站逻辑都留，按「时间节奏 → 地址/HTTPDNS → 按号代理 → TLS 指纹 → 消息头」的顺序串起来，不是二选一 |
+| `internal/pool` | 选号 | 分组优先级、成本分层、积分保底、暂停选号、模型锁池全部保留，判定次序按产品口径定 |
+
+合并中修掉的三个真 bug：
+
+1. **会话头口径**：`X-Conversation-ID` 是带横线的 UUID v7，`X-Conversation-Request-ID` / `X-Conversation-Message-ID` / `X-Request-ID` 是 32 hex，后两者同值。依据是 [官方客户端对照](official-client.md) 里 5.9.3 / 5.9.4 的重读结果。
+2. **代理双层叠加**：`transport` 上同时设了 `Proxy: ProxyFromEnvironment` 和按号代理，CONNECT 隧道会抢在 uTLS 之前建好 TLS 握手，指纹对齐静默失效。已删掉 `ProxyFromEnvironment`。
+3. **Windows 连接被拒不计基础设施失败**：`syscall.ECONN*` 在 Windows 上是伪常量（`0x20000016`），真实是 WSA 码 `10061`，导致换号重试不触发。改为平台表（`errno_windows.go` / `errno_other.go`）。
+
+同时删掉了被 SDK bridge 取代的手写协议翻译器（约 1100 行），`/v1/messages` 与 `/v1/responses` 改由翻译层统一承担。
+
 
 ## 相对原始项目新增的能力
 

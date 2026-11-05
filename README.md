@@ -22,8 +22,12 @@ Claude Code / Codex 直连 · 模型路由 · 请求头对齐官方桌面端 5.9
 >
 > **维护方式披露**：本仓库的代码审查、测试与修复实现**大量由 AI 辅助完成**（自动化编码 agent），合并与发布决策由维护者作出。请知悉后再使用或参与贡献。
 
-> **代码血缘**：`xin-LianK/wbtoapi` ← [`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel) ← [`Sliverkiss/workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)（已删库）。
-> 本仓库保留完整提交历史，并已吸收上游删库前的最后一次更新（`ea8b1e5`）。在上游基础上重构了可视化运维层，差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留。
+> **代码血缘**：本仓库 `xin-LianK/wbtoapi` 不是单一 fork，而是三条代码线合并的产物，三者的版权与许可声明都保留在 [NOTICE](NOTICE)：
+> 1. [`Sliverkiss/workbuddy2api`](https://github.com/Sliverkiss/workbuddy2api)（原始项目，已删库）—— 网关骨架、账号池调度、错误分类、提示词体系；
+> 2. [`linguo2625469/workbuddy2api-panel`](https://github.com/linguo2625469/workbuddy2api-panel)（2026-10-21 停止维护）—— Web 管理面板、积分任务体系、请求指标；
+> 3. [`yreidev/workbuddy2api-panel`](https://github.com/yreidev/workbuddy2api-panel) —— React + HeroUI 重写、出站指纹对齐；2026-11 合并其 tip（`f506537`，149 个提交）作为当前代码基线。
+>
+> 本仓库保留三条线的完整提交历史，并在合并后的基线上继续演进。上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，差异概览见 [与上游的差异](#-与上游的差异)。
 
 [快速开始](#快速开始) · [和原版比](#和原版比多了什么) · [功能亮点](#功能亮点) · [接入客户端](#接入客户端) · [Claude Code](#claude-code) · [Codex](#codex) · [文档](#文档) · [致谢](#致谢) · [许可与署名](#许可与署名)
 
@@ -41,7 +45,7 @@ WorkBuddy2API 是一个自托管网关：把你的多个 WorkBuddy 账号接成�
 
 ## 和原版比多了什么
 
-GitHub 上叫 workbuddy2api-panel 的仓库有好几个。本仓库是在原版 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 基础上**独立维护、独立发版**的增强版。原版已于 2026-10-21 停止维护，本仓库继续更新；同步到原版的哪一次提交见[同步记录](docs/upstream.md#同步记录)。和原版相比多了这些：
+GitHub 上叫 workbuddy2api-panel 的仓库有好几个。本仓库是三条代码线合并后的增强版（血缘见文首），**独立维护、独立发版**。下表的「原版」指最初的 [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（2026-10-21 停止维护，本仓库在其后继续更新）；合并与同步记录见[项目来源与上游同步](docs/upstream.md)。和原版相比多了这些：
 
 | | 本仓库 | 原版 |
 |---|---|---|
@@ -122,7 +126,7 @@ mkdir -p workbuddy2api/auths workbuddy2api/data && cd workbuddy2api
 docker run -d --name workbuddy2api --restart unless-stopped \
   --user "$(id -u):$(id -g)" -p 7863:7863 -e TZ=Asia/Shanghai \
   -v "$PWD/auths:/app/auths" -v "$PWD/data:/app/data" \
-  ghcr.io/yreidev/workbuddy2api-panel:latest
+  ghcr.io/xin-liank/wbtoapi:latest
 ```
 
 首次启动会生成 `data/config.json`，`api_key` 是随机值，用 `grep api_key data/config.json` 查看。
@@ -132,7 +136,7 @@ docker run -d --name workbuddy2api --restart unless-stopped \
 **3. 接入客户端**：Base URL 填 `http://localhost:7863/v1`，API Key 填上面的密钥，见下一节。
 
 > [!TIP]
-> 不用 Docker？到[最新构建](https://github.com/linguo2625469/workbuddy2api-panel/releases/tag/latest)下载对应平台的包（Windows / Linux / macOS），解压后直接运行 `wb2api`。Docker Compose、源码构建、升级与备份见[部署与运维](docs/deployment.md)。
+> 不用 Docker？到[最新构建](https://github.com/xin-LianK/wbtoapi/releases/tag/latest)下载对应平台的包（Windows / Linux / macOS），解压后直接运行 `wb2api`。Docker Compose、源码构建、升级与备份见[部署与运维](docs/deployment.md)。
 
 ## 接入客户端
 
@@ -421,7 +425,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 ## 🆚 与上游的差异
 
-本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
+本分支相对原始项目 Sliverkiss/workbuddy2api（仓库已删除，来源见[项目来源与上游同步](docs/upstream.md)）的增量，均已在真实多账号环境验证：
 
 ### 新增
 
@@ -458,7 +462,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
-> 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+> 原始项目仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。2026-11 又合并了 [`yreidev/workbuddy2api-panel`](https://github.com/yreidev/workbuddy2api-panel) 分支的 tip（`f506537`）作为新基线（三方合并，见[项目来源与上游同步](docs/upstream.md)），此后演进以本仓库为准。
 
 ### 接手后的增量（2026-10）
 

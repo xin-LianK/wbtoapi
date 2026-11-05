@@ -25,7 +25,7 @@
 
 ## Docker 镜像（推荐）
 
-镜像由 CI 发布在 GHCR：`ghcr.io/yreidev/workbuddy2api-panel`。
+镜像由 CI 发布在 GHCR：`ghcr.io/xin-liank/wbtoapi`。
 
 ```bash
 mkdir -p workbuddy2api/auths workbuddy2api/data && cd workbuddy2api
@@ -34,7 +34,7 @@ docker run -d --name workbuddy2api --restart unless-stopped \
   --user "$(id -u):$(id -g)" \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v "$PWD/auths:/app/auths" -v "$PWD/data:/app/data" \
-  ghcr.io/yreidev/workbuddy2api-panel:latest
+  ghcr.io/xin-liank/wbtoapi:latest
 ```
 
 几点说明：
@@ -49,8 +49,8 @@ docker run -d --name workbuddy2api --restart unless-stopped \
 ## Docker Compose
 
 ```bash
-git clone https://github.com/yreidev/workbuddy2api-panel.git
-cd workbuddy2api-panel
+git clone https://github.com/xin-LianK/wbtoapi.git
+cd wbtoapi
 
 # compose 挂载的是 config.json 这个文件，宿主机上必须先有它，
 # 否则 Docker 会把挂载点建成目录，容器起不来
@@ -72,26 +72,26 @@ docker compose down         # 停止并移除容器，./auths 与 ./data 不受�
 
 二进制自带面板前端，拷到任意机器即可运行，只要当前目录下的 `auths/`、`data/` 可写。
 
-从 [Releases 的「最新构建」](https://github.com/yreidev/workbuddy2api-panel/releases/tag/latest)下载对应平台的包。它随 `main` 分支自动更新，与 Docker 的 `latest` 镜像同步；文件名不带版本号，下面的链接一直有效：
+从 [Releases 的「最新构建」](https://github.com/xin-LianK/wbtoapi/releases/tag/latest)下载对应平台的包。它随 `main` 分支自动更新，与 Docker 的 `latest` 镜像同步；文件名不带版本号，下面的链接一直有效：
 
 | 平台 | 文件 |
 |---|---|
-| Windows x64 | [`wb2api-panel-windows-amd64.zip`](https://github.com/yreidev/workbuddy2api-panel/releases/download/latest/wb2api-panel-windows-amd64.zip) |
-| Linux x64 | [`wb2api-panel-linux-amd64.tar.gz`](https://github.com/yreidev/workbuddy2api-panel/releases/download/latest/wb2api-panel-linux-amd64.tar.gz) |
-| Linux ARM64 | [`wb2api-panel-linux-arm64.tar.gz`](https://github.com/yreidev/workbuddy2api-panel/releases/download/latest/wb2api-panel-linux-arm64.tar.gz) |
-| macOS Intel | [`wb2api-panel-darwin-amd64.tar.gz`](https://github.com/yreidev/workbuddy2api-panel/releases/download/latest/wb2api-panel-darwin-amd64.tar.gz) |
-| macOS Apple 芯片 | [`wb2api-panel-darwin-arm64.tar.gz`](https://github.com/yreidev/workbuddy2api-panel/releases/download/latest/wb2api-panel-darwin-arm64.tar.gz) |
+| Windows x64 | [`wb2api-panel-windows-amd64.zip`](https://github.com/xin-LianK/wbtoapi/releases/download/latest/wb2api-panel-windows-amd64.zip) |
+| Linux x64 | [`wb2api-panel-linux-amd64.tar.gz`](https://github.com/xin-LianK/wbtoapi/releases/download/latest/wb2api-panel-linux-amd64.tar.gz) |
+| Linux ARM64 | [`wb2api-panel-linux-arm64.tar.gz`](https://github.com/xin-LianK/wbtoapi/releases/download/latest/wb2api-panel-linux-arm64.tar.gz) |
+| macOS Intel | [`wb2api-panel-darwin-amd64.tar.gz`](https://github.com/xin-LianK/wbtoapi/releases/download/latest/wb2api-panel-darwin-amd64.tar.gz) |
+| macOS Apple 芯片 | [`wb2api-panel-darwin-arm64.tar.gz`](https://github.com/xin-LianK/wbtoapi/releases/download/latest/wb2api-panel-darwin-arm64.tar.gz) |
 
 ```bash
 # 以 Linux x64 为例
-curl -fLO https://github.com/yreidev/workbuddy2api-panel/releases/download/latest/wb2api-panel-linux-amd64.tar.gz
+curl -fLO https://github.com/xin-LianK/wbtoapi/releases/download/latest/wb2api-panel-linux-amd64.tar.gz
 tar xzf wb2api-panel-linux-amd64.tar.gz
 ./wb2api                 # Windows：解压后运行 .\wb2api.exe
 # 首次启动在当前目录生成 config.json（含随机 api_key，日志里打印一次）
 # 浏览器打开 http://127.0.0.1:7863/panel/
 ```
 
-想固定版本，到 [Releases](https://github.com/yreidev/workbuddy2api-panel/releases) 下载带版本号的包（如 `wb2api-panel-v1.0.0-linux-amd64.tar.gz`），每个版本的变更写在它的 Release 说明里。
+想固定版本，到 [Releases](https://github.com/xin-LianK/wbtoapi/releases) 下载带版本号的包（如 `wb2api-panel-v1.0.0-linux-amd64.tar.gz`），每个版本的变更写在它的 Release 说明里。
 
 每个包里是 `wb2api`、`config.example.json`、`README.md` 和许可证 `LICENSE`、`NOTICE`；同一个 Release 里的 `checksums.txt` 可用 `sha256sum -c --ignore-missing checksums.txt` 校验。二进制没有签名，在 macOS 上用浏览器下载后运行可能被系统拦截，执行 `xattr -d com.apple.quarantine wb2api` 解除即可（用上面的 `curl` 下载不会被标记）。
 
@@ -156,7 +156,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit     ./cmd/credit
 **升级**
 
 ```bash
-docker pull ghcr.io/yreidev/workbuddy2api-panel:latest
+docker pull ghcr.io/xin-liank/wbtoapi:latest
 docker rm -f workbuddy2api
 # 再执行一次上面的 docker run
 ```
