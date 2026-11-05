@@ -14,28 +14,230 @@
   .chip { white-space: nowrap; }
 }
 
-/* 图表分类色：dataviz 参考色板的 8 个槽位，固定顺序分配、不循环（第 9 个起归入「其他」）。
-   明暗各一套，均按 HeroUI 默认主题的卡片底色（浅 #ffffff / 深 #18181b）跑过色觉与对比度校验。
-   HeroUI 默认主题只有状态色，状态色不拿来区分数据系列，所以图表单独给。 */
-:root {
-  --viz-1: #2a78d6;
-  --viz-2: #eb6834;
-  --viz-3: #1baf7a;
-  --viz-4: #eda100;
-  --viz-5: #e87ba4;
-  --viz-6: #008300;
-  --viz-7: #4a3aa7;
-  --viz-8: #e34948;
-  --viz-other: var(--muted);
+/* ══════════════════════════════════════════════════════════════════
+   政务云设计规范 v1.0（UI V4）
+   取值来源：D:\Project\WorkOrder\design-system\tokens.css
+   六条铁律：①无阴影分层 ②状态三重编码 ③数字等宽 ④紫色只给 AI
+             ⑤青色短条只给区块标题 ⑥外大内小圆角
+   只做令牌层与全局规则，不改组件结构。
+   ══════════════════════════════════════════════════════════════════ */
+
+@theme {
+  /* 字体族：Inter → Noto Sans SC → PingFang SC → 微软雅黑 */
+  --font-sans: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  /* 密度：正文主力 13px（规范刻意压得比常见的 14px 紧一档） */
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.6;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.45;
+  /* 卡片圆角 12（外大内小：卡片 12 → 卡内格 8 → 标签 4） */
+  --radius-3xl: 0.75rem;
+  --radius-2xl: 0.625rem;
 }
+
+/* ── 亮色令牌（默认）──────────────────────────────────────────── */
+:root {
+  /* 品牌蓝（占比约 5%）*/
+  --ds-color-brand: #2F7BFF;
+  --ds-color-brand-deep: #1B5CDB;
+  --ds-color-brand-hover: #1E6AF0;
+  --ds-color-brand-tint: #F3F8FF;
+  --ds-color-brand-tint-2: #E8F3FF;
+  --ds-color-brand-track: #D6E8FF;
+  /* 辅助青（只做区块标题下划线）与 AI 紫（本面板无 AI 内容，保留令牌备用） */
+  --ds-color-accent: #36CFC9;
+  --ds-color-ai: #7B61FF;
+  --ds-color-ai-chip: #EEE8FF;
+  /* 文本四级 */
+  --ds-text-1: #1D2129;
+  --ds-text-2: #4E5969;
+  --ds-text-3: #86909C;
+  --ds-text-4: #C9CDD4;
+  /* 背景三级 + 描边三级（line 是结构线，line-card 是卡片线，不混用）*/
+  --ds-bg-page: #F5F7FA;
+  --ds-bg-inner: #F7F8FA;
+  --ds-bg-subtle: #FAFBFC;
+  --ds-line: #E5E6EB;
+  --ds-line-card: #EDF0F4;
+  --ds-divider: #F2F3F5;
+  /* 状态四色（前景 + 底色）*/
+  --ds-status-ok: #00B42A;
+  --ds-status-ok-bg: #E8FFEA;
+  --ds-status-warn: #FF7D00;
+  --ds-status-warn-bg: #FFF7E8;
+  --ds-status-bad: #F53F3F;
+  --ds-status-bad-bg: #FFECE8;
+  --ds-status-unknown: #86909C;
+  --ds-status-unknown-bg: #F2F3F5;
+
+  /* ── HeroUI v3 语义变量映射 ───────────────────────────────── */
+  --background: var(--ds-bg-page);
+  --foreground: var(--ds-text-1);
+  --surface: #FFFFFF;
+  --surface-foreground: var(--ds-text-1);
+  --surface-secondary: var(--ds-bg-inner);
+  --surface-secondary-foreground: var(--ds-text-2);
+  --surface-tertiary: var(--ds-divider);
+  --overlay: #FFFFFF;
+  --overlay-foreground: var(--ds-text-1);
+  --muted: var(--ds-text-3);
+  --border: var(--ds-line);
+  --separator: var(--ds-line-card);
+  --default: var(--ds-divider);
+  --default-foreground: var(--ds-text-2);
+  --accent: var(--ds-color-brand);
+  --accent-foreground: #FFFFFF;
+  --success: var(--ds-status-ok);
+  --success-foreground: #FFFFFF;
+  --warning: var(--ds-status-warn);
+  --warning-foreground: #FFFFFF;
+  --danger: var(--ds-status-bad);
+  --danger-foreground: #FFFFFF;
+  --field-background: #FFFFFF;
+  --field-foreground: var(--ds-text-1);
+  --field-placeholder: var(--ds-text-4);
+  --field-border: var(--ds-line);
+  --focus: var(--ds-color-brand);
+  --link: var(--ds-color-brand);
+  --segment: #FFFFFF;
+
+  /* 圆角阶梯：标签 4 → 控件 6 → 卡内格 8 → 卡片 12 → 弹层 14 */
+  --radius: 0.5rem;
+  --field-radius: 0.375rem;
+
+  /* 图表分类色：蓝/青/黄/紫，禁止红绿（与状态语义冲突）；
+     4 个以上序列走同色系浅色，不再引入新色相 */
+  --viz-1: #2F7BFF;
+  --viz-2: #36CFC9;
+  --viz-3: #FFB020;
+  --viz-4: #7B61FF;
+  --viz-5: #85B7EB;
+  --viz-6: #9FE1CB;
+  --viz-7: #FAC775;
+  --viz-8: #CECBF6;
+  --viz-other: var(--ds-text-3);
+}
+
+/* ── 暗色：只覆写 bg/text/line 三组语义令牌，色板不动（规范第十节）── */
 .dark,
 [data-theme="dark"] {
-  --viz-1: #3987e5;
-  --viz-2: #d95926;
-  --viz-3: #199e70;
-  --viz-4: #c98500;
-  --viz-5: #d55181;
-  --viz-6: #008300;
-  --viz-7: #9085e9;
-  --viz-8: #e66767;
+  --ds-text-1: #E8EAED;
+  --ds-text-2: #B7BCC4;
+  --ds-text-3: #8A9099;
+  --ds-text-4: #5A6069;
+  --ds-bg-page: #17181B;
+  --ds-bg-inner: #1F2023;
+  --ds-bg-subtle: #24262A;
+  --ds-line: #2E3035;
+  --ds-line-card: #26282C;
+  --ds-divider: #24262A;
+
+  --background: var(--ds-bg-page);
+  --foreground: var(--ds-text-1);
+  --surface: #1F2023;
+  --surface-foreground: var(--ds-text-1);
+  --surface-secondary: #24262A;
+  --surface-secondary-foreground: var(--ds-text-2);
+  --surface-tertiary: #2A2C31;
+  --overlay: #24262A;
+  --overlay-foreground: var(--ds-text-1);
+  --muted: var(--ds-text-3);
+  --border: var(--ds-line);
+  --separator: var(--ds-line-card);
+  --default: #2A2C31;
+  --default-foreground: var(--ds-text-2);
+  --accent: #4C8DFF;
+  --field-background: #1F2023;
+  --field-foreground: var(--ds-text-1);
+  --field-placeholder: var(--ds-text-4);
+  --field-border: var(--ds-line);
+  --segment: #2A2C31;
+  /* 深底上状态色要提亮，底色压暗（不能直接用浅色底）*/
+  --ds-status-ok: #3DD68C;
+  --ds-status-warn: #F5A623;
+  --ds-status-bad: #F76965;
+
+  --viz-1: #4C8DFF;
+  --viz-2: #36CFC9;
+  --viz-3: #FFB020;
+  --viz-4: #9E8AFF;
+  --viz-5: #85B7EB;
+  --viz-6: #9FE1CB;
+  --viz-7: #FAC775;
+  --viz-8: #CECBF6;
+}
+
+/* ── 全局基础 ─────────────────────────────────────────────────── */
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* 铁律 1：普通卡片零阴影，白卡 + 1px 淡描边 + 灰底页面分层；阴影只留给浮层 */
+.card {
+  box-shadow: none;
+  border: 1px solid var(--ds-line-card);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 14px;
+}
+
+/* 区块标题 15/600；描述 12 灰（Card.Title 是面板标题，比规范 .sec 略小一档）*/
+.card__title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ds-text-1);
+}
+
+.card__description {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ds-text-3);
+}
+
+/* 按钮回 6px 圆角（组件库默认是胶囊），一个视图最多一个 primary 由页面自身保证 */
+.button {
+  border-radius: 6px;
+}
+
+/* 铁律 3：数值等宽，刷新时列宽不跳 */
+td,
+th,
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 表头：12px 灰字 + 浅底 sticky */
+thead th {
+  background: var(--ds-bg-subtle);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ds-text-3);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* 铁律 5：区块标题下的 28×3 青色短条，只给 Card.Title */
+.card__title::after {
+  content: "";
+  display: block;
+  width: 28px;
+  height: 3px;
+  margin-top: 6px;
+  border-radius: 2px;
+  background: var(--ds-color-accent);
+}
+
+/* 滚动条收到最轻（面板里全是长表格）*/
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--foreground) 18%, transparent) transparent;
 }

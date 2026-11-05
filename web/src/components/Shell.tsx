@@ -2,17 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
 
-// 外壳：左侧导航（窄屏收进抽屉）+ 顶栏（页面标题、运行时长、明暗切换、刷新余额、添加账号）。
-// HeroUI 没有侧栏/顶栏组件，布局用 Tailwind 搭，里面的导航、按钮、抽屉都是 HeroUI 组件。
+// 外壳：单列布局 + 底部浮动 Dock（mac 风格，与 v1.15.x 静态面板一致）。
+// 顶部只留页面标题、运行状态与操作按钮；导航全部收进底部胶囊，滚动到底不被遮挡。
 import { useEffect, useState, type ComponentType, type SVGProps } from 'react'
 import {
-  ArrowRightArrowLeft, ArrowsRotateRight, Bars, Boxes3, ChartColumn, Cpu, Gear, Gift, Globe, Key, ListCheck, ListTimeline, LogoGithub, Moon, Persons, Plus, Sun,
+  ArrowRightArrowLeft, ArrowsRotateRight, Boxes3, ChartColumn, Cpu, Gear, Gift, Globe, Key, ListCheck, ListTimeline, Moon, Persons, Plus, Sun,
 } from '@gravity-ui/icons'
-import {
-  Button, Drawer, Label, Link, ListBox, RouterProvider, ScrollShadow, Toast, Tooltip, toast, useMediaQuery, useTheme,
-} from '@heroui/react'
+import { Button, RouterProvider, Toast, Tooltip, toast, useMediaQuery, useTheme } from '@heroui/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { Outlet, useLocation, useMatches, useRouter } from '@tanstack/react-router'
+import { Link as RouterLink, Outlet, useLocation, useMatches, useRouter } from '@tanstack/react-router'
 import { post } from '../lib/api'
 import { uptime } from '../lib/format'
 import { isExternalHref } from '../lib/links'
@@ -24,9 +22,6 @@ import { KeyGate } from './KeyGate'
 import { UpdateBadge, UpdateNotice, type ManualPanel } from './UpdateNotice'
 
 type Icon = ComponentType<SVGProps<SVGSVGElement>>
-
-/** 本面板的源码仓库（侧栏底部的链接） */
-const REPO = { name: 'yreidev/workbuddy2api-panel', url: 'https://github.com/linguo2625469/workbuddy2api-panel' }
 
 const NAV: { to: string; label: string; icon: Icon }[] = [
   { to: '/accounts', label: '账号池', icon: Persons },
@@ -45,7 +40,6 @@ const NAV: { to: string; label: string; icon: Icon }[] = [
 export function Shell() {
   const router = useRouter()
   const isDesktop = useMediaQuery('(min-width: 1024px)')
-  const [drawer, setDrawer] = useState(false)
   const [adding, setAdding] = useState(false)
   const [manualPanel, setManualPanel] = useState<ManualPanel>(null)
   const overview = useOverview()
@@ -62,103 +56,85 @@ export function Shell() {
       // 面板内部路径交给路由生成 #/xxx 地址；https:// 这类完整地址（外链）原样保留
       useHref={(to) => (isExternalHref(to) ? to : router.history.createHref(router.buildLocation({ to }).href))}
     >
-      <div className="flex min-h-dvh">
-        <aside className="sticky top-0 hidden h-dvh w-56 shrink-0 flex-col border-r border-separator lg:flex">
-          <Sidebar onShow={setManualPanel} />
-        </aside>
-        <Drawer.Backdrop isOpen={drawer && !isDesktop} onOpenChange={setDrawer}>
-          <Drawer.Content placement="left">
-            <Drawer.Dialog aria-label="导航菜单" className="w-64 p-0">
-              <Sidebar onNavigate={() => setDrawer(false)} onShow={(m) => { setDrawer(false); setManualPanel(m) }} />
-            </Drawer.Dialog>
-          </Drawer.Content>
-        </Drawer.Backdrop>
-
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b border-separator bg-background px-3 sm:gap-3 sm:px-6">
-            <Button isIconOnly aria-label="打开菜单" variant="ghost" className="lg:hidden" onPress={() => setDrawer(true)}>
-              <Bars />
+      <div className="flex min-h-dvh flex-col">
+        <header className="sticky top-0 z-40 flex h-14 shrink-0 items-center gap-2 border-b border-separator bg-background/80 px-4 backdrop-blur-md sm:gap-3 sm:px-6">
+          <h1 className="truncate text-base font-semibold sm:text-lg">{title}</h1>
+          <StatusPill />
+          {overview.data && <span className="hidden shrink-0 text-xs text-muted tabular-nums lg:inline">v{overview.data.version}</span>}
+          <UpdateBadge onPress={() => setManualPanel('update')} />
+          {overview.data && <span className="hidden truncate text-xs text-muted tabular-nums md:inline">{uptime(overview.data.uptime_sec)}</span>}
+          <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
+            <ThemeSwitch />
+            <RefreshBalance compact={!isDesktop} />
+            <Button variant="primary" isIconOnly={!isDesktop} aria-label="添加账号" onPress={() => setAdding(true)}>
+              <Plus />{isDesktop && '添加账号'}
             </Button>
-            <h1 className="truncate text-base font-semibold sm:text-lg">{title}</h1>
-            {overview.data && <span className="hidden truncate text-sm text-muted md:inline">{uptime(overview.data.uptime_sec)}</span>}
-            <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-              <ThemeSwitch />
-              <RefreshBalance compact={!isDesktop} />
-              <Button variant="primary" isIconOnly={!isDesktop} aria-label="添加账号" onPress={() => setAdding(true)}>
-                <Plus />{isDesktop && '添加账号'}
-              </Button>
-            </div>
-          </header>
-          <main className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 pb-16 pt-4 sm:px-6 sm:pt-6">
-            <Outlet />
-          </main>
-        </div>
+          </div>
+        </header>
+        {/* pb-28 给底部 Dock 留位，滚动到底最后一行不被压住 */}
+        <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-4 px-4 pb-28 pt-5 sm:px-6">
+          <Outlet />
+        </main>
+        <Dock />
       </div>
       <AddAccountModal open={adding} onClose={() => setAdding(false)} />
       <KeyGate />
       <UpdateNotice manual={manualPanel} onManualChange={setManualPanel} />
-      <Toast.Provider placement={isDesktop ? 'bottom end' : 'top'} />
+      {/* Toast 放顶部：底部位置会被 Dock 压住 */}
+      <Toast.Provider placement="top end" />
     </RouterProvider>
   )
 }
 
-function Sidebar({ onNavigate, onShow }: { onNavigate?: () => void; onShow: (m: ManualPanel) => void }) {
+/**
+ * 底部浮动 Dock：mac 风格胶囊，图标在上、10px 文字在下。
+ * 结构与 v1.15.x 静态面板的 .nav 一致——fixed 底部 16px 居中、毛玻璃、
+ * 圆角 999、横向可滚（窄屏不换行、不折成两排）。
+ */
+function Dock() {
   const { pathname } = useLocation()
+  return (
+    <nav
+      aria-label="主导航"
+      className="fixed bottom-4 left-1/2 z-50 flex max-w-[calc(100vw-24px)] -translate-x-1/2 items-center overflow-x-auto rounded-full border border-separator bg-surface/85 px-2 py-1.5 shadow-[0_8px_30px_rgba(29,33,41,0.12)] backdrop-blur-xl backdrop-saturate-150 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+    >
+      <ul className="flex flex-none items-center gap-0.5">
+        {NAV.map((item) => {
+          const active = pathname === item.to
+          return (
+            <li key={item.to} className="flex-none">
+              <RouterLink
+                to={item.to}
+                aria-current={active ? 'page' : undefined}
+                className={`flex flex-col items-center gap-1 rounded-xl px-3 pb-1.5 pt-2 text-[10px] font-medium leading-none transition-colors ${
+                  active
+                    ? 'bg-(--ds-color-brand-tint-2) text-(--ds-color-brand)'
+                    : 'text-(--ds-text-3) hover:bg-surface-secondary hover:text-foreground'
+                }`}
+              >
+                <item.icon className="size-4" />
+                {item.label}
+              </RouterLink>
+            </li>
+          )
+        })}
+      </ul>
+    </nav>
+  )
+}
+
+/** 顶栏的运行状态胶囊：颜色 + 文字双编码（不只靠色点） */
+function StatusPill() {
   const { data } = useOverview()
   const state = !data ? { text: '连接中', dot: 'bg-default' }
     : data.healthy > 0 ? { text: '服务正常', dot: 'bg-success' }
     : data.total ? { text: '无可用账号', dot: 'bg-warning' }
     : { text: '待添加账号', dot: 'bg-danger' }
-
   return (
-    <>
-      <div className="px-5 pb-3 pt-5">
-        <div className="font-semibold">WorkBuddy2API</div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
-          {data
-            ? (
-              <Tooltip delay={300}>
-                <Button size="sm" variant="ghost" onPress={() => onShow('about')} className="-ms-1 h-auto min-w-0 px-1 py-0 text-xs font-normal text-muted hover:text-foreground">
-                  v{data.version}
-                </Button>
-                <Tooltip.Content>版本信息</Tooltip.Content>
-              </Tooltip>
-            )
-            : '控制台'}
-          <UpdateBadge onPress={() => onShow('update')} />
-        </div>
-      </div>
-      <ScrollShadow hideScrollBar className="flex-1 px-3">
-        <ListBox aria-label="导航" selectionMode="none" onAction={onNavigate}>
-          {NAV.map((item) => (
-            <ListBox.Item
-              key={item.to}
-              id={item.to}
-              href={item.to}
-              textValue={item.label}
-              className={pathname === item.to ? 'bg-default' : undefined}
-            >
-              <item.icon className="size-4.5 shrink-0 text-muted" />
-              <Label className="font-normal">{item.label}</Label>
-            </ListBox.Item>
-          ))}
-        </ListBox>
-      </ScrollShadow>
-      <div className="flex flex-col gap-1 border-t border-separator px-5 py-3 text-xs text-muted">
-        <span className="flex items-center gap-2"><span className={`size-2 rounded-full ${state.dot}`} />{state.text}</span>
-        {data && <span>v{data.version} · {data.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存'}</span>}
-        <Link
-          href={REPO.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={'GitHub 仓库 ' + REPO.name + '（在新标签页打开）'}
-          className="mt-0.5 flex w-fit items-center gap-1.5 text-xs text-muted no-underline hover:text-foreground"
-        >
-          <LogoGithub className="size-3.5 shrink-0" />
-          <span className="truncate">{REPO.name}</span>
-        </Link>
-      </div>
-    </>
+    <span className="hidden shrink-0 items-center gap-1.5 rounded-full bg-surface-secondary px-2 py-1 text-xs text-muted sm:flex">
+      <span className={`size-1.5 rounded-full ${state.dot}`} />
+      {state.text}
+    </span>
   )
 }
 
