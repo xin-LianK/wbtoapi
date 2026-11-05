@@ -305,19 +305,15 @@ func parseModelFromBody(body []byte) string {
 // 数，与流式侧 CacheTokens 的推导口径对称：hit 不可得（缺失或 0）但 miss 显式
 // 存在时，按 prompt - miss 反推 hit（issue #170）；prompt <= miss 时保持 hit=0
 // （真实的整段未命中）。两个方向都不可得时 ok=false。
+// cacheTokensFromUsage 非流式的缓存观测，口径与流式末帧完全一致（同一套别名表 +
+// 命中为 0 也算有观测）。以前这里只看「命中是否存在且为正」，上游回 hit=0 的整段
+// 未命中会被判成「没有缓存维度」，未命中告警永远不触发。
 func cacheTokensFromUsage(usage map[string]any) (hit, miss int64, ok bool) {
-	h, okH := upstream.UsageCacheHitTokens(usage)
-	m, okM := upstream.UsageCacheMissTokens(usage)
-	switch {
-	case okH:
-		return int64(h), int64(m), true
-	case okM:
-		if p, okP := upstream.UsagePromptTokens(usage); okP && p > m {
-			return int64(p - m), int64(m), true
-		}
-		return 0, int64(m), true
+	h, m, ok := upstream.UsageCacheTokens(usage)
+	if !ok {
+		return 0, 0, false
 	}
-	return 0, 0, false
+	return int64(h), int64(m), true
 }
 
 // usageDeltaFromResponse 从非流式聚合响应中提取明确存在的 token 字段。

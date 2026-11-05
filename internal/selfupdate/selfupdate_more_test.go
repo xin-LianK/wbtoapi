@@ -14,6 +14,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +43,7 @@ func runFn(fn func()) {
 // Launch：没有安装版本时返回 Updater 且不 exec；有更新且校验通过时 exec 该路径；
 // 校验不过不 exec。
 func TestLaunchEntry(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	t.Run("没有安装版本", func(t *testing.T) {
 		calls := stubExec(t, nil)
 		u := Launch(t.TempDir(), "1.1.0")
@@ -425,6 +427,7 @@ func TestExtractBinaryErrors(t *testing.T) {
 
 // trialRun：文件不可执行时带上 noexec 提示。
 func TestTrialRunPermissionHint(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "wb2api")
 	if err := os.WriteFile(bin, fakeBinary("1.2.0"), 0o644); err != nil {

@@ -313,6 +313,9 @@ func (b *bridgeWriter) finish() {
 		return
 	}
 	out := translators.TranslateNonStream(b.ctx, sdktranslator.FormatOpenAI, b.format, b.model, b.orig, b.chat, b.buf.Bytes(), &b.param)
+	if b.format == sdktranslator.FormatOpenAIResponse {
+		out = withResponseOutputText(out)
+	}
 	if len(out) == 0 {
 		writeBridgeError(b.w, b.format, http.StatusBadGateway, "upstream_parse", "cannot translate upstream response")
 		return
@@ -401,4 +404,43 @@ func bridgeStreamError(format sdktranslator.Format, code, msg string) []byte {
 	}
 	raw, _ := json.Marshal(data)
 	return []byte("event: " + event + "\ndata: " + string(raw) + "\n\n")
+}
+
+// withResponseOutputText 给 Responses 非流式响应补顶层 output_text。
+//
+// 官方 OpenAI 的 response 对象没有这个字段（output_text 是 SDK 的便捷属性），
+// 但本网关早先的实现一直输出它，已接入的脚本按这个字段取正文；换成 SDK 翻译器
+// 之后字段丢了。这里从 output[] 的 message/output_text 分片拼回来，属于纯增量，
+// 不影响标准客户端。解析不出来时原样返回。
+func withResponseOutputText(out []byte) []byte {
+	var obj map[string]any
+	if json.Unmarshal(out, &obj) != nil {
+		return out
+	}
+	if _, exists := obj["output_text"]; exists {
+		return out
+	}
+	if asString(obj["object"]) != "response" {
+		return out
+	}
+	var sb strings.Builder
+	for _, raw := range asSlice(obj["output"]) {
+		item := asMap(raw)
+		if item == nil || asString(item["type"]) != "message" {
+			continue
+		}
+		for _, c := range asSlice(item["content"]) {
+			part := asMap(c)
+			if part == nil || asString(part["type"]) != "output_text" {
+				continue
+			}
+			sb.WriteString(asString(part["text"]))
+		}
+	}
+	obj["output_text"] = sb.String()
+	patched, err := json.Marshal(obj)
+	if err != nil {
+		return out
+	}
+	return patched
 }

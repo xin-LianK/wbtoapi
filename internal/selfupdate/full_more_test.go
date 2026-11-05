@@ -14,6 +14,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"log"
 	"net/http"
@@ -118,6 +119,7 @@ func TestMarkStableWriteFailure(t *testing.T) {
 
 // writeManifest 的三处中途失败（写 / 刷盘 / 关闭）。
 func TestWriteManifestStepErrors(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	steps := []struct {
 		name string
 		stub func(t *testing.T)

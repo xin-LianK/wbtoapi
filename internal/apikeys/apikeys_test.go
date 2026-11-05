@@ -7,6 +7,7 @@ package apikeys
 import (
 	"encoding/json"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"math"
 	"net/http"
 	"os"
@@ -53,6 +54,7 @@ func readFile(t *testing.T, path string) file {
 
 // TestCreate 新建：整理输入、生成 id 和 sk- 原文、立即写盘（0600），能按原文查到。
 func TestCreate(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	s, path := newStore(t)
 	if s.Any() {
 		t.Fatal("空库 Any 应为 false")

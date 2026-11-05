@@ -7,6 +7,7 @@ package proxies
 import (
 	"encoding/json"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 
 // TestOpen 文件不存在是空池；坏 JSON、代理所在的池不存在、读不了都报错；设置补默认值；落盘 0600。
 func TestOpen(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	dir := t.TempDir()
 	r, err := Open(filepath.Join(dir, "none.json"))
 	if err != nil || r.Enabled() || len(r.View().Proxies) != 0 {

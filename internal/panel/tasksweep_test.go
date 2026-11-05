@@ -13,9 +13,9 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream/upstreamtest"
 )
 
 // sweepTask 构造假上游的一个任务条目。

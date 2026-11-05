@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"math"
 	"net/http"
@@ -34,6 +35,7 @@ import (
 
 // 路径推导：state 文件为空/相对/绝对三种形态。
 func TestStateSiblingAndUsagePath(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	cases := []struct {
 		stateFile string
 		name      string
@@ -93,7 +95,7 @@ func TestRetentionText(t *testing.T) {
 func TestRestartRequiredFields(t *testing.T) {
 	fixed := []string{
 		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
-		"upstream.user_agent", "session_sticky.ttl", "session_sticky.gc_interval", "server.read_timeout",
+		"upstream.user_agent", "cn.chat_base", "session_sticky.ttl", "session_sticky.gc_interval", "server.read_timeout",
 	}
 	empty := Config{}
 	if got := restartRequiredFields(&empty); !reflect.DeepEqual(got, fixed) {
@@ -107,7 +109,7 @@ func TestRestartRequiredFields(t *testing.T) {
 	full.Upstash.URL = "redis://x"
 	want := append([]string{"listen", "auth_dir", "state_file"},
 		"upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds",
-		"upstream.user_agent", "upstash", "session_sticky.ttl", "session_sticky.gc_interval", "server.read_timeout")
+		"upstream.user_agent", "cn.chat_base", "upstash", "session_sticky.ttl", "session_sticky.gc_interval", "server.read_timeout")
 	if got := restartRequiredFields(&full); !reflect.DeepEqual(got, want) {
 		t.Fatalf("完整配置清单不对:\n got %v\nwant %v", got, want)
 	}

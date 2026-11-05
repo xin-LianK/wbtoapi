@@ -6,6 +6,7 @@ package logarchive
 
 import (
 	"fmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,7 @@ func TestReconfigureEnabled(t *testing.T) {
 
 // 保留天数：超期的整份删；0 = 不按天数删，只按容量删最旧的。
 func TestPruneDaysAndSize(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	t.Run("只清理过期归档文件", func(t *testing.T) {
 		dir := t.TempDir()
 		old := time.Unix(1700000000, 0)
@@ -255,6 +257,7 @@ func TestPruneDaysAndSize(t *testing.T) {
 
 // 清空：删掉全部文件（含正在写的），队列里没落盘的一并丢掉；清空后照样能写。
 func TestClear(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	dir := t.TempDir()
 	s := New(Config{Dir: dir, Prefix: "system", Enabled: true})
 	defer s.Close()
@@ -286,6 +289,7 @@ func TestClear(t *testing.T) {
 
 // 删不掉的文件：清空回报错误。
 func TestClearRemoveError(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root 下权限位不生效")
 	}
@@ -394,6 +398,7 @@ func TestReadTrimsWhileReading(t *testing.T) {
 
 // Stats：文件数、大小、最早日期；目录是文件时记错。
 func TestStats(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "task-2026-03-09.jsonl"), "12345", time.Time{})
 	writeFile(t, filepath.Join(dir, "task-2026-03-01.1.jsonl"), "123", time.Time{})
@@ -424,6 +429,7 @@ func TestSetLimitsNegativeDays(t *testing.T) {
 // 边角：连着改两次设置只排一次清理；文件名里日期那段不是日期；目录是文件时读报错；
 // 读进来的文件里区间外的条目照样按时间筛掉。
 func TestEdgeCases(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	s := &Store{ch: make(chan record, 1), pruneReq: make(chan struct{}, 1)}
 	s.Reconfigure(true, 1, 1)
 	s.Reconfigure(false, 2, 2) // 清理请求已经排着，不再排第二个、也不阻塞

@@ -8,6 +8,7 @@ package reqlog
 // 运行中改开关与清空、目录不可用、跨天文件、读取边界。归档文件本身的轮转、清理在 logarchive 里测。
 
 import (
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,6 +153,7 @@ func TestSetArchiveAndClear(t *testing.T) {
 
 // 归档目录建不出来（路径是文件）：记录错误、读归档报错、不 panic。
 func TestArchiveMkdirFailure(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "not-a-dir")
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {

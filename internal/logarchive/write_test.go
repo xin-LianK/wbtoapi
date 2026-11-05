@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -173,6 +174,7 @@ func TestArchiveOpenFileErrors(t *testing.T) {
 
 // 轮转时目录只读：openFile 失败并记录错误。
 func TestWriteRotateError(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root 下权限位不生效")
 	}
@@ -196,6 +198,7 @@ func (f failWriter) Write([]byte) (int, error) { return 0, f.err }
 
 // 写缓冲：大条目直接写底层失败。
 func TestWriteBufWriteError(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	old := newArchiveBuf
 	newArchiveBuf = func(io.Writer, int) *bufio.Writer {
 		return bufio.NewWriterSize(failWriter{err: errors.New("write boom")}, 1)
@@ -211,6 +214,7 @@ func TestWriteBufWriteError(t *testing.T) {
 
 // 写换行时刷缓冲失败：缓冲正好容纳条目本身，换行触发 Flush。
 func TestWriteNewlineError(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	e := entry{Time: time.Now(), ID: "newline"}
 	raw, err := json.Marshal(e)
 	if err != nil {
@@ -286,6 +290,7 @@ func TestArchiveQueueDropCounter(t *testing.T) {
 
 // 清理：目录可读但不可进入时 DirEntry.Info 失败，跳过该文件（不删除、不记错）。
 func TestPruneEntryInfoError(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root 下权限位不生效")
 	}

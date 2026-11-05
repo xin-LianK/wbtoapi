@@ -111,9 +111,9 @@ func (f *upgFakeBilling) callCount(uid string) int {
 }
 
 func (f *upgFakeBilling) handle(w http.ResponseWriter, r *http.Request) {
-		if upstreamtest.WebSession(w, r) {
-			return
-		}
+	if upstreamtest.WebSession(w, r) {
+		return
+	}
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	f.mu.Lock()
 	uid := f.tokens[tok]

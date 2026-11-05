@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"log"
 	"net"
@@ -261,6 +262,7 @@ func TestLoadOrInitConfig(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root 下权限位不生效")
 		}
+		testutil.SkipPosixOnly(t)
 		dir := filepath.Join(t.TempDir(), "ro")
 		if err := os.MkdirAll(dir, 0o500); err != nil {
 			t.Fatal(err)

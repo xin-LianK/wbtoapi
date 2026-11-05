@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"log"
 	"net/http"
 	"os"
@@ -59,6 +60,7 @@ func TestSigninMainExitCode(t *testing.T) {
 
 // 刷新成功后写回文件失败：必须打日志暴露，随后照常签到并查余额。
 func TestSigninSaveFailureLog(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root 下权限位不生效")
 	}

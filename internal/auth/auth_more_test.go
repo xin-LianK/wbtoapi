@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -176,6 +177,7 @@ func TestDocumentShape(t *testing.T) {
 
 // TestSaveAtomicRefusals 空 accessToken / 未设 FilePath 拒绝写盘；目录不可写报错（root 跳过）。
 func TestSaveAtomicRefusals(t *testing.T) {
+	testutil.SkipPosixOnly(t)
 	if err := (&Auth{FilePath: filepath.Join(t.TempDir(), "f.json")}).SaveAtomic(); err == nil ||
 		!strings.Contains(err.Error(), "empty accessToken") {
 		t.Errorf("空 token 应拒绝，got %v", err)

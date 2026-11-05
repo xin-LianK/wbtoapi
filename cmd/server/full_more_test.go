@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/testutil"
 	"io"
 	"log"
 	"net"
@@ -322,6 +323,7 @@ func TestSaveConfigEBUSYFallbackWriteError(t *testing.T) {
 
 // saveConfig 的 bind mount 回写后关闭失败：报错、清掉 tmp、不热生效。
 func TestSaveConfigEBUSYFallbackCloseError(t *testing.T) {
+	testutil.SkipPosixOnly(t) // EBUSY 只在类 Unix 文件系统上出现
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"api_key":"old-key"}`), 0o600); err != nil {
