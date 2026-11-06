@@ -492,23 +492,34 @@ func (s *Scheduler) RunCheckinNow() {
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	// 本轮统计（告警用）：只有出现失败才推送，全成功不打扰。
-	var okN, alreadyN, failN, balanceFailN int
+	var okN, alreadyN, failN, balanceFailN, skipN int
 	var failDetail []string
+	// skipDetail 被本轮跳过（一个上游请求都没发）的号与原因：以前这四处 continue 全静默，
+	// 面板上「这个号今天怎么没有签到流水」只能靠翻代码猜（issue #403 同源的排查成本）。
+	var skipDetail []string
+	skip := func(st pool.Status, why string) {
+		skipN++
+		skipDetail = append(skipDetail, logfmt.Label(st.UID, st.Nickname)+"："+why)
+	}
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
+			skip(st, "已禁用（schedule.include_disabled_in_tasks 未开）")
 			continue
 		}
 		if st.ProxyBlocked != "" {
+			skip(st, "代理池拦住："+st.ProxyBlocked)
 			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			skip(st, "没有 refresh token")
 			continue
 		}
 		// D4 门控：realm=global 账号无签到体系，直接跳过（不发起任何上游调用，避免风控）。
 		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
 		// 按 CN 处理——这是逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
 		if a.IsGlobal() {
+			skip(st, "国际版（global）无签到体系")
 			continue
 		}
 		// 企业版无签到体系：上游对 POST /v2/billing/meter/daily-checkin 直接
@@ -555,6 +566,18 @@ func (s *Scheduler) RunCheckinNow() {
 			ExpiryBuckets:     poolExpiryBuckets(buckets),
 		})
 	}
+	// 每轮都留一行汇总（不是只在失败时）：面板「这个号今天怎么没签到流水」看这一行就够——
+	// 跳过 N 个会把号与原因一起带上，避免只能靠代码猜。
+	summary := "checkin 汇总：成功 " + itoa(okN) + " / 已签到 " + itoa(alreadyN) +
+		" / 失败 " + itoa(failN) + " / 跳过 " + itoa(skipN)
+	if len(skipDetail) > 0 {
+		d := skipDetail
+		if len(d) > 6 {
+			d = d[:6]
+		}
+		summary += "；跳过明细 " + strings.Join(d, "；")
+	}
+	log.Printf("%s", summary)
 	s.RunStreakBonusNow()
 	// 失败才告警：全成功是常态，每天推两条「一切正常」会让通知变成噪音，
 	// 真正出事时反而被忽略。明细带昵称与错误原文，手机上看一条就知道该修哪个号。
