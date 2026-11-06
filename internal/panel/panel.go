@@ -240,6 +240,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/log_storage", p.withAuth(p.logStorage))
 	p.mux.HandleFunc("POST /panel/api/log_storage/{kind}/clear", p.withAuth(p.logStorageClear))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
+	p.mux.HandleFunc("GET /panel/api/request_stream", p.withAuth(p.requestStream))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
 	p.mux.HandleFunc("GET /panel/api/credit_log", p.withAuth(p.creditLog))
@@ -460,6 +461,35 @@ func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p.cfg.RequestLog.Snapshot())
+}
+
+// requestStream 是「请求记录」的实时通道：按游标取增量，没有新事件就挂着等（长轮询）。
+//
+// 参数：after = 上一次拿到的 seq（首次连接传 0，只取游标，不重传窗口里的旧记录）；
+// wait = 最长挂多久（毫秒，缺省 20s、上限 25s）。返回 {seq, reset?, events[], totals}，
+// events 新的在前；reset=true 表示游标已失效（网关重启或页面挂太久），前端应整体替换。
+//
+// 这里故意不用 SSE / WebSocket：面板挂在普通反向代理后面，长轮询是最不容易被中间设备
+// 掐断的一种；一次往返能带一批事件（同波完成的请求会被服务端合并），开销和心跳差不多。
+func (p *Panel) requestStream(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.RequestLog == nil {
+		writeErr(w, http.StatusNotImplemented, "request logger not available")
+		return
+	}
+	q := r.URL.Query()
+	var after uint64
+	if v := q.Get("after"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+			after = n
+		}
+	}
+	wait := reqlog.DefaultStreamWait
+	if v := q.Get("wait"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			wait = time.Duration(ms) * time.Millisecond
+		}
+	}
+	writeJSON(w, http.StatusOK, p.cfg.RequestLog.Wait(r.Context(), after, wait))
 }
 
 // requestLogs 从 JSONL 归档读取最近请求；limit 默认 200、最大 1000。

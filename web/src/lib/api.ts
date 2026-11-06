@@ -48,13 +48,18 @@ async function handle<T>(r: Response): Promise<T> {
   return d as T
 }
 
-export async function api<T>(path: string, init: { method?: 'GET' | 'POST'; body?: unknown } = {}): Promise<T> {
+export async function api<T>(
+  path: string,
+  init: { method?: 'GET' | 'POST'; body?: unknown; signal?: AbortSignal } = {},
+): Promise<T> {
   const headers = authHeaders()
   if (init.body !== undefined) headers['Content-Type'] = 'application/json'
   const r = await fetch('/panel/api/' + path, {
     method: init.method ?? 'GET',
     headers,
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    // 长轮询（请求记录的实时通道）靠它中止：切页面 / 关标签页时不要留一条挂 20 秒的连接。
+    signal: init.signal,
   })
   return handle<T>(r)
 }

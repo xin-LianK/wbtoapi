@@ -4,7 +4,7 @@
 
 // 从上游 internal/panel/frontend_test.go 的 TestAppJSRequestLogFormatting / TestAppJSRequestMatch 平移（期望值原样保留）。
 import { describe, expect, it } from 'vitest'
-import { cacheLevel, cacheRateText, matchRequest, outcomeLevel, requestCredit, requestLogText, type RequestFilter } from './requests'
+import { cacheLevel, cacheRateText, matchRequest, mergeRequests, outcomeLevel, recentCount, requestCredit, requestLogText, type RequestFilter } from './requests'
 import type { RequestEvent } from './types'
 
 describe('请求指标', () => {
@@ -63,5 +63,43 @@ describe('请求指标', () => {
     // 账号现在的显示名（换成了备注）也能搜到，记录里的旧昵称照样能搜
     expect([base, other].filter((e) => matchRequest(e, { q: '主力', outcome: '' }, e === base ? '主力(uid8)' : '')).map((e) => e.request_id)).toEqual(['req-1'])
     expect(matchRequest(base, { q: '示例', outcome: '' }, '主力(uid8)')).toBe(true)
+  })
+})
+
+describe('实时增量合并', () => {
+  const at = (sec: number) => new Date(2026, 10, 6, 10, 0, sec).toISOString()
+  const ev = (id: string, sec: number): RequestEvent => ({
+    time: at(sec), request_id: id, path: '/v1/chat/completions', status: 200, ok: true,
+    outcome: 'success', duration_ms: 10, credit_known: false,
+  })
+
+  it('按 request_id 去重，同一条既在快照又进增量时只留一份', () => {
+    const base = [ev('b', 20), ev('a', 10)]
+    const incoming = [ev('c', 30), ev('b', 20)]
+    expect(mergeRequests(base, incoming).map((e) => e.request_id)).toEqual(['c', 'b', 'a'])
+  })
+
+  it('按时间倒序，不依赖到达顺序', () => {
+    const merged = mergeRequests([ev('a', 10)], [ev('c', 15), ev('b', 12), ev('d', 30)])
+    expect(merged.map((e) => e.request_id)).toEqual(['d', 'c', 'b', 'a'])
+  })
+
+  it('超过上限截掉最旧的', () => {
+    const many = Array.from({ length: 10 }, (_, i) => ev('r' + i, i))
+    expect(mergeRequests(many, [ev('new', 99)], 4).map((e) => e.request_id)).toEqual(['new', 'r9', 'r8', 'r7'])
+    // 没有增量时原样返回同一引用（页面每 20 秒收一次空心跳，不重建数组才不白重渲染）
+    expect(mergeRequests(many, [], 100)).toBe(many)
+  })
+
+  it('没有 request_id 的旧记录按时间 + 状态 + 模型兜底去重', () => {
+    const a: RequestEvent = { ...ev('', 10), request_id: '' }
+    expect(mergeRequests([a], [a])).toHaveLength(1)
+  })
+
+  it('近 1 分钟计数只算窗口内的', () => {
+    const now = new Date(2026, 10, 6, 10, 2, 0).getTime()
+    const rows = [ev('a', 30), ev('b', 20)] // 10:00:30 / 10:00:20 都超出 60s
+    expect(recentCount(rows, now)).toBe(0)
+    expect(recentCount([{ ...ev('c', 0), time: new Date(now - 30_000).toISOString() }], now)).toBe(1)
   })
 })

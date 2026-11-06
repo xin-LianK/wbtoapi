@@ -472,6 +472,8 @@ export interface ImportResp {
 export interface RequestEvent {
   time: string
   request_id: string
+  /** 进程内自增序号：实时流用它做增量游标，从归档读出来的旧记录没有这项 */
+  seq?: number
   path: string
   /** 账号展示名（昵称(uid 前 8 位)） */
   account?: string
@@ -513,6 +515,28 @@ export interface RequestMetrics {
   /** 最近的请求，最新的在前 */
   recent?: RequestEvent[] | null
   archive?: ArchiveStats
+}
+
+/** 进程级计数（实时流每次都带回来，表头的汇总因此保持连续） */
+export interface RequestTotals {
+  completed: number
+  in_flight: number
+  succeeded: number
+  failed: number
+  success_rate: number
+  http_success_rate: number
+  avg_duration_ms: number
+}
+
+/**
+ * 一次长轮询的结果。/panel/api/request_stream?after=<seq>&wait=<ms>
+ * reset 为真表示游标已失效（网关重启、或页面挂太久缺口已被淘汰），events 是现有窗口的全部内容。
+ */
+export interface RequestStream {
+  seq: number
+  reset?: boolean
+  events: RequestEvent[] | null
+  totals: RequestTotals
 }
 
 /** 一类日志归档的存储状态（请求记录、任务日志、系统日志、积分获取） */

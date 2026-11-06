@@ -5,15 +5,23 @@
 // 请求记录页：完成数、成功率、HTTP 成功率、平均耗时、进行中，以及请求明细（最新的在前）。
 // 只展示请求元数据（时间、状态、失败原因、模型、账号、调用来源、耗时、token、积分、请求 ID），不含提示词与响应正文。
 // 失败原因是回给客户端的错误消息；网关的系统日志在「运行日志」页。
-// 归档开着时按时间范围与条数从 JSONL 归档读；关键字与结果筛选只在已读到的条目上做，不发新请求。
+//
+// 取数分两路：
+//   - 打开页面时读一次快照 / 归档（历史部分）；
+//   - 之后靠长轮询的实时流只补增量（/panel/api/request_stream），空闲时不发请求，
+//     翻看中的列表也不会因为整表重取而整体跳动。「暂停」只是停止刷新，已收到的留着。
+// 归档开着时按时间范围与条数从 JSONL 归档读；关键字与结果筛选只在已读到的条目上做。
 import { useMemo, useState } from 'react'
-import { Chip, Label, ListBox, SearchField, Select, Table, useMediaQuery } from '@heroui/react'
+import { Chip, Label, ListBox, SearchField, Select, Table, ToggleButton, ToggleButtonGroup, useMediaQuery } from '@heroui/react'
 import { dayClock, fmtMs, fmtTok } from '../../lib/format'
+import { useNow } from '../../lib/hooks'
 import { useAccountNames, useRequestMetrics } from '../../lib/queries'
 import {
-  OUTCOME_LABEL, cacheRateText, matchRequest, outcomeLevel, requestCredit, requestLogText, requestTokens,
+  OUTCOME_LABEL, cacheRateText, matchRequest, mergeRequests, outcomeLevel, recentCount, requestCredit, requestLogText,
+  requestTokens,
 } from '../../lib/requests'
 import { retentionText, storageProblem, storageSummary } from '../../lib/storage'
+import { useRequestStream } from '../../lib/stream'
 import { initialRange } from '../../lib/timerange'
 import type { RequestEvent, RequestMetrics as Metrics } from '../../lib/types'
 import { BusyButton, Empty, ErrorBox, Loaded } from '../../components/Feedback'
@@ -66,15 +74,32 @@ export function RequestMetrics() {
   const [limit, setLimit] = useState(100)
   const [q, setQ] = useState('')
   const [outcome, setOutcome] = useState('')
-  const query = useRequestMetrics(true, range, limit)
+  const [paused, setPaused] = useState(false)
+  // 快照只读一次（archiveOn / 历史基线），增量交给长轮询；暂停时整条流停掉，不再发请求
+  const query = useRequestMetrics(false, range, limit)
+  const live = useRequestStream(!paused)
+  const now = useNow(5_000)
   const isDesktop = useMediaQuery('(min-width: 1024px)')
   const d = query.data
-  const m = d?.metrics ?? null
-  const all = useMemo(() => d?.recent ?? [], [d])
+  // 汇总用实时计数覆盖：快照是打开页面那一刻的，实时流每次回来都带最新值
+  const m = useMemo<Metrics | null>(() => {
+    if (!d?.metrics) return null
+    if (!live.totals) return d.metrics
+    return { ...d.metrics, ...live.totals }
+  }, [d, live.totals])
+  // 实时事件并进基线：按 request_id 去重、按时间倒序。
+  // 「自定义」是在看某一段历史，就不把刚刚发生的混进来（否则列表和区间对不上）。
+  const all = useMemo(() => {
+    const base = d?.recent ?? []
+    if (range.preset === 'custom') return base
+    return mergeRequests(base, live.events, Math.max(limit, 300))
+  }, [d, live.events, range.preset, limit])
   const shown = useMemo(() => all.filter((e) => matchRequest(e, { q, outcome }, e.account && names.label(e.account))), [all, q, outcome, names])
   // 归档里早于「调用来源」功能的条目没有来源字段：提示一句，免得以为筛选坏了
   const hasSource = all.some((e) => e.client_ip || e.user_agent)
+  const perMinute = recentCount(all, now)
   const count = !all.length ? '' : (shown.length !== all.length ? `命中 ${shown.length} / ${all.length} 条` : `${all.length} 条`) + (hasSource ? '' : ' · 来源未记录')
+  const streamNote = paused ? '已暂停（列表不再刷新）' : live.error ? '实时流断开，正在重试：' + live.error : live.connected ? '实时' : '连接中…'
 
   // 整页铺满视口：只剩表体/列表在内部滚（原先 max-h-[70dvh] 是猜的，短屏会盖住底栏）
   return (
@@ -89,8 +114,23 @@ export function RequestMetrics() {
           </InfoTip>
         </span>
       }
-      desc={d ? <>{summary(m)}<br />{archiveNote(m)}</> : undefined}
-      actions={<BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton>}
+      desc={d ? <>{summary(m)} · 近 1 分钟 {perMinute} 个<br />{archiveNote(m)} · {streamNote}</> : undefined}
+      actions={
+        <>
+          <ToggleButtonGroup
+            aria-label="实时更新"
+            size="sm"
+            selectionMode="single"
+            disallowEmptySelection
+            selectedKeys={[paused ? 'paused' : 'live']}
+            onSelectionChange={(k) => setPaused([...k][0] === 'paused')}
+          >
+            <ToggleButton id="live">实时</ToggleButton>
+            <ToggleButton id="paused"><ToggleButtonGroup.Separator />暂停</ToggleButton>
+          </ToggleButtonGroup>
+          <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton>
+        </>
+      }
       contentClassName="flex min-h-0 flex-1 flex-col gap-3"
     >
       <div className="flex flex-wrap items-center gap-3">

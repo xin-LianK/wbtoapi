@@ -85,3 +85,32 @@ export function matchRequest(e: RequestEvent, f: RequestFilter, account = ''): b
   const text = [e.client_ip, e.user_agent, e.model, e.account, account, e.proxy, e.api_key, e.error, e.request_id].filter(Boolean).join(' ').toLowerCase()
   return kws.every((kw) => text.includes(kw))
 }
+
+/**
+ * 把实时增量并进已有列表：按 request_id 去重（同一条既出现在初始快照里、又被增量带回一次时不重复），
+ * 按时间倒序，最多留 limit 条。
+ *
+ * 排序而不只是「增量拼到前面」是因为同一毫秒内可能完成多个请求，而长轮询按 seq 返回，
+ * 与时间顺序不一定完全一致；几十条的数据量排序开销可以忽略。
+ */
+export function mergeRequests(base: RequestEvent[], incoming: RequestEvent[], limit = 300): RequestEvent[] {
+  if (!incoming.length) return base.length > limit ? base.slice(0, limit) : base
+  const seen = new Set<string>()
+  const out: RequestEvent[] = []
+  for (const e of [...incoming, ...base]) {
+    const k = e.request_id || `${e.time}|${e.status}|${e.model ?? ''}|${e.duration_ms}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(e)
+  }
+  out.sort((a, b) => ms(b.time) - ms(a.time))
+  return out.length > limit ? out.slice(0, limit) : out
+}
+
+const ms = (t?: string) => (t ? Date.parse(t) || 0 : 0)
+
+/** 近 windowMs 内完成的请求数（实时流顶部「近 1 分钟 N 个」用；只统计手上还留着的条目） */
+export function recentCount(events: RequestEvent[], now: number, windowMs = 60_000): number {
+  const from = now - windowMs
+  return events.reduce((n, e) => (ms(e.time) >= from ? n + 1 : n), 0)
+}
