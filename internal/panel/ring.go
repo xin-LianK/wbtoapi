@@ -10,6 +10,10 @@
 // 对话请求的表格流水行只打到 stdout、不进这里：同样的信息面板「请求记录」里有，
 // 而且流量一大就会把任务和系统日志挤出环。每行入环时按前缀规则归类频道
 // （task=任务动作 / sys=系统与其它），面板日志视图按频道筛选。
+//
+// 入环前统一过一遍 redact.Text：环里的内容会经面板接口回给浏览器、开了留存还会落盘，
+// 代理地址里的密码、上游回显的凭证、UA 里夹的邮箱都不该原样留在那儿。脱敏在入环时做，
+// 所以快照与落盘走的是同一份已处理文本，不需要在读侧再补一次。
 package panel
 
 import (
@@ -17,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/redact"
 )
 
 // 日志频道。
@@ -86,7 +92,7 @@ func (r *Ring) Write(p []byte) (int, error) {
 			continue
 		}
 		text := tsPrefixRe.ReplaceAllString(line, "")
-		r.entries = append(r.entries, LogEntry{TS: now, Ch: classifyLine(text), Text: text})
+		r.entries = append(r.entries, LogEntry{TS: now, Ch: classifyLine(text), Text: redact.Text(text)})
 	}
 	added := append([]LogEntry(nil), r.entries[start:]...)
 	if overflow := len(r.entries) - r.cap; overflow > 0 {

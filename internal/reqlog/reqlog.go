@@ -8,6 +8,9 @@
 // 只写请求元数据，不写提示词、响应正文、Authorization 或其它凭证。可选的调用来源（客户端 IP /
 // User-Agent，见 Event.ClientIP/UserAgent）由 server 按配置开关决定是否填充。
 // 归档队列满时丢弃并计数，不允许日志写盘阻塞模型请求。
+//
+// 写入前还会把失败原因与 User-Agent 过一遍 redact.Text：上游原文、代理地址、UA 里夹带的
+// 凭证或邮箱不该因为「只是元数据」就落盘。脱敏之后再进内存环与归档，读侧不需再处理。
 package reqlog
 
 import (
@@ -18,6 +21,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logarchive"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/redact"
 )
 
 const (
@@ -173,6 +177,10 @@ func (r *Recorder) Record(e Event) {
 			e.Outcome = OutcomeHTTPError
 		}
 	}
+	// 失败原因是回给客户端的上游原文，UA 是调用方自报的串：两者都可能夹带凭证或邮箱，
+	// 落盘前先盖掉。提示词与响应正文本来就不进这里。
+	e.Error = redact.Text(e.Error)
+	e.UserAgent = redact.Text(e.UserAgent)
 	r.mu.Lock()
 	if r.inFlight > 0 {
 		r.inFlight--
