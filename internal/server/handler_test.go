@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2480,5 +2481,57 @@ func TestChatConversationIDSameAcrossAccounts(t *testing.T) {
 		if i%2 == 1 && c.uid == calls[i-1].uid {
 			t.Fatalf("第 %d 轮失败后应换号重试: %+v", c.turn, calls)
 		}
+	}
+}
+
+// TestChat429UsesPoolEarliestRecovery 回归 issue #403：池内多个号各自被 6004 限流时，
+// 429 文案必须用**最早**恢复的号的墙钟，不能照最后一个轮到的号的原文透传——否则客户端
+// 按最晚的重置时间等，池子早在更早的那个时刻就能服务，白等一整个周期。
+func TestChat429UsesPoolEarliestRecovery(t *testing.T) {
+	tz := time.FixedZone("UTC+8", 8*3600)
+	now := time.Now().In(tz).Truncate(time.Second)
+	early := now.Add(40 * time.Second)
+	late := now.Add(100 * time.Second)
+	limited := func(at time.Time) string {
+		return `{"code":6004,"msg":"您的使用量已超出频率限制，将在 ` + at.Format("2006-01-02 15:04:05") +
+			` UTC+8 重置，您也可以切换其他模型继续使用。"}`
+	}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-a" {
+			return 429, limited(early), false
+		}
+		return 429, limited(late), false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "a", AccessToken: "at-a", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "b", AccessToken: "at-b", ExpiresAt: 9999999999},
+	)
+	// a 先被选中（早恢复），b 后被选中（晚恢复）：lastErr 落在 b 上，正是 #403 的现场。
+	p.SetCredits("a", 2000, 0)
+	p.SetCredits("b", 1000, 0)
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: time.Hour})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("body 不是 JSON: %v %s", err, rec.Body)
+	}
+	if want := early.Format(time.RFC3339); !strings.Contains(resp.Error.Message, want) {
+		t.Errorf("message 应带最早恢复时刻 %s, got %q", want, resp.Error.Message)
+	}
+	if bad := late.Format(time.RFC3339); strings.Contains(resp.Error.Message, bad) {
+		t.Errorf("message 不该带最后那个号的墙钟 %s, got %q", bad, resp.Error.Message)
+	}
+	ra, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if err != nil || ra <= 0 || ra > 101 {
+		t.Errorf("Retry-After=%q want (0,101]", rec.Header().Get("Retry-After"))
 	}
 }

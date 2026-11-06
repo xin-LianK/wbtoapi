@@ -1661,6 +1661,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+			// issue #403：多个号各自被 6004 限流时，每份上游原文都带着**自己**的重置墙钟，
+			// 而整池真正能再服务的时刻是其中最早的那个（先恢复的一个就够跑）。lastErr 只是
+			// 最后轮到的那个号的原文——照它透传，客户端会按最晚的墙钟白等一整个周期。
+			// 这里改用池级最早恢复时刻（与下方 modelBlock 同一份快照），并补 Retry-After；
+			// 上游原文仍留在 gateway_hint 的 model_blocked 行（含原因），不丢信息。
+			mb := modelBlock
+			if !mb.Blocked {
+				// 轮转因换号次数到上限而中止时，上面的 acct==nil 分支没跑过，快照是空的。
+				mb = h.cfg.Pool.ModelBlockedForRealm(bareModel, realm)
+			}
+			if mb.Blocked && mb.Count >= 2 && !mb.Until.IsZero() {
+				modelBlock = mb
+				upstreamMsgPassed = true // 挡住下方「上游原文优先」，否则又变回最后一个号的时间
+				wait := max(time.Until(mb.Until), 0)
+				if wait <= modelBusyRetryWindow {
+					msg = fmt.Sprintf("rate limited: all %d accounts for this model are cooling down; earliest recovery at %s (in %ds), retry then",
+						mb.Count, mb.Until.Format(time.RFC3339), int(wait.Seconds())+1)
+				} else {
+					msg = fmt.Sprintf("model is unavailable on every account: all %d accounts are cooling down until %s at the earliest; switch model or retry then",
+						mb.Count, mb.Until.Format(time.RFC3339))
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+			}
 		case upstream.ErrWafBlock:
 			if h.wafIP.active(wafExit) {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
@@ -1712,8 +1735,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "model_unavailable"
 			status = http.StatusBadRequest
 		}
-		if s := strings.TrimSpace(ue.Msg); s != "" {
+		if s := strings.TrimSpace(ue.Msg); s != "" && !upstreamMsgPassed {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
+			// upstreamMsgPassed 已为 true 时（#403 的多号限流：msg 换成了池级最早恢复
+			// 时刻）不再覆盖——那份原文说的只是最后轮到的号自己的重置时间。
 			msg = s
 			upstreamMsgPassed = true
 		}
