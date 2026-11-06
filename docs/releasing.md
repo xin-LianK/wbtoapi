@@ -21,20 +21,22 @@
 
 ## 发版步骤
 
-推送即发版，不手动打 tag：
+推 `main` 只更新滚动包；要出正式版本，还要把**同名版本标签**推到远端：
 
 1. 改完代码，按上表定好新版本号，改 `cmd/server/main.go` 的 `appVersion`。
 2. 在 `docs/CHANGELOG.md` 顶部加这一版的条目（格式见下节），日期写推送当天。
 3. 提交并推送到 `main`，提交信息按[提交规则](commits.md)写，发版提交是 `chore(release): x.y.z`。CI 先检查这次推送的提交信息，再依次跑 `gofmt` 检查、`go vet`、`golangci-lint` 和 `go test`（命令见[从源码构建](deployment.md#从源码构建)），任何一步失败都不打标签、不建 Release、不推镜像；`go test` 还会核对 `appVersion` 与更新日志最新一版一致。
+4. `main` 的检查通过后，把这个版本打成附注标签推上去：`git tag -a vx.y.z -m "vx.y.z"`、`git push origin vx.y.z`。CI 只在标签推送时打正式 Release 与版本镜像标签，不会自己替你打版本标签。
 
 推送后 CI 自动完成：
 
-| 工作流 | 做什么 |
+| 工作流 / 触发 | 做什么 |
 |---|---|
-| go-binaries | 五平台构建；打 `vx.y.z` 标签，建标题为 `vx.y.z` 的 Release，说明取更新日志里这一版的内容，附带版本号的包和 `checksums.txt`，并标为 Latest。同时照常覆盖「最新构建」Release |
-| docker-ghcr | 由 go-binaries 在检查通过后调用。镜像照常推 `latest`、`main`、`sha-xxxxxxx`，另加 `x.y.z`、`x.y`、`x` 三个标签 |
+| go-binaries，推 `main` | 五平台构建，覆盖「最新构建」Release 与 `latest` 标签；不建版本 Release |
+| go-binaries，推 `vx.y.z` 标签 | 五平台构建，建标题为 `vx.y.z` 的 Release，说明取更新日志里这一版的内容，附带版本号的包和 `checksums.txt`，并标为 Latest |
+| docker-ghcr | 由 go-binaries 在检查通过后调用。推 `main` 时镜像打 `latest`、`main`、`sha-xxxxxxx`；标签与 `appVersion` 一致时，另加 `x.y.z`、`x.y`、`x` 三个标签 |
 
-CI 以 `vx.y.z` 标签是否已经存在来判断这次推送有没有升版本号。版本号没变的推送只更新「最新构建」和 `latest` 镜像，不碰已发布版本的 Release 和镜像标签。如果某次发版中途失败、标签没打上，下一次推送会补发。
+标签的版本号必须与 `appVersion` 一致（都带 `-panel` 后缀，比较时两侧归一成纯版本号）。版本号没变的 `main` 推送只更新「最新构建」和 `latest` 镜像，不碰已发布版本的 Release 和镜像标签。发版中途失败、Release 没建出来时，重推同一个标签就会补发——标签推送是幂等的。
 
 面板的[一键更新](panel.md#一键更新)直接下载这个 Release 里的 `wb2api-panel-vx.y.z-<系统>-<架构>.tar.gz`（包的根目录要有 `wb2api`）和 `checksums.txt`，再用 `wb2api -version` 试运行。改打包方式、文件名，或去掉 `-version` 参数，都会让一键更新失效，要同步改 `internal/selfupdate`（测试会核对工作流里的包名和打包命令）。推送后到 Release 建好之前点一键更新，会提示 CI 还在构建。
 
