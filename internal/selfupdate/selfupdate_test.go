@@ -476,6 +476,28 @@ func TestChecksumFor(t *testing.T) {
 	}
 }
 
+// 本项目的版本号带 -panel 后缀，那不是预发布。Release 若被标成 prerelease，GitHub 的
+// /releases/latest 就一直指向旧版本，面板的更新提醒也不会再响（1.16.0～1.18.0 都踩过）。
+func TestReleaseWorkflowMarksPanelReleaseAsLatest(t *testing.T) {
+	wf, err := os.ReadFile("../../.github/workflows/go-binaries.yml")
+	if err != nil {
+		t.Skipf("读不到工作流：%v", err)
+	}
+	s := string(wf)
+	if strings.Contains(s, `contains(github.ref_name, '-')`) {
+		t.Error("prerelease 不能按「ref_name 里有没有连字符」判断：-panel 是版本后缀，会把每一版都标成预发布")
+	}
+	for _, want := range []string{
+		`if [[ "$R" == *-ci || "$R" == *-rc.* || "$R" == *-beta.* || "$R" == *-alpha.* ]]; then`,
+		`prerelease: ${{ steps.pre.outputs.prerelease }}`,
+		`make_latest: ${{ steps.pre.outputs.latest }}`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("go-binaries.yml 里找不到 %q；预发布判断与 make_latest 要成对改", want)
+		}
+	}
+}
+
 // 一键更新按文件名下载 Release 里的包，并从包的根目录取 wb2api：和 go-binaries 工作流的打包命令对一下。
 func TestAssetNameMatchesWorkflow(t *testing.T) {
 	wf, err := os.ReadFile("../../.github/workflows/go-binaries.yml")

@@ -313,11 +313,27 @@ jobs:
         run: |
           PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
           echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+      # 本 fork 的版本号一律带 -panel 后缀（1.18.0-panel），那不是预发布。预发布只认 -rc. /
+      # -beta. / -alpha. 和演练用的 -ci。判错会把每一版都标成 prerelease，GitHub 的
+      # /releases/latest 就永远指着很久以前的版本，面板的更新提醒再也不会响（1.16.0～1.18.0
+      # 全踩了这个坑，只能发完手动改回来，所以这里定住口径并用测试盯住）。
+      - name: 判断预发布
+        id: pre
+        run: |
+          R="${GITHUB_REF_NAME}"
+          if [[ "$R" == *-ci || "$R" == *-rc.* || "$R" == *-beta.* || "$R" == *-alpha.* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: softprops/action-gh-release@v2
         with:
           # 只取 ref_name：原先再加 "-panel" 会得到 v1.15.3-panel-panel。
           name: ${{ github.ref_name }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ steps.pre.outputs.prerelease }}
+          make_latest: ${{ steps.pre.outputs.latest }}
           body: |
             CI 自动构建发布（五平台二进制 + checksums）。
             `linux/amd64` 的 Docker 镜像包（`wb2api-vX.Y.Z.tar.gz`，内含 `wb2api:local` 与
