@@ -76,8 +76,10 @@ export function RequestMetrics() {
   const hasSource = all.some((e) => e.client_ip || e.user_agent)
   const count = !all.length ? '' : (shown.length !== all.length ? `命中 ${shown.length} / ${all.length} 条` : `${all.length} 条`) + (hasSource ? '' : ' · 来源未记录')
 
+  // 整页铺满视口：只剩表体/列表在内部滚（原先 max-h-[70dvh] 是猜的，短屏会盖住底栏）
   return (
     <Panel
+      className="page-fill"
       title={
         <span className="flex items-center gap-1">
           请求记录
@@ -89,7 +91,7 @@ export function RequestMetrics() {
       }
       desc={d ? <>{summary(m)}<br />{archiveNote(m)}</> : undefined}
       actions={<BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton>}
-      contentClassName="flex flex-col gap-3"
+      contentClassName="flex min-h-0 flex-1 flex-col gap-3"
     >
       <div className="flex flex-wrap items-center gap-3">
         <SearchField aria-label="搜索请求记录" value={q} onChange={setQ} className="w-full sm:w-md">
@@ -128,8 +130,8 @@ export function RequestMetrics() {
       {d?.archiveError && <ErrorBox title="读取请求归档失败" error={d.archiveError} onRetry={() => void query.refetch()} />}
       <Loaded query={query} rows={4}>
         {() => shown.length === 0 ? <Empty title={all.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录'} /> : isDesktop ? (
-          <Table variant="secondary">
-            <Table.ScrollContainer className="max-h-[70dvh] overflow-y-auto">
+          <Table variant="secondary" className="flex min-h-0 flex-1 flex-col">
+            <Table.ScrollContainer className="min-h-0 flex-1 overflow-y-auto">
               <Table.Content aria-label="请求记录" className="min-w-[1400px]">
                 <Table.Header className="sticky top-0 z-10 bg-surface">
                   <Table.Column isRowHeader>时间</Table.Column>
@@ -174,7 +176,7 @@ export function RequestMetrics() {
             </Table.ScrollContainer>
           </Table>
         ) : (
-          <ul className="flex max-h-[70dvh] flex-col divide-y divide-separator overflow-y-auto">
+          <ul className="flex min-h-0 flex-1 flex-col divide-y divide-separator overflow-y-auto">
             {shown.map((e, i) => (
               <li key={(e.request_id || '') + i} className="flex flex-col gap-1 py-2.5 text-sm" aria-label={requestLogText(e)}>
                 <div className="flex items-center justify-between gap-2">

@@ -20,6 +20,7 @@ import type { ProxiesResp, ProxyItem, ProxyPool } from '../../lib/types'
 import { Empty, ErrorBox, Loaded } from '../../components/Feedback'
 import { Hint } from '../../components/Hint'
 import { InfoTip, Panel, Stat } from '../../components/Panel'
+import { TabbedPage } from '../../components/TabbedPage'
 import { useConfirm } from '../../components/useConfirm'
 import { SelectionCheckbox } from '../accounts/ExportBar'
 import { ProxyReminder } from '../accounts/ProxyReminder'
@@ -127,8 +128,23 @@ function Proxies({ data }: { data: ProxiesResp }) {
     ? `没绑代理的号从 ${exit.ip}${exitGeo(exit) ? '（' + exitGeo(exit) + '）' : ''} 出去。`
     : '没绑代理的号走服务器自己的网络（出口 IP 还没查到）。'
 
+  // 统计 + 代理池 / 代理列表 / 策略设置各占一个页签；编辑器仍是弹窗，挂在页签外面
   return (
     <>
+      <TabbedPage
+        label="代理分区"
+        tabs={[
+          {
+            id: 'pools',
+            label: '代理池',
+            badge: v.pools.length || undefined,
+            content: (
+              <>
+      {/* 不会用的人第一眼要看到顺序：建池 → 导入代理 → 号绑池 → 调策略 */}
+      <p className="mb-3 text-sm text-muted">
+        用法顺序：① 先建一个池（比如「国内」「国际版」）→ ② 给池导入代理 → ③ 到「账号池」选中号点「绑定代理」放进这个池（或在账号详情里改）→
+        ④ 到「策略设置」定每个代理最多绑几个号。之后网关按「绑号最少」自动分，分到就固定不变；号也能单独指定代理，盖过池的分配。
+      </p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
         <Stat label="代理" value={v.proxies.length} sub={`${v.pools.length} 个池`} />
         <Stat label="能用" value={usable} tone={usable ? 'success' : undefined} />
@@ -166,6 +182,15 @@ function Proxies({ data }: { data: ProxiesResp }) {
         )}
       </Panel>
 
+              </>
+            ),
+          },
+          {
+            id: 'list',
+            label: '代理',
+            badge: v.proxies.length || undefined,
+            content: (
+              <>
       <Panel
         title="代理"
         desc={exitDesc}
@@ -191,7 +216,21 @@ function Proxies({ data }: { data: ProxiesResp }) {
         )}
       </Panel>
 
+              </>
+            ),
+          },
+          {
+            id: 'settings',
+            label: '策略设置',
+            content: (
+              <>
       <ProxySettingsPanel settings={v.settings} accounts={data.accounts} />
+
+              </>
+            ),
+          },
+        ]}
+      />
 
       <PoolEditor target={poolEdit} accounts={data.accounts} onClose={() => setPoolEdit(null)} onSaved={refresh} />
       <ProxyEditor target={proxyEdit} pools={v.pools} onClose={() => setProxyEdit(null)} onSaved={refresh} />

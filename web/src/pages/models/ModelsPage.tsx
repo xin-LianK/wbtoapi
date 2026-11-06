@@ -19,6 +19,7 @@ import type { Model, Probe } from '../../lib/types'
 import { BusyButton, Empty, Loaded } from '../../components/Feedback'
 import { Hint } from '../../components/Hint'
 import { InfoTip, Panel } from '../../components/Panel'
+import { TabbedPage } from '../../components/TabbedPage'
 import { HiddenModels } from './HiddenModels'
 import { ModelRoutes } from './ModelRoutes'
 
@@ -192,11 +193,9 @@ export function ModelsPage() {
     void qc.invalidateQueries({ queryKey: qk.probes })
   }
 
-  return (
-    <div className="flex flex-col gap-4">
-      <ModelRoutes />
-      <HiddenModels />
-      <Panel
+  // 三块各占一个页签：模型能力表（最长）、档位路由、隐藏模型，切换时页面高度不变
+  const capability = (
+    <Panel
         title="模型能力"
         desc={
           <>
@@ -290,7 +289,17 @@ export function ModelsPage() {
             </div>
           )}
         </Loaded>
-      </Panel>
-    </div>
+    </Panel>
+  )
+
+  return (
+    <TabbedPage
+      label="模型分区"
+      tabs={[
+        { id: 'capability', label: '模型能力', badge: list.length || undefined, content: capability },
+        { id: 'routes', label: '档位路由', content: <ModelRoutes /> },
+        { id: 'hidden', label: '隐藏模型', content: <HiddenModels /> },
+      ]}
+    />
   )
 }

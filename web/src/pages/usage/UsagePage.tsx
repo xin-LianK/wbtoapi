@@ -16,6 +16,7 @@ import type { KeyedUsage, UsagePoint, UsageResp } from '../../lib/types'
 import { chartPoints, chartStats, dayBoundaries, minGap, nearestTicks, share, tickLabel, type ChartPoint } from '../../lib/usage'
 import { BusyButton, Empty, Loaded } from '../../components/Feedback'
 import { MixBar, Panel, Stat } from '../../components/Panel'
+import { TabbedPage } from '../../components/TabbedPage'
 import { TimeRangePicker } from '../../components/TimeRangePicker'
 import { CreditHistory } from './CreditHistory'
 
@@ -31,42 +32,53 @@ export function UsagePage() {
   // 显式区间（今天 / 自定义）以服务端回显的实际区间为准；滚动窗口没有回显，用控件自己的标签
   const windowText = d?.window_from ? echo(d.window_from) + ' → ' + (d.window_to ? echo(d.window_to) : '现在') : rangeLabel(range)
 
-  return (
-    <>
-      <Panel
-        title="用量总览"
-        desc={d && [
-          windowText,
-          d.buckets + ' 个分桶',
-          d.since && '数据自 ' + d.since.replace('T', ' '),
-          d.file_bytes && '文件 ' + (d.file_bytes / 1024).toFixed(1) + ' KB',
-        ].filter(Boolean).join(' · ')}
-        actions={
+  // 三块内容各占一个页签：时间范围、密钥筛选是共用的，放页签上方一行，不在每块里复制一遍
+  const overview = (
+    <Panel
+      title="用量总览"
+      desc={d && [
+        windowText,
+        d.buckets + ' 个分桶',
+        d.since && '数据自 ' + d.since.replace('T', ' '),
+        d.file_bytes && '文件 ' + (d.file_bytes / 1024).toFixed(1) + ' KB',
+      ].filter(Boolean).join(' · ')}
+      contentClassName="flex flex-col gap-4"
+    >
+      <Loaded query={query} rows={4}>
+        {(u) => (
           <>
-            <KeyFilter value={key} onChange={setKey} />
-            <TimeRangePicker value={range} onChange={setRange} />
-            <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>刷新</BusyButton>
+            <Totals u={u} />
+            <UsageChart series={u.series || []} />
           </>
-        }
-        contentClassName="flex flex-col gap-4"
-      >
-        <Loaded query={query} rows={4}>
-          {(u) => (
-            <>
-              <Totals u={u} />
-              <UsageChart series={u.series || []} />
-            </>
-          )}
-        </Loaded>
-      </Panel>
+        )}
+      </Loaded>
+    </Panel>
+  )
 
-      {d && (
+  return (
+    <TabbedPage
+      label="用量分区"
+      toolbar={
         <>
-          <UsageBreakdown data={d} />
-          <CreditHistory data={d} />
+          <KeyFilter value={key} onChange={setKey} />
+          <TimeRangePicker value={range} onChange={setRange} />
+          <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>刷新</BusyButton>
         </>
-      )}
-    </>
+      }
+      tabs={[
+        { id: 'overview', label: '总览', content: overview },
+        {
+          id: 'breakdown',
+          label: '明细',
+          content: d ? <UsageBreakdown data={d} /> : <Panel title="用量明细"><Loaded query={query} rows={6}>{() => <Empty title="暂无数据" />}</Loaded></Panel>,
+        },
+        {
+          id: 'credit',
+          label: '积分扣除',
+          content: d ? <CreditHistory data={d} /> : <Panel title="积分扣除历史"><Loaded query={query} rows={6}>{() => <Empty title="暂无数据" />}</Loaded></Panel>,
+        },
+      ]}
+    />
   )
 }
 

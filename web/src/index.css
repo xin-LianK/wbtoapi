@@ -241,3 +241,13 @@ thead th {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--foreground) 18%, transparent) transparent;
 }
+
+/* 满屏页容器：页签内容锁在视口内自己滚动，不再靠各页写 60dvh/70dvh 猜高度。
+   扣掉顶栏 3.5rem、main 上留白 1.25rem、底部 Dock 占位 7rem（见 Shell.tsx）。
+   屏幕太矮时给一个下限，宁可整页滚一点，也不要把内容压成一条缝。 */
+.page-fill {
+  display: flex;
+  flex-direction: column;
+  min-height: 18rem;
+  height: calc(100dvh - 11.75rem);
+}

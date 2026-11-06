@@ -24,6 +24,7 @@ import { AccountCard } from './AccountCard'
 import { AccountName, CreditsCell, GroupLine, StatusCell, UsageChips } from './AccountCells'
 import { AccountDrawer } from './AccountDrawer'
 import { BindProxyModal } from './BindProxyModal'
+import { TabbedPage } from '../../components/TabbedPage'
 import { ExpiryReminder } from './ExpiryReminder'
 import { ExportActions, SelectionCheckbox } from './ExportBar'
 import { GroupsPanel } from './GroupsPanel'
@@ -118,8 +119,18 @@ function Accounts({ data, fetchedAt }: { data: Overview; fetchedAt: number }) {
   // 企业版不限量的号没有可加的数，合计里不算，另外注明
   const creditSum = pool.total > 0 ? `${pool.remain} / ${pool.total}` : pool.remain
 
+  // 三块各占一个页签：账号（含统计卡与提醒，最长）、账号分组、模型锁定；抽屉/弹窗挂在页签外面
   return (
     <>
+      <TabbedPage
+        label="账号分区"
+        tabs={[
+          {
+            id: 'accounts',
+            label: '账号',
+            badge: data.total || undefined,
+            content: (
+              <>
       {/* 宽屏一行放下：状态卡均分，积分合计、粘性会话按内容定宽（积分合计数字长，均分会折行） */}
       <div className={`grid grid-cols-2 gap-3 sm:grid-cols-4 ${tiles.length > 5 ? 'xl:grid-cols-[repeat(6,minmax(0,1fr))_auto_auto]' : 'xl:grid-cols-[repeat(5,minmax(0,1fr))_auto_auto]'}`}>
         <ToggleButtonGroup
@@ -238,9 +249,33 @@ function Accounts({ data, fetchedAt }: { data: Overview; fetchedAt: number }) {
         )}
       </Panel>
 
+              </>
+            ),
+          },
+          {
+            id: 'groups',
+            label: '账号分组',
+            badge: groups.length || undefined,
+            content: (
+              <>
       <GroupsPanel groups={groups} onFilter={(id) => setGroup(id)} />
 
+              </>
+            ),
+          },
+          {
+            id: 'locks',
+            label: '模型锁定',
+            badge: (data.model_locks || []).length || undefined,
+            content: (
+              <>
       <ModelLocks rows={data.model_locks || []} now={now} />
+
+              </>
+            ),
+          },
+        ]}
+      />
 
       <AccountDrawer
         account={detailAcct}

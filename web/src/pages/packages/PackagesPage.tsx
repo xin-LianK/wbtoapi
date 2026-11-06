@@ -3,9 +3,10 @@
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
 
 // 积分构成：积分到期分布（按剩余天数、账号分色）、账号对比卡片、单账号逐包明细。
+// 三块内容用页签分开——号一多时「逐包明细」原本会把整页拖成几十屏，现在一次只看一个账号。
 // 数据逐账号实时查上游（慢），与账号池页的到期提醒共用一份缓存：第一次进来自动查，之后切回来直接用缓存
 // 并标出数据年龄，点「刷新」才实时查（同上游 8391a05）。
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Accordion, Card, Label, ListBox, Select, Table } from '@heroui/react'
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { ChevronDown } from '@gravity-ui/icons'
@@ -23,6 +24,7 @@ import type { CreditPackage, PackageAccount } from '../../lib/types'
 import { BusyButton, Empty, Loaded } from '../../components/Feedback'
 import { Hint } from '../../components/Hint'
 import { Panel } from '../../components/Panel'
+import { TabbedPage, type PageTab } from '../../components/TabbedPage'
 
 export function PackagesPage() {
   const query = usePackages()
@@ -35,34 +37,92 @@ export function PackagesPage() {
   const [sortMode, setSortMode] = useStoredChoice<PkSortMode>('wb2api.pkSort', PK_SORT_OPTIONS.map((o) => o.id), 'end_asc')
   const now = useNow(60_000)
   const age = query.dataUpdatedAt ? Math.floor((now - query.dataUpdatedAt) / 60_000) : 0
-  return (
-    <>
-      <Panel title="积分到期分布" desc="按批次到期日聚合，颜色区分账号">
-        <Loaded query={query} rows={4}>{() => <ExpiryDistribution list={list} now={query.dataUpdatedAt} />}</Loaded>
-      </Panel>
-      <Panel
-        title="账号对比"
-        desc={query.data ? list.length + ' 个账号 · ' + (age > 0 ? age + ' 分钟前的数据，点「刷新」更新' : '实时查询上游') : '逐账号向上游实时查询'}
-        actions={
-          <>
-            <Select aria-label="逐包明细排序" value={sortMode} onChange={(k) => k != null && setSortMode(k as PkSortMode)} className="w-32">
-              <Label className="sr-only">逐包明细排序</Label>
-              <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
-              <Select.Popover>
-                <ListBox>
-                  {PK_SORT_OPTIONS.map((o) => <ListBox.Item key={o.id} id={o.id} textValue={o.label}>{o.label}<ListBox.ItemIndicator /></ListBox.Item>)}
-                </ListBox>
-              </Select.Popover>
-            </Select>
-            <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>刷新</BusyButton>
-          </>
-        }
-      >
-        <Loaded query={query} rows={3}>{() => <Compare list={list} now={query.dataUpdatedAt} />}</Loaded>
-      </Panel>
-      {query.data && list.filter((a) => !a.error).map((a) => <Detail key={a.uid} a={a} limit={limit} sortMode={sortMode} colorOf={colorOf} />)}
-    </>
+  // 逐包明细一次只展一个账号：接口失败（拿不到包）的号没有明细可看，先进来的默认第一个
+  const detailList = useMemo(() => list.filter((a) => !a.error), [list])
+  const [detailUid, setDetailUid] = useState('')
+  const current = detailList.find((a) => a.uid === detailUid) ?? detailList[0]
+  const g = current ? pkDetailGroups(current.packages || [], limit, sortMode) : null
+
+  const refresh = <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>刷新</BusyButton>
+  const sortPicker = (
+    <Select aria-label="逐包明细排序" value={sortMode} onChange={(k) => k != null && setSortMode(k as PkSortMode)} className="w-32">
+      <Label className="sr-only">逐包明细排序</Label>
+      <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+      <Select.Popover>
+        <ListBox>
+          {PK_SORT_OPTIONS.map((o) => <ListBox.Item key={o.id} id={o.id} textValue={o.label}>{o.label}<ListBox.ItemIndicator /></ListBox.Item>)}
+        </ListBox>
+      </Select.Popover>
+    </Select>
   )
+
+  const tabs: PageTab[] = [
+    {
+      id: 'expiry',
+      label: '到期分布',
+      fill: true,
+      content: (
+        <Panel
+          title="积分到期分布"
+          desc="按批次到期日聚合，颜色区分账号"
+          className="flex min-h-0 flex-1 flex-col"
+          contentClassName="flex min-h-0 flex-1 flex-col"
+        >
+          <Loaded query={query} rows={4}>{() => <ExpiryDistribution list={list} now={query.dataUpdatedAt} fill />}</Loaded>
+        </Panel>
+      ),
+    },
+    {
+      id: 'compare',
+      label: '账号对比',
+      badge: list.length || undefined,
+      content: (
+        <Panel
+          title="账号对比"
+          desc={query.data ? list.length + ' 个账号 · ' + (age > 0 ? age + ' 分钟前的数据，点「刷新」更新' : '实时查询上游') : '逐账号向上游实时查询'}
+          actions={refresh}
+        >
+          <Loaded query={query} rows={3}>{() => <Compare list={list} now={query.dataUpdatedAt} />}</Loaded>
+        </Panel>
+      ),
+    },
+    {
+      id: 'detail',
+      label: '逐包明细',
+      badge: detailList.length || undefined,
+      content: current && g ? (
+        <Panel
+          title={accountName(current) + ' · ' + (current.realm || '')}
+          desc={
+            '余额 ' + fmtTok(current.remain) + ' / 总额 ' + fmtTok(current.size) + ' · 可用 ' + (g.visible.length + g.rest.length) + ' 个包' +
+            (g.used.length ? ' / 已用完 ' + g.used.length + ' 个' : '') + ' · 默认展示' + (sortMode === 'size_desc' ? '面额最大 ' : '最早到期 ') + pkDetailLimitValue(limit) + ' 条'
+          }
+          actions={
+            <>
+              <Select aria-label="选择账号" value={current.uid} onChange={(k) => k != null && setDetailUid(String(k))} className="w-44">
+                <Label className="sr-only">选择账号</Label>
+                <Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    {detailList.map((a) => <ListBox.Item key={a.uid} id={a.uid} textValue={accountName(a)}>{accountName(a)}<ListBox.ItemIndicator /></ListBox.Item>)}
+                  </ListBox>
+                </Select.Popover>
+              </Select>
+              {sortPicker}
+              {refresh}
+            </>
+          }
+          contentClassName="flex flex-col gap-2"
+        >
+          <DetailBody a={current} limit={limit} sortMode={sortMode} colorOf={colorOf} />
+        </Panel>
+      ) : (
+        <Panel title="逐包明细"><Loaded query={query} rows={4}>{() => <Empty title="没有可展示的账号" />}</Loaded></Panel>
+      ),
+    },
+  ]
+
+  return <TabbedPage tabs={tabs} label="积分构成分区" />
 }
 
 /** 包来源 → 稳定色（按各账号里该来源的最大面额排序，跨账号同色即同类） */
@@ -94,7 +154,8 @@ function ExpiryTip({ active, payload }: TipProps) {
 }
 
 // now 取数据拉取时刻：剩余天数按查询那一刻算，与旧版一致
-function ExpiryDistribution({ list, now }: { list: PackageAccount[]; now: number }) {
+// fill：页签铺满屏幕时图表占满剩余高度（整块自己滚），否则沿用 18rem 上下的固定可视区
+function ExpiryDistribution({ list, now, fill = false }: { list: PackageAccount[]; now: number; fill?: boolean }) {
   const summary = useMemo(() => summarizeCreditDays(list, now), [list, now])
   const colors = useMemo(() => pkAccountColorMap(list), [list])
   const uids = [...colors.keys()].filter((uid) => summary.rows.some((r) => r.segments.some((s) => s.uid === uid)))
@@ -111,13 +172,14 @@ function ExpiryDistribution({ list, now }: { list: PackageAccount[]; now: number
   if (!data.length) return <><Empty title="暂无可汇总积分" /><p className="text-xs text-muted">{foot}</p></>
   const tick = { fill: 'var(--muted)', fontSize: 11 }
   return (
-    <div className="flex flex-col gap-2">
+    <div className={fill ? 'flex min-h-0 flex-1 flex-col gap-2' : 'flex flex-col gap-2'}>
       <div className="flex text-xs text-muted">
         <span className="w-16 shrink-0">剩余天数</span>
         <span className="flex-1 text-center">各账号该批剩余</span>
         <span className="w-16 shrink-0 text-right">剩余积分</span>
       </div>
-      <div className="max-h-72 overflow-y-auto overscroll-contain">
+      {/* 条形高度按行数算（一行 30px），铺满屏幕时只是可视区变高，不把条形拉粗 */}
+      <div className={fill ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain' : 'max-h-72 overflow-y-auto overscroll-contain'}>
         <ResponsiveContainer width="100%" height={data.length * 30 + 8}>
           <BarChart data={data} layout="vertical" margin={{ top: 4, right: 0, bottom: 4, left: 0 }} barCategoryGap={9}>
             <XAxis type="number" hide />
@@ -258,19 +320,13 @@ function PackTable({ packs, colorOf, label }: { packs: CreditPackage[]; colorOf:
   )
 }
 
-/** 单账号逐包明细：按排序规则（默认最早到期）展示前 N 条，其余未用完的包和已用完的包各自折叠 */
-function Detail({ a, limit, sortMode, colorOf }: { a: PackageAccount; limit: number; sortMode: PkSortMode; colorOf: (key: string) => string }) {
+/** 单账号逐包明细（页签内容，不再自带外壳）：按排序规则（默认最早到期）展示前 N 条，
+ *  其余未用完的包和已用完的包各自折叠 */
+function DetailBody({ a, limit, sortMode, colorOf }: { a: PackageAccount; limit: number; sortMode: PkSortMode; colorOf: (key: string) => string }) {
   const g = pkDetailGroups(a.packages || [], limit, sortMode)
   const name = accountName(a) + ' · ' + (a.realm || '')
   return (
-    <Panel
-      title={name}
-      desc={
-        '余额 ' + fmtTok(a.remain) + ' / 总额 ' + fmtTok(a.size) + ' · 可用 ' + (g.visible.length + g.rest.length) + ' 个包' +
-        (g.used.length ? ' / 已用完 ' + g.used.length + ' 个' : '') + ' · 默认展示' + (sortMode === 'size_desc' ? '面额最大 ' : '最早到期 ') + pkDetailLimitValue(limit) + ' 条'
-      }
-      contentClassName="flex flex-col gap-2"
-    >
+    <>
       {g.visible.length > 0 ? <PackTable packs={g.visible} colorOf={colorOf} label={name + ' 积分包'} /> : <Empty title="没有未用完的积分包" />}
       {(g.rest.length > 0 || g.used.length > 0) && (
         <Accordion allowsMultipleExpanded>
@@ -298,6 +354,6 @@ function Detail({ a, limit, sortMode, colorOf }: { a: PackageAccount; limit: num
           ) : null}
         </Accordion>
       )}
-    </Panel>
+    </>
   )
 }

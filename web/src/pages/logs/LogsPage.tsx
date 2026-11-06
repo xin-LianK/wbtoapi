@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
 
-// 运行日志页：网关的系统与任务日志，按频道 / 级别 / 关键字筛选。两种看法：
+// 运行日志页：网关的系统与任务日志，按频道 / 级别 / 关键字筛选。两种看法（各占一个页签，铺满屏幕高度）：
 //   - 实时：最近 500 行（网关内存环形缓冲）。停在底部时每 5 秒跟随新日志；往上翻看旧日志时冻结画面
 //     （日志环满了会从顶部淘汰旧行，不冻结的话翻看中的内容会整体上移），滚回底部或点「回到最新」再继续跟随。
 //   - 历史：按时间范围从磁盘上的任务日志、系统日志留存里查（配置 →「日志留存」），频道、级别、关键字在网关侧筛，
@@ -20,6 +20,7 @@ import { initialRange, rangeLabel } from '../../lib/timerange'
 import type { LogEntry } from '../../lib/types'
 import { BusyButton, Empty, Loaded } from '../../components/Feedback'
 import { Panel } from '../../components/Panel'
+import { TabbedPage } from '../../components/TabbedPage'
 import { TimeRangePicker } from '../../components/TimeRangePicker'
 
 const CH_COLOR: Record<string, 'accent' | 'default'> = { task: 'accent', sys: 'default' }
@@ -46,8 +47,6 @@ interface ViewProps {
   q: string
   /** 频道、级别、关键字三个控件 */
   filters: ReactNode
-  /** 实时 / 历史切换 */
-  modeSwitch: ReactNode
 }
 
 export function LogsPage() {
@@ -80,15 +79,18 @@ export function LogsPage() {
       </SearchField>
     </>
   )
-  const modeSwitch = (
-    <ToggleButtonGroup aria-label="看法" size="sm" selectionMode="single" disallowEmptySelection
-      selectedKeys={[mode]} onSelectionChange={(k) => setMode([...k][0] as Mode)}>
-      <ToggleButton id="live">实时</ToggleButton>
-      <ToggleButton id="history"><ToggleButtonGroup.Separator />历史</ToggleButton>
-    </ToggleButtonGroup>
+  const props = { ch, level, q, filters }
+  return (
+    <TabbedPage
+      label="日志看法"
+      value={mode}
+      onChange={(id) => setMode(id as Mode)}
+      tabs={[
+        { id: 'live', label: '实时', fill: true, content: <LiveLogs {...props} /> },
+        { id: 'history', label: '历史', fill: true, content: <HistoryLogs {...props} /> },
+      ]}
+    />
   )
-  const props = { ch, level, q, filters, modeSwitch }
-  return mode === 'history' ? <HistoryLogs {...props} /> : <LiveLogs {...props} />
 }
 
 /** 日志行：全部频道时行首标出频道；今天的只显示时刻，更早的带日期 */
@@ -101,9 +103,10 @@ function Lines({ entries, ch }: { entries: LogEntry[]; ch: LogChannel }) {
   ))
 }
 
-const BOX = 'h-[60dvh] min-h-72 overflow-auto rounded-xl p-3 font-mono text-xs leading-6'
+// 铺满页签剩余高度：日志区自己滚，页面不再按 60dvh 猜
+const BOX = 'min-h-0 flex-1 overflow-auto rounded-xl p-3 font-mono text-xs leading-6'
 
-function LiveLogs({ ch, level, q, filters, modeSwitch }: ViewProps) {
+function LiveLogs({ ch, level, q, filters }: ViewProps) {
   const [following, setFollowing] = useState(true)
   const [frozen, setFrozen] = useState<LogEntry[] | null>(null)
   const query = useLogs(true)
@@ -148,8 +151,8 @@ function LiveLogs({ ch, level, q, filters, modeSwitch }: ViewProps) {
       desc={ch === 'all'
         ? `最近 ${live.length} 行 · 任务 ${counts.task || 0} · 系统 ${counts.sys || 0}`
         : `${CHANNEL_LABEL[ch]} ${counts[ch] || 0} 行`}
-      actions={modeSwitch}
-      contentClassName="flex flex-col gap-3"
+      className="flex min-h-0 flex-1 flex-col"
+      contentClassName="flex min-h-0 flex-1 flex-col gap-3"
     >
       <div className="flex flex-wrap items-center gap-3">
         {filters}
@@ -170,7 +173,7 @@ function LiveLogs({ ch, level, q, filters, modeSwitch }: ViewProps) {
   )
 }
 
-function HistoryLogs({ ch, level, q, filters, modeSwitch }: ViewProps) {
+function HistoryLogs({ ch, level, q, filters }: ViewProps) {
   const [range, setRange] = useState(() => initialRange('today'))
   const [limit, setLimit] = useState<number>(ARCHIVE_LIMITS[0])
   const kw = useDebounced(q)
@@ -194,8 +197,9 @@ function HistoryLogs({ ch, level, q, filters, modeSwitch }: ViewProps) {
     <Panel
       title="运行日志"
       desc={`${rangeLabel(range)} · ${query.data ? entries.length + ' 行' : '读取中'}${more ? ` · 区间内不止 ${limit} 行，只显示最新的` : ''}`}
-      actions={<>{modeSwitch}<BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton></>}
-      contentClassName="flex flex-col gap-3"
+      actions={<BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton>}
+      className="flex min-h-0 flex-1 flex-col"
+      contentClassName="flex min-h-0 flex-1 flex-col gap-3"
     >
       <div className="flex flex-wrap items-center gap-3">
         {filters}

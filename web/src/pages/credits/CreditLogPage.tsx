@@ -16,6 +16,7 @@ import { initialRange } from '../../lib/timerange'
 import type { CreditEarning, CreditLogResp, CreditSum } from '../../lib/types'
 import { BusyButton, Empty, Loaded } from '../../components/Feedback'
 import { Panel, Stat } from '../../components/Panel'
+import { TabbedPage } from '../../components/TabbedPage'
 import { TimeRangePicker } from '../../components/TimeRangePicker'
 
 const LIMITS = [100, 500, 2000]
@@ -58,39 +59,56 @@ export function CreditLogPage() {
   ], [overview.data])
   const st = storage.data?.credit
 
-  return (
-    <>
-      <Panel
-        title="积分获取"
-        desc={['只记领到的积分，扣除见「用量 → 积分扣除历史」', st && retentionText(st.retention_days), st && storageSummary('credit', st), storageProblem(st)]
-          .filter(Boolean).join(' · ')}
-        actions={
-          <>
-            <Pick label="按账号筛选" value={uid} options={accounts} onChange={setUid} className="w-40" />
-            <Pick label="按来源筛选" value={source} options={SOURCES} onChange={setSource} className="w-32" />
-            <TimeRangePicker value={range} onChange={setRange} />
-            <Pick label="流水条数" value={limit} options={LIMITS.map((n) => ({ id: n, label: `最近 ${n} 笔` }))} onChange={setLimit} className="w-36" />
-            <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton>
-          </>
-        }
-        contentClassName="flex flex-col gap-4"
-      >
-        {st?.enabled === false && (
-          <p className="text-sm text-warning">积分获取的留存已关闭，新领到的不再记录，这里只查得到关闭前留下的；在「配置 → 日志留存」里打开。</p>
-        )}
-        <Loaded query={query} rows={2}>
-          {(r) => r.count ? <Totals d={r} /> : (
-            <Empty title="这段时间没有领到积分">签到、领奖等领到积分时逐笔记录；升级到有这一页的版本之前领的没有记录。</Empty>
-          )}
-        </Loaded>
-      </Panel>
-      {!!d?.count && (
+  // 概览 + 流水放一个页签，账号汇总另一个；筛选条件（账号、来源、时间、条数）两页共用，放在页签上方
+  const tabs = [
+    {
+      id: 'entries',
+      label: '流水',
+      content: (
         <>
-          <ByAccount rows={d.by_account} />
-          <Entries d={d} />
+          <Panel
+            title="积分获取"
+            desc={['只记领到的积分，扣除见「用量 → 积分扣除历史」', st && retentionText(st.retention_days), st && storageSummary('credit', st), storageProblem(st)]
+              .filter(Boolean).join(' · ')}
+            contentClassName="flex flex-col gap-4"
+          >
+            {st?.enabled === false && (
+              <p className="text-sm text-warning">积分获取的留存已关闭，新领到的不再记录，这里只查得到关闭前留下的；在「配置 → 日志留存」里打开。</p>
+            )}
+            <Loaded query={query} rows={2}>
+              {(r) => r.count ? <Totals d={r} /> : (
+                <Empty title="这段时间没有领到积分">签到、领奖等领到积分时逐笔记录；升级到有这一页的版本之前领的没有记录。</Empty>
+              )}
+            </Loaded>
+          </Panel>
+          {!!d?.count && <Entries d={d} />}
         </>
-      )}
-    </>
+      ),
+    },
+    {
+      id: 'byAccount',
+      label: '按账号',
+      badge: d?.by_account.length || undefined,
+      content: d?.count ? <ByAccount rows={d.by_account} /> : (
+        <Panel title="按账号"><Loaded query={query} rows={3}>{() => <Empty title="这段时间没有领到积分" />}</Loaded></Panel>
+      ),
+    },
+  ]
+
+  return (
+    <TabbedPage
+      label="积分获取分区"
+      toolbar={
+        <>
+          <Pick label="按账号筛选" value={uid} options={accounts} onChange={setUid} className="w-40" />
+          <Pick label="按来源筛选" value={source} options={SOURCES} onChange={setSource} className="w-32" />
+          <TimeRangePicker value={range} onChange={setRange} />
+          <Pick label="流水条数" value={limit} options={LIMITS.map((n) => ({ id: n, label: `最近 ${n} 笔` }))} onChange={setLimit} className="w-36" />
+          <BusyButton size="sm" variant="secondary" busy={query.isFetching} onPress={() => void query.refetch()}>重新读取</BusyButton>
+        </>
+      }
+      tabs={tabs}
+    />
   )
 }
 
