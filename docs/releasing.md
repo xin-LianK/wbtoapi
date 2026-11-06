@@ -33,7 +33,7 @@
 | 工作流 / 触发 | 做什么 |
 |---|---|
 | go-binaries，推 `main` | 五平台构建，覆盖「最新构建」Release 与 `latest` 标签；不建版本 Release |
-| go-binaries，推 `vx.y.z` 标签 | 五平台构建，建标题为 `vx.y.z` 的 Release，说明取更新日志里这一版的内容，附带版本号的包和 `checksums.txt`，并标为 Latest |
+| go-binaries，推 `vx.y.z` 标签 | 五平台构建，建标题为 `vx.y.z` 的 Release，附版本号的包和 `checksums.txt`，并标为 Latest。Release 说明是固定文案加与上一版的 compare 链接，具体变更看[更新日志](CHANGELOG.md) |
 | docker-ghcr | 由 go-binaries 在检查通过后调用。推 `main` 时镜像打 `latest`、`main`、`sha-xxxxxxx`；标签与 `appVersion` 一致时，另加 `x.y.z`、`x.y`、`x` 三个标签 |
 
 标签的版本号必须与 `appVersion` 一致（都带 `-panel` 后缀，比较时两侧归一成纯版本号）。版本号没变的 `main` 推送只更新「最新构建」和 `latest` 镜像，不碰已发布版本的 Release 和镜像标签。发版中途失败、Release 没建出来时，重推同一个标签就会补发——标签推送是幂等的。
