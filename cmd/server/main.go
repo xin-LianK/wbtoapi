@@ -50,8 +50,8 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-// 合并 yreidev 增强线（/v1/messages、按号代理、账号分组、多客户端密钥等）后升到 1.16.0-panel。
-const appVersion = "1.16.0-panel"
+// 1.17.0-panel：面板页面改页签并铺满屏高，修复多号同模型限流时 429 的恢复时刻。
+const appVersion = "1.17.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
