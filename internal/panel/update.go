@@ -29,11 +29,15 @@ import (
 )
 
 const (
-	defaultUpdateURL = "https://raw.githubusercontent.com/yreidev/workbuddy2api-panel/main/docs/CHANGELOG.md"
-	releaseTagURL    = "https://github.com/linguo2625469/workbuddy2api-panel/releases/tag/v"
-	updateInterval   = 6 * time.Hour
-	updateTimeout    = 15 * time.Second
-	updateMaxBytes   = 1 << 20
+	// repoURL 本仓库地址。更新日志、发布页一律指向它，不指向上游项目。
+	repoURL = "https://github.com/xin-LianK/wbtoapi"
+	// defaultUpdateURL 更新检查读的远端更新日志（main 分支的 docs/CHANGELOG.md）。
+	defaultUpdateURL = "https://raw.githubusercontent.com/xin-LianK/wbtoapi/main/docs/CHANGELOG.md"
+	// releaseTagURL 新版本的发布页地址前缀，后接版本号。
+	releaseTagURL  = repoURL + "/releases/tag/v"
+	updateInterval = 6 * time.Hour
+	updateTimeout  = 15 * time.Second
+	updateMaxBytes = 1 << 20
 	// 面板「立即检查」距上次尝试不到这么久时直接用上次的结果，免得连点打到 GitHub 限流
 	manualCheckGap = 30 * time.Second
 )

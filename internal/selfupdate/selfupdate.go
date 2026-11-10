@@ -37,7 +37,7 @@ import (
 
 const (
 	// DefaultDownloadBase Release 下载地址前缀，后接「版本号/文件名」。
-	DefaultDownloadBase = "https://github.com/linguo2625469/workbuddy2api-panel/releases/download/v"
+	DefaultDownloadBase = "https://github.com/xin-LianK/wbtoapi/releases/download/v"
 	// StableAfter 新版启动后跑满这么久才算成功。
 	StableAfter = 30 * time.Second
 

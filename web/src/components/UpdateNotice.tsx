@@ -19,12 +19,11 @@ import {
   DISMISSED_UPDATE_KEY, SEEN_VERSION_KEY, inlineParts, pickNotice, readStored, restartOutcome, shouldRecordSeen, updateProgress, writeStored,
   type NoticeMode, type PendingRestart, type UpdateStep,
 } from '../lib/update'
-import { LICENSE_URL, NOTICE_URL, REPO_URL, UPSTREAMS } from '../lib/notice'
+import { DOCS_URL, LICENSE_URL, NOTICE_URL, PROJECT_URL, UPSTREAMS } from '../lib/notice'
 import type { Release, SelfUpdatePhase, SelfUpdateStatus, VersionResp } from '../lib/types'
 import { BusyButton } from './Feedback'
 import { useConfirm } from './useConfirm'
 
-const DOCS_URL = 'https://github.com/linguo2625469/workbuddy2api-panel/blob/main/docs/'
 const CHANGELOG_URL = DOCS_URL + 'CHANGELOG.md'
 const UPGRADE_DOC_URL = DOCS_URL + 'deployment.md#升级备份与停机'
 /** 正文里的链接：带常驻下划线，和普通文字区分开 */
@@ -320,12 +319,13 @@ function AboutModal({ open, onClose, data, onShowUpdate, onRollback }: {
           <ExtLink href={LICENSE_URL}>AGPL-3.0-only</ExtLink>，附<ExtLink href={NOTICE_URL}>署名条款</ExtLink>
         </dd>
         <dt className="text-muted">源码</dt>
-        <dd><ExtLink href={REPO_URL}>yreidev/workbuddy2api-panel</ExtLink></dd>
+        <dd><ExtLink href={PROJECT_URL}>xin-LianK/wbtoapi</ExtLink></dd>
       </dl>
       <p className="mt-4 text-xs text-muted">
-        © 2026 yreidev 与贡献者，基于 {UPSTREAMS.map((u, i) => (
-          <span key={u.name}>{i > 0 && ' 与 '}<ExtLink href={u.url}>{u.name}</ExtLink></span>
-        ))}。
+        以 AGPL-3.0-only 发布，附署名条款（见<ExtLink href={NOTICE_URL}>NOTICE</ExtLink>）。
+        本项目基于 {UPSTREAMS.map((u, i) => (
+          <span key={u.name}>{i > 0 && '、'}<ExtLink href={u.url}>{u.name}</ExtLink></span>
+        ))} 等上游项目的代码，版权归各自作者所有。
         本程序按原样提供，不提供任何担保。你可以依 AGPL-3.0 复制、修改和分发；复制或改写须保留版权声明，并在说明文档和界面里注明出处、附上链接。
       </p>
       {su?.rolled_back && (
@@ -507,7 +507,7 @@ function UpgradeSteps({ su }: { su?: SelfUpdateStatus }) {
       {su && !su.supported && <p className="text-muted">一键更新不可用：{su.reason}</p>}
       <p>
         <span className="text-muted">docker run：</span>
-        先 <Code>docker pull ghcr.io/yreidev/workbuddy2api-panel:latest</Code>，删掉旧容器后按原来的参数重新 <Code>docker run</Code>
+        先 <Code>docker pull ghcr.io/xin-liank/wbtoapi:latest</Code>，删掉旧容器后按原来的参数重新 <Code>docker run</Code>
       </p>
       <p>
         <span className="text-muted">Docker Compose：</span>
