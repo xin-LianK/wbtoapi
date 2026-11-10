@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1769,6 +1770,9 @@ func TestTokenUsagePersistsAcrossReload(t *testing.T) {
 func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	withNoPickGap(t)
 	p := New("")
+	// 本例只验证「软加权」那一层（expiring_first 关掉）。硬分层行为见
+	// TestPickExpiringFirstHardTier：默认配置下普通账号其实拿不到流量。
+	p.SetExpiringFirst(false)
 	p.Add(&auth.Auth{UID: "later"})
 	p.Add(&auth.Auth{UID: "soon"})
 	p.Add(&auth.Auth{UID: "none"})
@@ -1793,6 +1797,72 @@ func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	expiring := counts["soon"] + counts["later"]
 	if expiring < 1500 || counts["none"] == 0 {
 		t.Fatalf("virtual weight distribution=%v, want expiring majority and regular non-zero", counts)
+	}
+}
+
+// 快过期硬分层（pool.expiring_first，默认开）：生效成本层内只要有快过期账号，
+// 普通账号就完全拿不到号——哪怕它余额高得多（旧的 ×3 软加权下高余额号会赢）。
+func TestPickExpiringFirstHardTier(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "rich"})
+	p.Add(&auth.Auth{UID: "poor"})
+	now := time.Now()
+	p.SetCreditsDetailed("rich", 1000, 1000, 0, time.Time{}, 0)
+	p.SetCreditsDetailed("poor", 100, 100, 100, now.Add(time.Hour), 100)
+
+	counts := map[string]int{}
+	for i := 0; i < 500; i++ {
+		got := p.Pick()
+		if got == nil {
+			t.Fatal("pick returned nil")
+		}
+		counts[got.UID]++
+	}
+	if counts["rich"] != 0 || counts["poor"] != 500 {
+		t.Fatalf("默认应只分给快过期号，counts=%v", counts)
+	}
+
+	// 关掉硬分层退回旧的软加权：高余额普通号重新拿到大部分流量，但不独占。
+	p.SetExpiringFirst(false)
+	counts = map[string]int{}
+	for i := 0; i < 500; i++ {
+		counts[p.Pick().UID]++
+	}
+	if counts["rich"] == 0 || counts["poor"] == 0 {
+		t.Fatalf("软加权下两号都应有流量，counts=%v", counts)
+	}
+}
+
+// 硬分层不得跨成本层：免费层没有快过期号时，不能为了花快过期积分改用收费号。
+func TestPickExpiringFirstStaysInCostTier(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "free"})
+	p.Add(&auth.Auth{UID: "paid"})
+	p.NoteModelCost("free", "glm-5.2", 0, 1000) // 实测免费 → tier 0
+	p.NoteModelCost("paid", "glm-5.2", 5, 1000) // 实测收费 → tier 2
+	p.SetCreditsDetailed("paid", 1000, 1000, 1000, time.Now().Add(time.Hour), 1000)
+
+	for i := 0; i < 100; i++ {
+		if got := p.PickExcludingForModel(nil, "glm-5.2"); got == nil || got.UID != "free" {
+			t.Fatalf("收费层的快过期号不该抢免费层的活，got %v", got)
+		}
+	}
+}
+
+// 新会话分配同样遵守硬分层：层内有快过期号就只分给它们（按虚拟实例展开 3 份）。
+func TestCheapestWeightedUIDsExpiringFirst(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "a"})
+	p.Add(&auth.Auth{UID: "b"})
+	p.SetCreditsDetailed("a", 100, 100, 100, time.Now().Add(time.Hour), 100)
+
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"a", "a", "a"}) {
+		t.Fatalf("新会话应只分给快过期号，got %v", got)
+	}
+	p.SetExpiringFirst(false)
+	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"a", "a", "a", "b"}) {
+		t.Fatalf("关掉硬分层应恢复虚拟实例权重，got %v", got)
 	}
 }
 

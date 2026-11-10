@@ -181,6 +181,7 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	p.SetRestrictionWave(cfg.Pool.RestrictionWaveThreshold, cfg.RestrictionWaveWindowDur, cfg.RestrictionWavePauseDur)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
+	p.SetExpiringFirst(cfg.Pool.ExpiringFirst)             // 快过期硬分层（默认开）
 	p.SetCrossDomainFallback(cfg.Pool.CrossDomainFallback) // 裸名跨域回退（issue #135，默认关闭）
 	_ = p.SetScheduling(cfg.Pool.Strategy, cfg.Pool.AccountOrder)
 
@@ -945,6 +946,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetRestrictionWave(newCfg.Pool.RestrictionWaveThreshold, newCfg.RestrictionWaveWindowDur, newCfg.RestrictionWavePauseDur)
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
+	p.SetExpiringFirst(newCfg.Pool.ExpiringFirst)             // 快过期硬分层热生效
 	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
 	// 出站节奏热生效：只换参数、不重建实例——重建会让所有账号的 nextAt 归零，
 	// 等于瞬间放行一波突发，恰好是这一层要防的事。pacer 为 nil（裸用/测试）时

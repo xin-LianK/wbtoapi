@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
 
-// 选号：Pick 簇（healthy 成本分层 + 快过期虚拟实例权重 + 全冷却兜底 + 在途占满过滤）。
+// 选号：Pick 簇（healthy 成本分层 + 快过期硬分层/虚拟实例权重 + 全冷却兜底 + 在途占满过滤）。
 package pool
 
 import (
@@ -100,6 +100,10 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	}
 	// 成本分层与条件探索见 effectiveCostTierLocked：只保留生效层的候选。
 	bestTier, explored := p.effectiveCostTierLocked(cands, reqModel, realm, now)
+	// 快过期硬分层（expiring_first）：生效成本层内只要存在窗口内的快过期账号，本次
+	// 选号就把候选收窄到这些账号。层内仍走下面的权重排序 + top5 加权抽签 + 防撞号 +
+	// 在途上限，所以是「先花快过期的这一批」，不是「先花最早过期的那一个」。
+	onlyExpiring := p.restrictToExpiringLocked(cands, bestTier, reqModel, now)
 	// 权重只算一次：顶 5 截断要排序，若在 sort 比较器里现算 weightOf 会翻成 O(n log n) 次
 	// 冗余浮点计算（46 账号约 500 次）。先做 O(n) 预计算，再按 (权重, uid) 排序。
 	// costTier/modelCostOf 同样每候选只算一次（存入 tier/cost1k），比较器只读缓存字段。
@@ -109,12 +113,26 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		tier   int
 		cost1k float64
 	}
-	ws := make([]weighted, 0, len(cands))
-	for _, e := range cands {
-		ti, ci := e.costTierOf(reqModel, now)
-		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+	collect := func(restrictExpiring bool) []weighted {
+		out := make([]weighted, 0, len(cands))
+		for _, e := range cands {
+			ti, ci := e.costTierOf(reqModel, now)
+			if ti != bestTier {
+				continue
+			}
+			if restrictExpiring && !expiringNow(e, now) {
+				continue
+			}
+			out = append(out, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
 		}
+		return out
+	}
+	ws := collect(onlyExpiring)
+	if len(ws) == 0 {
+		// 兜底：restrictToExpiringLocked 只在层内确有快过期候选时才置位，故此处理论
+		// 不可达（并发窗口内批次被刷新清零是唯一可能）。回退全层，避免空候选越界。
+		onlyExpiring = false
+		ws = collect(false)
 	}
 	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {
 		ordered := make([]*entry, 0, len(ws))
@@ -469,6 +487,29 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestRemaining > 0 &&
 		!e.creditsEarliestExpiry.IsZero() &&
 		e.creditsEarliestExpiry.After(now)
+}
+
+// restrictToExpiringLocked 报告「本次选号是否该把候选收窄到快过期账号」。
+//
+// 只认**生效成本层内**（ti==tier）的快过期账号：成本分层是更硬的约束，若免费层
+// 里没有快过期号，而收费层里有，也不能为了花快过期积分去接收费模型——那正好把
+// 保底/免费优先的收益还回去。
+//
+// 两个开关都开才生效：prefer_expiring 是总闸（关掉即完全不使用到期信息），
+// expiring_first 决定是硬分层还是 ×3 软加权。调用方持 p.mu。
+func (p *Pool) restrictToExpiringLocked(cands []*entry, tier int, model string, now time.Time) bool {
+	if !p.expiringFirstEnabled() {
+		return false
+	}
+	for _, e := range cands {
+		if ti, _ := e.costTierOf(model, now); ti != tier {
+			continue
+		}
+		if expiringNow(e, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false

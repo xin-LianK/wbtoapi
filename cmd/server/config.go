@@ -300,11 +300,17 @@ type Config struct {
 		DegradeCooldownMax string  `json:"degrade_cooldown_max"` // 降权时长的上限钳制，默认 "2h"（仅当 cooldown 超该值才钳制）
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
-		// PreferExpiring 快过期积分加权开关，默认 true。开启且 expiring_soon 窗口内
-		// 存在有效批次时，该账号选号权重 ×3（虚拟实例，见 pool 路由加权）；
-		// 不按到期时间排序、与批次金额无关（issue #101 对齐实现口径）。
-		// 关闭后完全不使用到期信息选号。
+		// PreferExpiring 快过期积分偏好总开关，默认 true。开启且 expiring_soon 窗口内
+		// 存在有效批次时，该账号在选号中被优待（硬分层见 expiring_first；关掉硬分层
+		// 时是权重 ×3 的软加权）。不按到期时间排序、与批次金额无关（issue #101）。
+		// 关闭后完全不使用到期信息选号，expiring_first 一并失效。
 		PreferExpiring bool `json:"prefer_expiring"`
+		// ExpiringFirst 快过期硬分层开关，默认 true（prefer_expiring 关掉时一并失效）。
+		// 开启后：生效成本层内只要存在 expiring_soon 窗口内的快过期账号，候选就收窄到
+		// 这些账号——从「×3 软加权」升级为「先花快过期」。层内仍走加权随机 / top5 /
+		// 防撞号 / 在途上限，所以不会把流量全砸在一个号上，但整体会明显偏向快过期号。
+		// 关闭 → 退回纯粹的 ×3 软加权（引入本开关前的行为）。
+		ExpiringFirst bool `json:"expiring_first"`
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
 		// 此窗口内的批次令账号命中上述 ×3 加权；窗口开大 → 命中账号变多、
 		// 偏好被稀释。空/0 = 禁用该加权门槛。
@@ -546,6 +552,7 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.PreferExpiring = true
+	c.Pool.ExpiringFirst = true  // 层内有快过期号就只分给它们（真·先花快过期）
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
@@ -743,6 +750,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_PREFER_EXPIRING"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Pool.PreferExpiring = b
+		}
+	}
+	if v := os.Getenv("WB2A_EXPIRING_FIRST"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Pool.ExpiringFirst = b
 		}
 	}
 	if v := os.Getenv("WB2A_DNS"); v != "" {

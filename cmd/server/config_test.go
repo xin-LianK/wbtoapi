@@ -213,6 +213,9 @@ func TestNewPoolConfigDefaults(t *testing.T) {
 	if !c.Pool.PreferExpiring || c.ExpiringSoonDur != 7*24*time.Hour {
 		t.Errorf("expiring defaults: enabled=%v window=%v", c.Pool.PreferExpiring, c.ExpiringSoonDur)
 	}
+	if !c.Pool.ExpiringFirst {
+		t.Error("pool.expiring_first 默认应为 true（快过期硬分层）")
+	}
 	if c.SoftRateMaxDur.Hours() != 2 {
 		t.Errorf("soft_rate_max=%v want 2h", c.SoftRateMaxDur)
 	}
@@ -297,6 +300,24 @@ func TestLegacyConfigKeepsPreferExpiringEnabled(t *testing.T) {
 	}
 	if !c.Pool.PreferExpiring {
 		t.Fatal("missing prefer_expiring must preserve default true")
+	}
+	// 老配置没有 expiring_first 键：照样按默认 true 走（与 prefer_expiring 同款语义）。
+	if !c.Pool.ExpiringFirst {
+		t.Fatal("missing expiring_first must preserve default true")
+	}
+}
+
+// 显式 false 必须被尊重——否则用户关不掉硬分层。
+func TestExpiringFirstExplicitFalseHonored(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"pool":{"expiring_first":false}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.ExpiringFirst {
+		t.Fatal("explicit expiring_first=false 未被尊重")
 	}
 }
 

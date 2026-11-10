@@ -769,8 +769,9 @@ Windows：`.bat` 用 CRLF；网关工作目录必须是仓库根（`auths/`、`d
 | `pool.strategy.domestic` | `weighted_random` | 国内版账号池调度：`weighted_random` / `round_robin` / `sequential_exhaust`，支持热更新 |
 | `pool.strategy.international` | `weighted_random` | 国际版账号池独立调度策略，同上；不改变既有地区路由 |
 | `pool.account_order.domestic` / `international` | `[]` | 对应地区的 UID 优先顺序；未列出账号按 UID 排序追加；只用于轮询和顺序耗尽 |
-| `pool.prefer_expiring` | `true` | 快过期积分加权：窗口内仍有有效快过期批次的账号，选号权重 ×3（虚拟实例）；不按到期时间排序、与批次金额无关；是软偏好，弱于会话粘性与模型成本分层（#101） |
-| `pool.expiring_soon` | `168h` | 快过期加权窗口：仅窗口内仍有有效批次的账号命中上述 ×3；窗口开大 → 命中账号变多、偏好被稀释；留空或 `0` 关闭 |
+| `pool.prefer_expiring` | `true` | 快过期积分偏好总开关。关掉后完全不用到期时间选号 |
+| `pool.expiring_first` | `true` | 快过期硬分层：生效成本层内只要还有窗口内的快过期账号，就只在这些账号里选号（新会话分配与请求轮换同口径）；层内仍加权随机，不按到期时间先后排序。关掉退回纯「×3 软加权」 |
+| `pool.expiring_soon` | `168h` | 「快过期」的窗口：仅窗口内仍有有效批次的账号算快过期（硬分层选中它们，软加权则 ×3）；窗口开大 → 命中账号变多、偏好被稀释；留空或 `0` 关闭 |
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
@@ -916,11 +917,15 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 1. 过滤：禁用 / 冷却 / 熔断 / 在途占满账号不参与
 2. 按模型实测成本分层，只保留当前最优层
-3. 默认开启快过期积分加权（软偏好，不改排序）：
+3. 默认开启快过期积分硬分层（`pool.expiring_first`，默认 `true`）：
 
-   - 在模型成本最优层内，`expiring_soon` 窗口内仍有有效快过期批次的账号，选号权重 ×3（`expiringVirtualSlots` 虚拟实例展开，会话粘性路径同口径）。
+   - 在模型成本最优层内，只要存在 `expiring_soon` 窗口内仍有有效快过期批次的账号，候选就**收窄到这些账号**——先把快过期的积分花掉。
+   - 分发口径：新会话分配与请求轮换都遵守（`CheapestWeightedUIDsForModelRealm` / `pick`），不是只影响一边。
+   - 层内仍走原有加权随机、top5 截断、防撞号与在途上限，所以不会把流量全砸在一个号上；多个快过期号之间按虚拟实例（×3）展开后均衡。
    - 不按到期时间排序、与批次金额无关：14 天后到期与 3 天后到期、1 分与几千分，只要在窗口内待遇相同。
-   - 该偏好弱于会话粘性（绑定号健康则直接使用）与模型成本分层（按实测成本硬过滤）；已过期、零余额、无有效到期时间的账号不进入加权集。
+   - 不会跨成本层：免费层没有快过期号时，不会为了花快过期积分改用收费号。
+   - 弱于会话粘性（绑定号健康则直接使用）与优先级分组；已过期、零余额、无有效到期时间的账号不进入候选。
+   - 关掉 `pool.expiring_first` 退回旧的软偏好：权重 ×3，但高余额普通号仍可能赢。
 4. 同一候选池内加权随机（快过期命中账号在上面的基础上 ×3）：
 
    `weight = credits 比例 ×10 + idleWeight`

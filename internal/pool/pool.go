@@ -67,9 +67,16 @@ type Pool struct {
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
-	// preferExpiring 最早到期优先路由开关（默认 true）。开启且快过期窗口内存在有效
-	// 批次时，选号在成本层内先按最早到期排序；关闭后只使用普通加权路由。
+	// preferExpiring 快过期积分偏好总开关（默认 true）。开启且快过期窗口内存在有效
+	// 批次时，该账号的选号权重 ×expiringVirtualSlots（见 routingWeightOf /
+	// weightedUIDsLocked）；关闭后完全不使用到期信息选号。
 	preferExpiring bool
+	// expiringFirst 快过期硬分层开关（默认 true）。仅在 preferExpiring 同时开启时
+	// 生效：成本层定下来之后，若该层内存在窗口内的快过期账号，就把候选收窄到这些
+	// 账号——把 ×3 软加权升级为「先花快过期」。不按到期时间先后排序（层内仍是加权
+	// 随机 + top5 + 防撞号 + 在途上限），所以是「先花快过期的这一批」，不是
+	// 「先花最早过期的那一个」。
+	expiringFirst bool
 	// crossDomainFallback 裸模型名跨域回退开关（默认 false = 零回归，issue #135）。
 	// 仅由选号调用方（server handler）读取：开启后，未带 realm 前缀的请求在首选域
 	// 选不到可用号时改用另一域再选一次；显式 cn:/global: 前缀不受影响。
@@ -130,6 +137,7 @@ func New(stateFp string) *Pool {
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
 		preferExpiring:     true,
+		expiringFirst:      true,
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
@@ -227,11 +235,25 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	}
 }
 
-// SetPreferExpiring 注入最早到期优先路由开关（main 从 config 解析后调用）。
+// SetPreferExpiring 注入快过期积分偏好总开关（main 从 config 解析后调用）。
+// 关闭时 expiringFirst 一并失效（不使用任何到期信息选号）。
 func (p *Pool) SetPreferExpiring(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+}
+
+// SetExpiringFirst 注入快过期硬分层开关（默认 true）：成本层内存在快过期账号时
+// 只在这些账号里选号。受 preferExpiring 总开关约束，热改安全。
+func (p *Pool) SetExpiringFirst(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.expiringFirst = enabled
+}
+
+// expiringFirstEnabled 报告硬分层是否真的生效（两个开关都为真）。调用方需持 p.mu。
+func (p *Pool) expiringFirstEnabled() bool {
+	return p.preferExpiring && p.expiringFirst
 }
 
 // SetCrossDomainFallback 注入裸模型名跨域回退开关（issue #135；false = 零回归）。

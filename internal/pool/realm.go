@@ -120,8 +120,9 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string, skip map[
 // CheapestWeightedUIDsForModelRealm 新会话分配用：同 WeightedAvailableUIDsForModelRealm，
 // 但先按成本分层只留生效层（实测免费 > 无观测 > 实测收费，含条件探索，见
 // effectiveCostTierLocked），与 pick 普通轮换同一口径。model 为空不分层。
-// 已绑定会话的续用校验仍走 WeightedAvailableUIDsForModelRealm（不分层），免得免费号
-// 一出现就把绑在收费号上的会话全部挪走、丢掉上游前缀缓存。
+// 层定下来后再叠快过期硬分层（pool.expiring_first）：层内有快过期号就只分给它们。
+// 已绑定会话的续用校验仍走 WeightedAvailableUIDsForModelRealm（不分层、不收窄），
+// 免得免费号或快过期号一出现就把绑在收费号上的会话全部挪走、丢掉上游前缀缓存。
 // 取写锁：条件探索会写探索计时器。
 func (p *Pool) CheapestWeightedUIDsForModelRealm(model, realm string, skip map[string]bool) []string {
 	p.mu.Lock()
@@ -139,6 +140,20 @@ func (p *Pool) CheapestWeightedUIDsForModelRealm(model, realm string, skip map[s
 		cands = kept
 		if explored {
 			log.Printf("[pool] cost explore model=%s realm=%q (新会话) window=%s", model, realm, p.costExploreInterval)
+		}
+	}
+	// 快过期硬分层（expiring_first）：与 pick 同一口径——当前候选层内若存在窗口内的
+	// 快过期账号，新会话只分给这些账号，保证「先分配快过期的号」。层内仍按虚拟实例
+	// 权重展开后哈希，多个快过期号之间保持均衡。model 为空（不分成本层）时同样生效。
+	if p.expiringFirstEnabled() {
+		exp := make([]*entry, 0, len(cands))
+		for _, e := range cands {
+			if expiringNow(e, now) {
+				exp = append(exp, e)
+			}
+		}
+		if len(exp) > 0 {
+			cands = exp
 		}
 	}
 	return p.weightedUIDsLocked(cands, now)

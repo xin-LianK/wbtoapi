@@ -137,8 +137,9 @@
 | `pool.in_flight_wait` | `30s` | 能接请求的号在途都满或每分钟请求数到上限时，请求最多排队等多久空位，等满才回 503，见[网关与选号](gateway.md#选号策略)；`0` = 不等 |
 | `pool.cross_realm` | `off` | 跨域负载均衡：`off` 关闭、`merge` 合池、`cn_first` 国内版优先；老配置的 `true` 读成 `merge`、`false` 读成 `off`，见[网关与选号](gateway.md#跨域负载均衡) |
 | `pool.credit_floor` | `0` | 积分保底：余额低于该值的账号不再接实测收费的模型；`0` = 关闭 |
-| `pool.prefer_expiring` | `true` | 有积分快过期的账号选号权重 ×3，优先把快过期的积分用掉 |
-| `pool.expiring_soon` | `168h` | 「快过期」的窗口；空或 `0` 关闭 |
+| `pool.prefer_expiring` | `true` | 快过期积分偏好总开关。关掉后完全不使用到期时间选号 |
+| `pool.expiring_first` | `true` | 硬分层：生效成本层内只要有 `expiring_soon` 窗口内的快过期账号，就只在这些账号里选号（新会话分配、请求轮换同口径）。关掉退回「×3 软加权」；层内仍是加权随机 + 防撞号，不按到期时间先后排序 |
+| `pool.expiring_soon` | `168h` | 「快过期」的窗口；窗口越大命中的号越多、偏好越稀；空或 `0` 关闭 |
 | `pool.cost_explore_interval` | `30m` | 免费层垄断时，每个窗口把一个真实请求改道给成本未知的账号，以便学到它的真实成本；`0` = 关闭 |
 | `pool.breaker_threshold` | `3` | 连续失败几次触发熔断 |
 | `pool.breaker_cooldown` / `pool.breaker_cooldown_max` | `30m` / `6h` | 熔断基础时长与指数退避上限 |
@@ -219,6 +220,7 @@
 | `WB2A_SANITIZE_FINGERPRINTS` | `features.sanitize_blacklist_fingerprints`（布尔） |
 | `WB2A_PROMPT_MODE` / `WB2A_PROMPT_FILE` | `prompt.mode` / `prompt.file` |
 | `WB2A_PREFER_EXPIRING` / `WB2A_EXPIRING_SOON` | `pool.prefer_expiring`（布尔） / `pool.expiring_soon` |
+| `WB2A_EXPIRING_FIRST` | `pool.expiring_first`（布尔） |
 | `WB2A_SHUTDOWN_TIMEOUT` | 只能用环境变量设置：停机时等在途请求的上限，默认 `5s`，见[部署与运维](deployment.md#升级备份与停机) |
 
 ### 出站代理
