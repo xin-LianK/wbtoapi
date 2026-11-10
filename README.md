@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="112">
+<img src="docs/images/icon.png" alt="WorkBuddy2API" width="96">
 
 # WorkBuddy2API
 
@@ -94,15 +94,15 @@ WorkBuddy2API 是一个自托管的账号网关。官方只给桌面客户端和
 <table>
   <tr>
     <td width="50%" align="center"><b>用量分析</b><br><img src="docs/images/usage.webp" alt="用量分析"></td>
-    <td width="50%" align="center"><b>模型与档位</b><br><img src="docs/images/models.webp" alt="模型与档位"></td>
+    <td width="50%" align="center"><b>请求记录</b><br><img src="docs/images/requests.webp" alt="请求记录"></td>
   </tr>
   <tr>
-    <td width="50%" align="center"><b>任务中心</b><br><img src="docs/images/tasks.webp" alt="任务中心"></td>
-    <td width="50%" align="center"><b>手机端</b><br><img src="docs/images/mobile-accounts.webp" alt="手机端账号池" height="292"> <img src="docs/images/mobile-usage.webp" alt="手机端用量" height="292"></td>
+    <td width="50%" align="center"><b>手机端账号池</b><br><img src="docs/images/mobile-accounts.webp" alt="手机端账号池" width="240"></td>
+    <td width="50%" align="center"><b>手机端用量</b><br><img src="docs/images/mobile-usage.webp" alt="手机端用量" width="240"></td>
   </tr>
 </table>
 
-<sub>截图均为演示数据。</sub>
+<sub>截图里的账号、积分和请求都是演示数据。</sub>
 
 ## 快速开始
 

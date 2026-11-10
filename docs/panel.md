@@ -34,11 +34,13 @@
 | **配置** | 在线编辑配置，分服务 / 定时任务 / 账号池与流量治理 / 上游与高级 / 日志留存五组；底部保存条显示改了几项，需要重启的字段有标记，时长与时点当场校验。「日志留存」里请求记录、任务日志、系统日志、用量统计、积分获取各一张卡片，设开关、保留天数和容量上限，卡片下面显示现有的文件数、大小和最早日期，可以一键清空，见[日志留存](configuration.md#日志留存) |
 | **运行日志** | 「实时」「历史」两个页签，日志区铺满屏幕高度、自己滚。网关的系统与任务日志，按任务 / 系统频道、级别和关键字筛选。「实时」看最近 500 行，停在底部时每 5 秒跟随；「历史」按时间范围从磁盘上的留存里查，一次最多 5000 行，更早的日子也查得到。每次调用的流水行只打在终端，不进这里，面板里看「请求记录」 |
 
-| 用量 | 模型与档位 |
+| 用量 | 请求记录 |
 |:---:|:---:|
-| <img src="images/usage.webp" alt="用量" width="420"> | <img src="images/models.webp" alt="模型与档位" width="420"> |
-| **任务中心** | **手机端** |
-| <img src="images/tasks.webp" alt="任务中心" width="420"> | <img src="images/mobile-accounts.webp" alt="手机端账号池" height="292"> <img src="images/mobile-usage.webp" alt="手机端用量" height="292"> |
+| <img src="images/usage.webp" alt="用量" width="420"> | <img src="images/requests.webp" alt="请求记录" width="420"> |
+| **手机端账号池** | **手机端用量** |
+| <p align="center"><img src="images/mobile-accounts.webp" alt="手机端账号池" height="292"></p> | <p align="center"><img src="images/mobile-usage.webp" alt="手机端用量" height="292"></p>
+
+<sub>截图里的账号、积分和请求都是演示数据。</sub>
 
 ## 测活
 
@@ -101,7 +103,7 @@ IP 属于个人信息，所以由 `logging.request_client_info` 控制，默认�
 - 检查只是一个 GET 请求，不带任何本机信息。读不到（例如服务器访问不了 GitHub）就在运行日志里记一行，6 小时后再试，不影响其他功能。
 - 在「配置 → 服务」关掉「检查更新」（`panel.update_check`）即停止联网检查，立即生效；「本次更新」不受影响。
 
-<p align="center"><img src="images/update.webp" alt="有新版本弹窗" width="860"><br><sub>演示数据，v1.1.0 的条目是虚构的。</sub></p>
+<p align="center"><img src="images/update.webp" alt="本次更新弹窗" width="860"><br><sub>升级后第一次打开面板时的「本次更新」；账号与积分为演示数据。</sub></p>
 
 版本号规则与发版流程见[发版与版本号](releasing.md)。
 
