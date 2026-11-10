@@ -312,8 +312,8 @@ type Config struct {
 		// 关闭 → 退回纯粹的 ×3 软加权（引入本开关前的行为）。
 		ExpiringFirst bool `json:"expiring_first"`
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
-		// 此窗口内的批次令账号命中上述 ×3 加权；窗口开大 → 命中账号变多、
-		// 偏好被稀释。空/0 = 禁用该加权门槛。
+		// 此窗口内的批次令账号算作「快过期」（硬分层选它们 / 软加权 ×3）；窗口开大 → 命中账号变多、
+		// 偏好被稀释。空/0 = 禁用到期信息。
 		ExpiringSoon string `json:"expiring_soon"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
