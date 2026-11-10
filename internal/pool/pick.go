@@ -131,7 +131,6 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	if len(ws) == 0 {
 		// 兜底：restrictToExpiringLocked 只在层内确有快过期候选时才置位，故此处理论
 		// 不可达（并发窗口内批次被刷新清零是唯一可能）。回退全层，避免空候选越界。
-		onlyExpiring = false
 		ws = collect(false)
 	}
 	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {
