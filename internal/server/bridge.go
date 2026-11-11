@@ -96,6 +96,17 @@ func (h *Handler) openaiResponses(w http.ResponseWriter, r *http.Request) {
 		h.compactBody(w, r, patched, peekStream(body))
 		return
 	}
+	// 客户端宣告的服务端搜索工具（web_search）换成网关自己执行的函数工具，见 responses_websearch.go。
+	withSearch, search, err := rewriteWebSearchTools(patched)
+	if err != nil {
+		writeBridgeError(w, sdktranslator.FormatOpenAIResponse, http.StatusBadRequest, "invalid_request",
+			"request body is not valid JSON: "+err.Error())
+		return
+	}
+	if search {
+		h.responsesWebSearch(w, r, withSearch, peekStream(body))
+		return
+	}
 	h.bridgeBody(w, r, sdktranslator.FormatOpenAIResponse, patched)
 }
 
