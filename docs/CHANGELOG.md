@@ -8,6 +8,40 @@
 
 条目按「新增 / 变更 / 弃用 / 移除 / 修复 / 安全」分组。面板的更新提醒读的就是这份文件，发版规则见[发版与版本号](releasing.md)。
 
+## [1.20.0-panel] - 2026-11-11
+
+这一版对齐了对标项目里「让请求能过、能接着聊」的五项能力，都是新增开关或新增能力，
+不改已有行为，直接升级即可。配置只有新增项，老 `config.json` 不用动。
+
+### 新增
+
+- **Codex 上下文压缩**：长会话触发压缩时，Codex 会发 `{"type":"compaction_trigger"}` 并期待
+  恰好一条 `compaction` 输出项；此前这类请求被当普通对话处理，Codex 会报「got 0 compaction
+  output items」，会话接不下去。现在压缩回合由网关自己出摘要，回放时把摘要解出来当上下文；
+  老形态 `POST /v1/responses/compact` 也支持。
+- **出站身份**：凭证里可以指定这个号按哪种客户端形态发对话——桌面端（缺省）、VSCode 扩展、
+  CLI，或者「自动换线」：桌面端被 429 限流就换 VSCode，再换 CLI（同一个号、同一条请求，
+  不罚号也不换号），三条都被挡才按原来的限流处置。面板「账号详情 → 出站身份」选，选完即生效，
+  不用重启、不用重登。不是桌面端的号在账号卡片上带标记。**默认仍是桌面端**，不设就完全不受影响。
+  VSCode 形态的指纹取自扩展解包源码、没有真机抓包核对，先用一个号试，见
+  [出站身份](identity.md)。
+- **`upstream.cache_retention`**：给对话请求体补 `cache_retention`（`long` = 1 小时提示缓存，
+  `short` = 5 分钟），配合 `upstream.cache_retention_models` 按模型名前缀放行。默认关：
+  官方 CLI 从 2.169.0 起才补这个字段，而且 1 小时缓存在部分模型上写入更贵（只实测过
+  deepseek）。面板「上游与高级 → 出站请求」可改，保存即生效。
+- **出口情报加机房 / 住宅判定与 ASN**：代理页的出口 IP 旁标出这个出口是不是机房（云厂商）IP，
+  悬停看 ASN。机房 IP 更容易被上游按 IP 维度风控。
+- **Responses 请求里的 `web_search` 工具**：Codex App 这类客户端声明服务端搜索工具时，
+  此前网关直接跳过，模型等于没有搜索能力。现在由网关真正去调官方搜索接口，最多 3 轮；
+  模型还要调客户端自己的工具时整轮交回客户端。
+
+### 变更
+
+- `upstream.vscode_ide_version` / `upstream.vscode_product_version`：VSCode 身份的两个版本段
+  （宿主 VSCode 版本、CodeBuddy 扩展版本），只在号的出站身份是 VSCode 时用到，改完要重启。
+- 环境变量新增 `WB2A_CACHE_RETENTION` / `WB2A_CACHE_RETENTION_MODELS` /
+  `WB2A_VSCODE_IDE_VERSION` / `WB2A_VSCODE_PRODUCT_VERSION`。
+
 ## [1.19.1-panel] - 2026-11-10
 
 这一版只修面板里指向别处的链接，没有配置与接口变更，直接升级即可。
