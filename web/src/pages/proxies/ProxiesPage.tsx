@@ -519,9 +519,11 @@ function ExitCell({ p, now }: { p: ProxyItem; now: number }) {
   const geo = exitGeo(e)
   const kind = exitHostingLabel(e)
   const changed = timeMs(p.health.exit_changed_at)
+  // 先算出来：三元表达式里 TS 收窄不到 else 分支的 e，直接在模板串里用会报「可能为 undefined」。
+  const asn = e?.as ? `（${e.as}）` : ''
   const kindTip = e?.hosting === 'hosting'
-    ? `这个出口是机房 / 云厂商的 IP${e.as ? '（' + e.as + '）' : ''}：同一个 IP 下挂好几个号最容易被风控，有住宅代理就换掉。`
-    : `这个出口是住宅 / 移动网络的 IP${e.as ? '（' + e.as + '）' : ''}，官方看来更正常。`
+    ? `这个出口是机房 / 云厂商的 IP${asn}：同一个 IP 下挂好几个号最容易被风控，有住宅代理就换掉。`
+    : `这个出口是住宅 / 移动网络的 IP${asn}，官方看来更正常。`
   return (
     <div className="flex max-w-56 flex-col items-start gap-1">
       <div className="flex items-center gap-1">
