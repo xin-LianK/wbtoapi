@@ -68,13 +68,6 @@ func (r *compactionRecorder) last(t *testing.T) map[string]any {
 	return obj
 }
 
-func (r *compactionRecorder) count(t *testing.T) int {
-	t.Helper()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.bodies)
-}
-
 func compactionHandler(t *testing.T, rec *compactionRecorder) *Handler {
 	t.Helper()
 	return NewHandler(Config{
