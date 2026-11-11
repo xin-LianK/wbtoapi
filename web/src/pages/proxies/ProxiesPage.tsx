@@ -14,7 +14,7 @@ import { apiText, post } from '../../lib/api'
 import { download, stamp } from '../../lib/credentials'
 import { ago, dateTime, fmtLocalDateTime, timeMs, until } from '../../lib/format'
 import { toastError, useNow } from '../../lib/hooks'
-import { defaultForLabels, exitGeo, filterProxies, loadText, PROXY_FILTERS, proxyStatus, type ProxyFilter } from '../../lib/proxies'
+import { defaultForLabels, exitGeo, exitHostingLabel, filterProxies, loadText, PROXY_FILTERS, proxyStatus, type ProxyFilter } from '../../lib/proxies'
 import { qk, useAccountNames, useProxies } from '../../lib/queries'
 import type { ProxiesResp, ProxyItem, ProxyPool } from '../../lib/types'
 import { Empty, ErrorBox, Loaded } from '../../components/Feedback'
@@ -517,10 +517,21 @@ function StatusCell({ p, now }: { p: ProxyItem; now: number }) {
 function ExitCell({ p, now }: { p: ProxyItem; now: number }) {
   const e = p.health.exit
   const geo = exitGeo(e)
+  const kind = exitHostingLabel(e)
   const changed = timeMs(p.health.exit_changed_at)
+  const kindTip = e?.hosting === 'hosting'
+    ? `这个出口是机房 / 云厂商的 IP${e.as ? '（' + e.as + '）' : ''}：同一个 IP 下挂好几个号最容易被风控，有住宅代理就换掉。`
+    : `这个出口是住宅 / 移动网络的 IP${e.as ? '（' + e.as + '）' : ''}，官方看来更正常。`
   return (
     <div className="flex max-w-56 flex-col items-start gap-1">
-      {e?.ip ? <span className="font-mono text-sm">{e.ip}</span> : <span className="text-muted">还没查到</span>}
+      <div className="flex items-center gap-1">
+        {e?.ip ? <span className="font-mono text-sm">{e.ip}</span> : <span className="text-muted">还没查到</span>}
+        {kind && (
+          <Hint tip={kindTip}>
+            <Chip size="sm" variant="soft" color={e?.hosting === 'hosting' ? 'warning' : 'success'}>{kind}</Chip>
+          </Hint>
+        )}
+      </div>
       {geo && <span className="text-xs text-muted">{geo}</span>}
       {e?.error && <Hint tip={e.error} className="line-clamp-1 wrap-anywhere text-xs text-danger">这次没查到：{e.error}</Hint>}
       {(!!p.dup_exit?.length || p.same_as_default || p.exit_changed) && (

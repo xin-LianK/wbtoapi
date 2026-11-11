@@ -286,6 +286,7 @@ func mergeExit(old, e *Exit, now time.Time) *Exit {
 	out.CheckedAt = now
 	if out.IP == "" && old != nil {
 		out.IP, out.Country, out.Region, out.City, out.ISP, out.Source = old.IP, old.Country, old.Region, old.City, old.ISP, old.Source
+		out.AS, out.Hosting = old.AS, old.Hosting
 	}
 	return &out
 }

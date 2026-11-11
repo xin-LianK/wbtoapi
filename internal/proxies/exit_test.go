@@ -13,7 +13,8 @@ import (
 	"testing"
 )
 
-// TestParseExit 认 ip-api、ipify、别的带 ip 字段的 JSON，Cloudflare trace 那样的 key=value，纯文本 IP。
+// TestParseExit 认 ip-api、ipify、别的带 ip 字段的 JSON，Cloudflare trace 那样的 key=value，纯文本 IP；
+// hosting 回了才判住宅 / 机房，没回留空。
 func TestParseExit(t *testing.T) {
 	for _, c := range []struct {
 		body string
@@ -24,9 +25,19 @@ func TestParseExit(t *testing.T) {
 			Exit{IP: "1.2.3.4", Country: "中国", Region: "香港", City: "香港", ISP: "某运营商"}, ""},
 		{` {"ip":"2001:db8::1"} `, Exit{IP: "2001:db8::1"}, ""},
 		{`{"ip":"5.6.7.8","region":"东京","org":"某公司"}`, Exit{IP: "5.6.7.8", Region: "东京", ISP: "某公司"}, ""},
+		// 要了 fields 才有 hosting / as：机房、住宅、以及只回了 AS 没回 hosting 三种。
+		{`{"status":"success","query":"5.6.7.8","as":"AS13335 Cloudflare, Inc.","hosting":true}`,
+			Exit{IP: "5.6.7.8", AS: "AS13335 Cloudflare, Inc.", Hosting: ExitHosting}, ""},
+		{`{"status":"success","query":"5.6.7.8","as":"AS4808 中国联通","hosting":false}`,
+			Exit{IP: "5.6.7.8", AS: "AS4808 中国联通", Hosting: ExitResidential}, ""},
+		{`{"status":"success","query":"5.6.7.8","as":"AS4808 中国联通"}`, Exit{IP: "5.6.7.8", AS: "AS4808 中国联通"}, ""},
 		{`{"status":"fail","message":"private range"}`, Exit{}, "查询失败：private range"},
 		{`{bad`, Exit{}, "不是合法的 JSON"},
 		{`{"country":"中国"}`, Exit{}, "没有 IP"},
+		{`{"status":"success","ip":"1.1.1.1","as":"AS13335","hosting":"yes"}`,
+			Exit{IP: "1.1.1.1", AS: "AS13335", Hosting: ExitHosting}, ""},
+		{`{"status":"success","ip":"1.1.1.1","as":{"asn":13335,"name":"Cloudflare, Inc."},"hosting":null}`,
+			Exit{IP: "1.1.1.1", AS: "Cloudflare, Inc."}, ""},
 		{"fl=1\nip=9.9.9.9\nloc=HK\n", Exit{IP: "9.9.9.9", Country: "HK"}, ""},
 		{"ip=not-ip", Exit{}, "没有 IP"},
 		{"1.1.1.1\n", Exit{IP: "1.1.1.1"}, ""},

@@ -135,6 +135,14 @@ type Health struct {
 	ExitChangedAt time.Time `json:"exit_changed_at,omitzero"`
 }
 
+// 出口 IP 的类型判定（Exit.Hosting），用的是 ip-api 的 hosting 字段。
+const (
+	// ExitHosting 机房 / 数据中心 / 云厂商的 IP：同一个出口下挂好几个号，官方看着最可疑。
+	ExitHosting = "hosting"
+	// ExitResidential 住宅 / 移动网络的 IP：官方看着最正常。
+	ExitResidential = "residential"
+)
+
 // Exit 出口 IP 和地区。
 type Exit struct {
 	IP      string `json:"ip,omitempty"`
@@ -142,6 +150,10 @@ type Exit struct {
 	Region  string `json:"region,omitempty"`
 	City    string `json:"city,omitempty"`
 	ISP     string `json:"isp,omitempty"`
+	// AS 出口 IP 所属的 ASN 和运营商名，如「AS13335 Cloudflare, Inc.」。查不到为空。
+	AS string `json:"as,omitempty"`
+	// Hosting 出口是不是机房 IP：ExitHosting / ExitResidential，查不到（第三方没回这个字段）为空。
+	Hosting string `json:"hosting,omitempty"`
 	// Source 这次是从哪个地址查到的。
 	Source    string    `json:"source,omitempty"`
 	CheckedAt time.Time `json:"checked_at"`

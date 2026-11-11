@@ -15,6 +15,15 @@ export function exitGeo(e?: ProxyExit | null): string {
   return e.isp ? (geo ? geo + ' · ' : '') + e.isp : geo
 }
 
+/** 出口 IP 的类型：hosting 是「机房」，residential 是「住宅」；第三方没回这个字段返回空（未判定）。
+ *  住宅出口在官方看来更正常，机房出口一个 IP 下挂一堆号最容易被风控。 */
+export function exitHostingLabel(e?: ProxyExit | null): '机房' | '住宅' | '' {
+  if (!e) return ''
+  if (e.hosting === 'hosting') return '机房'
+  if (e.hosting === 'residential') return '住宅'
+  return ''
+}
+
 export interface ProxyStatus {
   label: string
   color: 'success' | 'danger' | 'default'

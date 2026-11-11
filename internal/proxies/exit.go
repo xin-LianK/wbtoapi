@@ -22,8 +22,12 @@ import (
 // builtinExitURLs 内置的查出口 IP 地址，照 sub2api（backend/internal/repository/proxy_probe_service.go）：
 // 先 ip-api.com（带地区和运营商，中文），查不到再 ipify（只有 IP）。免费的 ip-api 只有 http，每分钟
 // 限 45 次。官方没有回显客户端 IP 的接口，所以只能问第三方；地址可以在设置里换成自己的。
+//
+// 第一个地址显式带 fields：ip-api 一旦给了 fields 就不再回默认字段，所以这里要把用到的全列上。
+// 多要 hosting（住宅 / 机房）与 as（ASN 与运营商名）两个字段：住宅 IP 的号在官方看来更正常，
+// 机房 IP 容易被风控，面板上要能看出来。免费的 ip-api 也回这两个字段，但只有显式要才回。
 var builtinExitURLs = []string{
-	"http://ip-api.com/json/?lang=zh-CN",
+	"http://ip-api.com/json/?lang=zh-CN&fields=status,message,query,country,regionName,city,isp,org,as,hosting",
 	"http://api64.ipify.org?format=json",
 }
 
@@ -78,8 +82,11 @@ func fetchExit(ctx context.Context, hc *http.Client, u string) (*Exit, error) {
 	return parseExit(body)
 }
 
-// parseExit 认三种回应：JSON（ip-api 的 query、country、regionName、city、isp，ipify 的 ip，别的带 ip
-// 字段的也认）、Cloudflare trace 那样一行一个 key=value（ip=、loc=）、只有一个 IP 的纯文本。
+// parseExit 认三种回应：JSON（ip-api 的 query、country、regionName、city、isp、as、hosting，ipify 的
+// ip，别的带 ip 字段的也认）、Cloudflare trace 那样一行一个 key=value（ip=、loc=）、只有一个 IP 的纯文本。
+//
+// hosting 是可选字段：ip-api 只在 fields 里点名要时才回，回了才判得出住宅还是机房；没回就留空
+// （面板显示「未判定」），不要因为缺这一个字段把整个查询判失败。
 func parseExit(body []byte) (*Exit, error) {
 	body = bytes.TrimSpace(body)
 	if bytes.HasPrefix(body, []byte("{")) {
@@ -94,6 +101,10 @@ func parseExit(body []byte) (*Exit, error) {
 			City       string `json:"city"`
 			ISP        string `json:"isp"`
 			Org        string `json:"org"`
+			// AS、Hosting 各家的形状不一样（字符串 / 对象 / 布尔 / 字符串布尔），先原样收下再宽松解析，
+			// 免得这两个字段的形状一变就把整次查询判失败、连 IP 都丢了。
+			AS      json.RawMessage `json:"as"`
+			Hosting json.RawMessage `json:"hosting"`
 		}
 		if err := json.Unmarshal(body, &v); err != nil {
 			return nil, errors.New("回应不是合法的 JSON")
@@ -101,7 +112,7 @@ func parseExit(body []byte) (*Exit, error) {
 		if v.Status == "fail" {
 			return nil, fmt.Errorf("查询失败：%s", v.Message)
 		}
-		e := &Exit{IP: v.Query, Country: v.Country, Region: v.RegionName, City: v.City, ISP: v.ISP}
+		e := &Exit{IP: v.Query, Country: v.Country, Region: v.RegionName, City: v.City, ISP: v.ISP, AS: exitAS(v.AS)}
 		if e.IP == "" {
 			e.IP = v.IP
 		}
@@ -111,6 +122,7 @@ func parseExit(body []byte) (*Exit, error) {
 		if e.ISP == "" {
 			e.ISP = v.Org
 		}
+		e.Hosting, _ = exitHosting(v.Hosting)
 		return checkIP(e)
 	}
 	if bytes.Contains(body, []byte("ip=")) {
@@ -128,6 +140,55 @@ func parseExit(body []byte) (*Exit, error) {
 		return checkIP(e)
 	}
 	return checkIP(&Exit{IP: string(body)})
+}
+
+// exitAS 取 AS 字段的文本：多数服务回字符串「AS15169 Google LLC」，也有回 {"asn":...,"name":...}
+// 的，两种都认；认不出就留空，不报错。
+func exitAS(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var o struct {
+		Name string `json:"name"`
+		Org  string `json:"org"`
+	}
+	if json.Unmarshal(raw, &o) == nil {
+		if o.Name != "" {
+			return strings.TrimSpace(o.Name)
+		}
+		return strings.TrimSpace(o.Org)
+	}
+	return ""
+}
+
+// exitHosting 判这个出口是不是机房：true 是机房，false 是住宅；有的服务把布尔写成字符串（"true" /
+// "yes" / "1"），也一并认。没这个字段、或者形状认不出，返回 ok = false，调用方按「未判定」处理。
+func exitHosting(raw json.RawMessage) (string, bool) {
+	// null 要单独挡掉：json 把 null 解进 bool 是不报错的（留 false），会被误判成住宅。
+	if len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return "", false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		if b {
+			return ExitHosting, true
+		}
+		return ExitResidential, true
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "true", "yes", "1":
+			return ExitHosting, true
+		case "false", "no", "0":
+			return ExitResidential, true
+		}
+	}
+	return "", false
 }
 
 func checkIP(e *Exit) (*Exit, error) {

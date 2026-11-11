@@ -4,8 +4,8 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  badExitURL, bindSummary, defaultForLabels, defaultPoolOf, exitGeo, filterProxies, lineCounts, lineResult, loadText, poolSummary, proxyStatus, settingsForm,
-  settingsInput, warningLines,
+  badExitURL, bindSummary, defaultForLabels, defaultPoolOf, exitGeo, exitHostingLabel, filterProxies, lineCounts, lineResult, loadText, poolSummary, proxyStatus,
+  settingsForm, settingsInput, warningLines,
 } from './proxies'
 import type { ProxyItem, ProxyPool } from './types'
 
@@ -20,6 +20,12 @@ describe('代理的展示', () => {
     expect(exitGeo({ ip: '203.0.113.1', country: '中国', region: '香港', city: '香港', isp: '某运营商', checked_at: '' })).toBe('中国 香港 · 某运营商')
     expect(exitGeo({ isp: '某运营商', checked_at: '' })).toBe('某运营商')
     expect(exitGeo(undefined)).toBe('')
+  })
+  it('出口类型只认机房和住宅，没判定就不显示', () => {
+    expect(exitHostingLabel({ ip: '203.0.113.1', hosting: 'hosting', as: 'AS13335 Cloudflare, Inc.', checked_at: '' })).toBe('机房')
+    expect(exitHostingLabel({ ip: '203.0.113.1', hosting: 'residential', checked_at: '' })).toBe('住宅')
+    expect(exitHostingLabel({ ip: '203.0.113.1', checked_at: '' })).toBe('')
+    expect(exitHostingLabel(undefined)).toBe('')
   })
   it('状态：已到期优先，其次通不通，没测过是还没测', () => {
     expect(proxyStatus(px({ expired: true, health: { state: 'ok' } }))).toEqual({ label: '已到期', color: 'danger' })

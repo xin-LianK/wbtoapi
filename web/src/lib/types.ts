@@ -778,6 +778,10 @@ export interface ProxyExit {
   region?: string
   city?: string
   isp?: string
+  /** 出口 IP 所属的 ASN 和运营商名，如「AS13335 Cloudflare, Inc.」 */
+  as?: string
+  /** 出口是不是机房 IP：hosting 机房 / residential 住宅；没有 = 第三方没回这个字段，未判定 */
+  hosting?: 'hosting' | 'residential'
   /** 这次是从哪个地址查到的 */
   source?: string
   checked_at: string
