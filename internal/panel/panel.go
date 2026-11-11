@@ -260,6 +260,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/blocked_models", p.withAuth(p.accountBlockedModels))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/groups", p.withAuth(p.accountGroups))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/priority", p.withAuth(p.accountPriority))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/product", p.withAuth(p.accountProduct))
 	p.mux.HandleFunc("GET /panel/api/groups", p.withAuth(p.groupsList))
 	p.mux.HandleFunc("POST /panel/api/groups", p.withAuth(p.groupCreate))
 	p.mux.HandleFunc("POST /panel/api/groups/{id}", p.withAuth(p.groupUpdate))

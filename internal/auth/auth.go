@@ -72,6 +72,11 @@ type Auth struct {
 	// proxyURL 凭证顶层的 proxy_url（CLIProxyAPI 插件等工具的写法）：只在导入、启动时用来认出该绑
 	// 哪个代理（TakeProxyURL），取走即清空，不写回。
 	proxyURL string
+	// product 这个号出站用的身份（"desktop" 缺省 / "vscode" / "cli" / "auto"），落盘于凭证顶层
+	// product。官方有两套身份、两条配额线，某一条打满时可以换另一条继续用（见
+	// upstream/identity.go 与 docs/identity.md）；"auto" = 被 429 时自动往下一条换。
+	// 读写都持 a.mu（ProductValue / SetProduct）。
+	product string
 }
 
 // ProxyBinding 号绑的出站代理。ID 为空而 Pool 非空 = 绑了池但池里暂时没有空位（等代理）。
@@ -113,6 +118,43 @@ func (a *Auth) TakeProxyURL() string {
 	u := a.proxyURL
 	a.proxyURL = ""
 	return u
+}
+
+// 出站身份（Auth.product 的取值，见 upstream/identity.go）。
+const (
+	ProductDesktop = "desktop"
+	ProductVSCode  = "vscode"
+	ProductCLI     = "cli"
+	// ProductAuto 被上游 429 时按 桌面 → VSCode → CLI 顺序自动换下一条配额线。
+	ProductAuto = "auto"
+)
+
+// NormalizeProduct 把 product 收敛成上面几个值之一：空 / 认不出的一律当桌面端。
+func NormalizeProduct(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case ProductVSCode:
+		return ProductVSCode
+	case ProductCLI:
+		return ProductCLI
+	case ProductAuto:
+		return ProductAuto
+	default:
+		return ProductDesktop
+	}
+}
+
+// ProductValue 这个号出站用的身份（永远非空，缺省桌面端）。
+func (a *Auth) ProductValue() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return NormalizeProduct(a.product)
+}
+
+// SetProduct 改这个号的出站身份（只改内存，落盘由调用方 SaveAtomic）。认不出的值当桌面端。
+func (a *Auth) SetProduct(v string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.product = NormalizeProduct(v)
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -428,6 +470,8 @@ func Parse(raw []byte) (*Auth, error) {
 			// Proxy、ProxyURL 顶层 proxy、proxy_url（两种形状共用），见 Auth.proxy。
 			Proxy    ProxyBinding `json:"proxy"`
 			ProxyURL string       `json:"proxy_url"`
+			// Product 出站身份（两种形状共用），见 Auth.product。
+			Product string `json:"product"`
 		}
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -450,6 +494,7 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken:        n.DeviceToken,
 			proxy:              n.Proxy,
 			proxyURL:           strings.TrimSpace(n.ProxyURL),
+			product:            n.Product,
 		}
 	} else {
 		var f struct {
@@ -469,6 +514,7 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken    string       `json:"device_token"`
 			Proxy          ProxyBinding `json:"proxy"`
 			ProxyURL       string       `json:"proxy_url"`
+			Product        string       `json:"product"`
 		}
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, fmt.Errorf("storage_parse_error: %w", err)
@@ -491,6 +537,7 @@ func Parse(raw []byte) (*Auth, error) {
 			DeviceToken:        f.DeviceToken,
 			proxy:              f.Proxy,
 			proxyURL:           strings.TrimSpace(f.ProxyURL),
+			product:            f.Product,
 		}
 	}
 	if strings.TrimSpace(a.AccessToken) == "" {
@@ -552,6 +599,10 @@ func (a *Auth) documentLocked() map[string]any {
 	// 绑了代理才写 proxy；proxy_url 只是导入时的线索，不写回（认出的代理已记在 proxy 里）。
 	if !a.proxy.Empty() {
 		doc["proxy"] = a.proxy
+	}
+	// 出了桌面端才写 product：老凭证文件不引入无意义的键，缺省即桌面端。
+	if p := NormalizeProduct(a.product); p != ProductDesktop {
+		doc["product"] = p
 	}
 	return doc
 }

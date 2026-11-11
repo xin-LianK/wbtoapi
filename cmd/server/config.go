@@ -248,6 +248,13 @@ type Config struct {
 		// CacheRetentionModels 只给这些模型补 cache_retention：逗号分隔，按模型名前缀匹配
 		// （不区分大小写），空 = 所有模型都补。
 		CacheRetentionModels string `json:"cache_retention_models"`
+		// VSCodeIDEVersion 出站身份是 VSCode 扩展（账号 product=vscode）时 X-IDE-Version 与 UA 第一段的
+		// 宿主 VSCode 版本。空 = 内置默认 1.119.0。扩展自己从 vscode.env 取这个值，网关没有宿主，
+		// 想更像真机就按自己日常用的 VSCode 版本填。
+		VSCodeIDEVersion string `json:"vscode_ide_version"`
+		// VSCodeProductVersion 同上，但它是 CodeBuddy 扩展自己的版本（X-Product-Version 与 UA 第二段）。
+		// 空 = 内置默认 4.12.39997873（Open VSX 上的版本）。
+		VSCodeProductVersion string `json:"vscode_product_version"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -747,6 +754,12 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_CACHE_RETENTION_MODELS"); v != "" {
 		c.Upstream.CacheRetentionModels = v
+	}
+	if v := os.Getenv("WB2A_VSCODE_IDE_VERSION"); v != "" {
+		c.Upstream.VSCodeIDEVersion = v
+	}
+	if v := os.Getenv("WB2A_VSCODE_PRODUCT_VERSION"); v != "" {
+		c.Upstream.VSCodeProductVersion = v
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

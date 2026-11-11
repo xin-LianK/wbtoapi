@@ -232,6 +232,10 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	up.Profile = cfg.Upstream.Profile
 	up.IDEVersion = cfg.Upstream.IDEVersion
 	up.Product = cfg.Upstream.Product
+	// 出站身份 VSCode 扩展形态的两个版本段（见 upstream/identity.go）。和 ClientVersion / CliVersion
+	// 一样只在启动期写进出站 client，改完要重启。
+	up.VSCodeIDEVersion = cfg.Upstream.VSCodeIDEVersion
+	up.VSCodeProductVersion = cfg.Upstream.VSCodeProductVersion
 	up.DeviceToken = cfg.Upstream.DeviceToken
 	// 出站 TLS 指纹伪装（默认开）：关掉回落标准库 TLS。改这项要重启。
 	upstream.SetTLSMimic(cfg.Upstream.TLSFingerprint)

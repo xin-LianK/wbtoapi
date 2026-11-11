@@ -4,7 +4,9 @@
 
 // 账号的各个展示单元（名称、状态、积分、用量），账号表、账号卡片、详情抽屉共用。
 import { Chip, ProgressBar } from '@heroui/react'
-import { activeRateLimits, creditPercent, groupLine, isUnlimited, livenessSummary, rateLimitInfo, type Health } from '../../lib/accounts'
+import {
+  activeRateLimits, creditPercent, groupLine, isUnlimited, livenessSummary, PRODUCT_HINTS, productLabel, productOf, rateLimitInfo, type Health,
+} from '../../lib/accounts'
 import { ago, dateTime, dur, formatLatency, formatRate, formatTokenCount, fmtTok, timeMs, until } from '../../lib/format'
 import { useGroups } from '../../lib/queries'
 import type { Account, ProxyAccount } from '../../lib/types'
@@ -19,6 +21,7 @@ export function AccountName({ a }: { a: Account }) {
         <span className={`truncate font-medium ${name ? '' : 'text-muted'}`}>{name || '未命名'}</span>
         {a.note && a.nickname && <span className="truncate text-xs text-muted">{a.nickname}</span>}
         <RealmChips a={a} />
+        <ProductChip a={a} />
       </div>
       <div className="truncate font-mono text-xs text-muted">{a.uid.length > 16 ? a.uid.slice(0, 16) + '…' : a.uid}</div>
     </div>
@@ -32,6 +35,18 @@ export function RealmChips({ a }: { a: Account }) {
       {a.realm === 'global' && <Chip size="sm" variant="soft" color="accent">国际版</Chip>}
       {a.enterprise && <Chip size="sm" variant="soft" color="default">企业版</Chip>}
     </>
+  )
+}
+
+/** 出站身份标记：桌面端是缺省，不占位置；其余三种一眼能看出这个号不是按桌面端发的 */
+export function ProductChip({ a }: { a: Account }) {
+  const p = productOf(a)
+  const label = productLabel(a)
+  if (!label) return null
+  return (
+    <Hint tip={PRODUCT_HINTS[p]}>
+      <Chip size="sm" variant="soft" color={p === 'auto' ? 'accent' : 'warning'}>{label}</Chip>
+    </Hint>
   )
 }
 

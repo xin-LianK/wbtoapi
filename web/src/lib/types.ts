@@ -85,6 +85,12 @@ export interface Account {
   /** 优先级，0～99，越小越先用（默认 0）；选号只在最小的那一层里挑，那层都接不了才轮到下一层 */
   priority?: number
   /**
+   * 出站身份（internal/upstream/identity.go）：官方同一套账号按客户端形态分了几条配额线，
+   * 网关可以指定用哪一条发对话。空 = 桌面端（缺省，老凭证文件没有这个键）；
+   * auto = 被 429 时自己换下一条线（桌面 → VSCode → CLI）
+   */
+  product?: 'desktop' | 'vscode' | 'cli' | 'auto'
+  /**
    * 代理池拦着这个号的原因（号的代理不通或到期、在等代理、开着「只许走号的代理」却没绑），拦着的号不接请求、
    * 不跑定时任务；没拦时没有。分类见 accounts.ts 的 blockedLabel
    */

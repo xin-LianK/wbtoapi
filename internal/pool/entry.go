@@ -130,6 +130,9 @@ type Status struct {
 	Groups      []string  `json:"groups,omitempty"`
 	Priority    int       `json:"priority"`
 	LastErrTime time.Time `json:"last_err,omitempty"`
+	// Product 这个号出站用的身份（"desktop" / "vscode" / "cli" / "auto"，见 upstream/identity.go）。
+	// 空 = 桌面端（老凭证文件没有这个键）。
+	Product string `json:"product,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
 	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
 	CheckinDone bool       `json:"checkin_done,omitempty"`

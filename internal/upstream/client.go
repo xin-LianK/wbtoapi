@@ -970,6 +970,12 @@ type Client struct {
 	// 不是 "0.0.0"——"0.0.0" 只是 applyGatewayHeaders 兜底表的占位值）。
 	IDEVersion string
 
+	// VSCodeIDEVersion / VSCodeProductVersion VSCode 扩展身份的两个版本段（见 identity.go）：
+	// 前者是宿主 VSCode 版本（扩展从 vscode.env 取，网关没有宿主，只能配），后者是扩展自己的
+	// 版本（X-Product-Version 与 UA 第二段）。都空 = 内置默认。只影响 product=vscode 的号。
+	VSCodeIDEVersion     string
+	VSCodeProductVersion string
+
 	// Product X-Product 取值。空 = "SaaS"（桌面端 deploymentType 缺省；
 	// 不是产品名 "WorkBuddy"——那是最容易写错、也最容易被识别的字段）。
 	Product string

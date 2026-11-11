@@ -5,7 +5,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   accountHealth, accountName, activeRateLimits, batchParam, batchSummary, blockedLabel, cardSortKey, creditPercent, creditsText, filterAccounts, groupLine, isFrozen,
-  livenessModels, livenessSummary, namesOf, NO_GROUP, notesOf, parseCardSort, poolCredits, rateLimitInfo, relabel, sortAccounts,
+  livenessModels, livenessSummary, namesOf, NO_GROUP, notesOf, parseCardSort, poolCredits, PRODUCT_HINTS, PRODUCT_LABELS, productLabel, productOf, rateLimitInfo,
+  relabel, sortAccounts,
 } from './accounts'
 import type { Account, Model } from './types'
 
@@ -125,6 +126,21 @@ describe('账号表辅助', () => {
     expect(groupLine({ groups: ['g1'], priority: 0 }, nameOf)).toBe('分组 主力')
     expect(groupLine({ priority: 5 }, nameOf)).toBe('优先级 5')
     expect(groupLine({ groups: ['gone'] }, nameOf)).toBe('')
+  })
+})
+
+describe('出站身份', () => {
+  it('后端不返回 product 时按桌面端处理，卡片上不占位置', () => {
+    expect(productOf({})).toBe('desktop')
+    expect(productOf({ product: 'vscode' })).toBe('vscode')
+    expect(productLabel({})).toBe('')
+    expect(productLabel({ product: 'desktop' })).toBe('')
+  })
+  it('其余三种身份都有中文名和说明', () => {
+    for (const p of ['vscode', 'cli', 'auto'] as const) {
+      expect(productLabel({ product: p })).toBe(PRODUCT_LABELS[p])
+      expect(PRODUCT_HINTS[p].length).toBeGreaterThan(10)
+    }
   })
 })
 

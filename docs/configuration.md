@@ -119,6 +119,8 @@
 | `upstream.tls_fingerprint` | `true` | 出站 TLS 握手是否伪装成官方桌面端的 ClientHello（用 uTLS 复刻，降低被按握手指纹识别的概率，见[官方客户端对照](official-client.md#没对齐或没实测的)）。默认开；关掉回落 Go 标准库握手。改 config 后重载生效，对新建连接起用 |
 | `upstream.cache_retention` | 空（不补） | 出站对话请求体补 `cache_retention`：`long` = 1 小时提示缓存，`short` = 5 分钟，`off` 或留空 = 不补。官方 CLI 从 2.169.0 起对非自定义模型补 `long`，网关 UA 报的是 2.165.0（不补这个字段），所以默认关。**1 小时缓存在部分模型上写入更贵**（实测只覆盖过 deepseek），建议先用 `cache_retention_models` 放行几个模型试。客户端自己带了 `cache_retention` 的一律不改。面板「上游与高级 → 出站请求」可改，保存即生效 |
 | `upstream.cache_retention_models` | 空（所有模型） | 只给这些模型补 `cache_retention`：逗号分隔的模型名前缀，不区分大小写（如 `deepseek-, glm-`）。留空时上面一项一开就所有模型都补 |
+| `upstream.vscode_ide_version` | 空（`1.119.0`） | 号的出站身份是 VSCode 扩展（凭证里 `product` 为 `vscode`，或 `auto` 换到那一跳）时，`X-IDE-Version` 与 UA 第一段的宿主 VSCode 版本。扩展自己从 `vscode.env` 取，网关没有宿主，所以只能配——想更像真机就填自己日常用的版本。改完要重启。见[出站身份](identity.md) |
+| `upstream.vscode_product_version` | 空（`4.12.39997873`） | 同上，但它是 CodeBuddy 扩展自己的版本（`X-Product-Version` 与 UA 第二段）。改完要重启 |
 
 ### 提示词与脱敏
 
@@ -220,6 +222,7 @@
 | `WB2A_MODEL_OPTIMIZATION` | `upstream.model_optimization`（布尔） |
 | `WB2A_TLS_FINGERPRINT` | `upstream.tls_fingerprint`（布尔） |
 | `WB2A_CACHE_RETENTION` / `WB2A_CACHE_RETENTION_MODELS` | `upstream.cache_retention` / `upstream.cache_retention_models` |
+| `WB2A_VSCODE_IDE_VERSION` / `WB2A_VSCODE_PRODUCT_VERSION` | `upstream.vscode_ide_version` / `upstream.vscode_product_version` |
 | `WB2A_SANITIZE_FINGERPRINTS` | `features.sanitize_blacklist_fingerprints`（布尔） |
 | `WB2A_PROMPT_MODE` / `WB2A_PROMPT_FILE` | `prompt.mode` / `prompt.file` |
 | `WB2A_PREFER_EXPIRING` / `WB2A_EXPIRING_SOON` | `pool.prefer_expiring`（布尔） / `pool.expiring_soon` |

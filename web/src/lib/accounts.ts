@@ -262,6 +262,36 @@ export function groupLine(a: Pick<Account, 'groups' | 'priority'>, nameOf: (id: 
 /** 优先级的上限（pool.MaxPriority），下限 0 */
 export const MAX_PRIORITY = 99
 
+/** 出站身份的取值（auth.Product*，见 internal/upstream/identity.go）。桌面端是缺省，后端此时不返回 product */
+export type Product = 'desktop' | 'vscode' | 'cli' | 'auto'
+
+/** 身份的中文名（账号卡片、抽屉的选择器共用） */
+export const PRODUCT_LABELS: Record<Product, string> = {
+  desktop: '桌面端',
+  vscode: 'VSCode 扩展',
+  cli: 'CLI',
+  auto: '自动换线',
+}
+
+/** 身份的一行说明：面板里选它之前该知道的事 */
+export const PRODUCT_HINTS: Record<Product, string> = {
+  desktop: '缺省。WorkBuddy 桌面端内置 CLI 的形态，唯一在 2026-10 生产实测过的指纹。',
+  vscode: 'CodeBuddy 的 VSCode 扩展形态（VSCode/<宿主版本> CodeBuddy/<扩展版本>，不带 X-Stainless-*）。指纹取自解包源码，没有真机抓包核对过，先用一个号试。',
+  cli: '纯命令行进程形态：和桌面端只差一个 acp-connection-id（不带）。',
+  auto: '先用桌面端发；被 429 限流就换 VSCode，再换 CLI（同一个号、同一条请求，不罚号也不换号）。三条线都 429 才按原来的限流处置。',
+}
+
+/** 号的身份（后端不返回时是缺省的桌面端） */
+export function productOf(a: Pick<Account, 'product'>): Product {
+  return a.product || 'desktop'
+}
+
+/** 卡片上的身份标记：桌面端不显示（缺省值不值得占位） */
+export function productLabel(a: Pick<Account, 'product'>): string {
+  const p = productOf(a)
+  return p === 'desktop' ? '' : PRODUCT_LABELS[p]
+}
+
 /** 账号表多选后的批量操作（POST /panel/api/accounts/batch），菜单按这个顺序列 */
 export type BatchAction =
   | 'liveness' | 'pause' | 'resume' | 'join_group' | 'leave_group' | 'priority' | 'block_models' | 'unblock_models' | 'revive' | 'disable' | 'remove'

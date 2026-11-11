@@ -624,6 +624,19 @@ func (p *Pool) List() []Status {
 	}
 	return out
 }
+
+// productOf 号的出站身份，桌面端（缺省）返回空串——面板不用为此多显示一列。
+// 见 auth.NormalizeProduct 与 upstream/identity.go。
+func productOf(a *auth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	if p := a.ProductValue(); p != auth.ProductDesktop {
+		return p
+	}
+	return ""
+}
+
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	st := Status{
@@ -656,16 +669,18 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		BlockedModels:            slices.Clone(e.blockedModels),
 		Groups:                   slices.Clone(e.groups),
 		Priority:                 e.priority,
-		Until:                    e.until,
-		SoftStreak:               e.softStreak,
-		ModelCosts:               p.modelCostsStatusLocked(e, now),
-		ConsecutiveFails:         e.consecutiveFails,
-		DegradeUntil:             e.degradeUntil,
-		InFlight:                 int(e.inFlight.Load()),
-		InFlightLimit:            p.inFlightLimit(e),
-		CreditsExpiryBuckets:     append([]ExpiryBucket(nil), e.expiryBuckets...),
-		BreakerFails:             e.fails,
-		BreakerUntil:             e.breakerUntil,
+		// 出站身份：只有不是桌面端时才透出（桌面端是缺省，面板不用为此多显示一列）。
+		Product:              productOf(e.a),
+		Until:                e.until,
+		SoftStreak:           e.softStreak,
+		ModelCosts:           p.modelCostsStatusLocked(e, now),
+		ConsecutiveFails:     e.consecutiveFails,
+		DegradeUntil:         e.degradeUntil,
+		InFlight:             int(e.inFlight.Load()),
+		InFlightLimit:        p.inFlightLimit(e),
+		CreditsExpiryBuckets: append([]ExpiryBucket(nil), e.expiryBuckets...),
+		BreakerFails:         e.fails,
+		BreakerUntil:         e.breakerUntil,
 	}
 	// reason 仅在冷却/禁用中透出（issue #171）：软冷却按 until 到期恢复，
 	// 但 until/coolKind/reason 字段按设计不主动清理（NoteSuccess 注释：

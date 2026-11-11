@@ -7,10 +7,12 @@
 // 账号备注、分组、优先级、不接的模型也在这里改（存在网关的号池状态里，备注各页的账号名都优先用它）。
 import { useState, type ReactNode } from 'react'
 import {
-  Button, Checkbox, CheckboxGroup, Chip, Description, Drawer, FieldError, Input, Label, Separator, Surface, Tag, TagGroup, TextField, toast, useMediaQuery,
+  Button, Checkbox, CheckboxGroup, Chip, Description, Drawer, FieldError, Input, Label, ListBox, Select, Separator, Surface, Tag, TagGroup, TextField, toast, useMediaQuery,
 } from '@heroui/react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { activeRateLimits, creditsText, livenessSummary, NOTE_MAX, rateLimitInfo, type Health } from '../../lib/accounts'
+import {
+  activeRateLimits, creditsText, livenessSummary, NOTE_MAX, PRODUCT_HINTS, PRODUCT_LABELS, productOf, rateLimitInfo, type Health, type Product,
+} from '../../lib/accounts'
 import { acct, post } from '../../lib/api'
 import { ago, dateTime, formatLatency, formatRate, formatTokenCount, fmtTok, timeMs, until } from '../../lib/format'
 import { toastError } from '../../lib/hooks'
@@ -198,6 +200,41 @@ function PriorityEditor({ a }: { a: Account }) {
   )
 }
 
+/** 改出站身份：选完即保存（只有一个下拉，不值得再点一次「保存」） */
+function IdentityEditor({ a }: { a: Account }) {
+  const patch = usePatchAccount(a.uid)
+  const current = productOf(a)
+  const save = useMutation({
+    mutationFn: (product: Product) => post<{ product: Product }>(acct(a.uid, 'product'), { product }),
+    onSuccess: (d) => {
+      // 桌面端是缺省，后端会回 desktop，前端按「不显示」处理
+      patch({ product: d.product })
+      toast.success('出站身份已保存')
+    },
+    onError: (e) => toastError(e),
+  })
+  return (
+    <Select value={current} onChange={(v) => v != null && save.mutate(String(v) as Product)} isDisabled={save.isPending} className="w-full">
+      <Label>出站身份</Label>
+      <Select.Trigger>
+        <Select.Value />
+        <Select.Indicator />
+      </Select.Trigger>
+      <Description>{PRODUCT_HINTS[current]}</Description>
+      <Select.Popover>
+        <ListBox>
+          {(Object.keys(PRODUCT_LABELS) as Product[]).map((p) => (
+            <ListBox.Item key={p} id={p} textValue={PRODUCT_LABELS[p]}>
+              {PRODUCT_LABELS[p]}
+              <ListBox.ItemIndicator />
+            </ListBox.Item>
+          ))}
+        </ListBox>
+      </Select.Popover>
+    </Select>
+  )
+}
+
 function Body({ a, health, proxy, now, busy, run, onBind }: {
   a: Account
   health: Health
@@ -263,6 +300,11 @@ function Body({ a, health, proxy, now, busy, run, onBind }: {
             </Section>
           </>
         )}
+
+        <Separator />
+        <Section title="出站身份">
+          <IdentityEditor key={a.uid} a={a} />
+        </Section>
 
         <Separator />
         <Section title="分组与优先级">

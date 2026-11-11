@@ -1236,14 +1236,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
-		if isQueueWaiting(terr) {
-			// 6020 排进容量队列了：在这个号上照官方排队，到号了原样重发；不等了才拿着最后那次 6020
-			// 往下走，由下面回 503（见 capqueue.go）。
-			a := h.capacityQueue(r.Context(), acct, body, clientIP, chatMeta, bareModel,
-				chatAttempt{rc: rc, status: status, body: respBody, err: terr, started: attemptStarted})
-			rc, status, respBody, terr, attemptStarted = a.rc, a.status, a.body, a.err, a.started
+		attempt := h.chatAttemptWith(r.Context(), acct, body, clientIP, chatMeta, bareModel, attemptStarted)
+		// 429 自动换身份（见 identity.go）：同一个号换下一条配额线重发，不罚号、不换号。
+		// 只有 product=auto 的号会进这个循环；被丢掉的每一跳都按一次失败尝试记账
+		// （上游确实被打了一次），换之前照常过一次出站节奏。
+		for n := 0; n < maxIdentitySwitches; n++ {
+			next := nextAutoIdentity(acct, chatMeta, attempt.status, attempt.err)
+			if next == "" {
+				break
+			}
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attempt.started, 0)
+			if err := h.cfg.Pacer.Wait(r.Context(), acct.UID); err != nil {
+				break // 客户端断开：不再换身份，交给下面原有分支收尾
+			}
+			chatMeta.Identity = next
+			log.Printf("INFO: [server] identity switch: acct=%s model=%s 429 → 换 %s 身份重发（第 %d 次）",
+				logfmt.Label(acct.UID, acct.Nickname), bareModel, next, n+1)
+			attempt = h.chatAttemptWith(r.Context(), acct, body, clientIP, chatMeta, bareModel, time.Now())
 		}
+		rc, status, respBody, terr := attempt.rc, attempt.status, attempt.body, attempt.err
+		attemptStarted = attempt.started
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。

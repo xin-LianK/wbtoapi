@@ -229,6 +229,12 @@ type ChatMeta struct {
 	ExpertID              string // X-Expert-Id：专家对话的专家 id；空 = 普通对话，不发
 	ExpertTeamTask        bool   // X-Expert-Team-Task：专家团（市场 expert_type=team）为 true，只和 ExpertID 一起发
 	Protected             bool   // X-Moderation-Type: ["protected"]：云端 / 付费专家的对话才发（见 MarketExpert.Protected）
+	// Model 本次请求的模型名。只有 VSCode 身份用到（X-Model-ID 与两个 monitor 时间戳），
+	// 其余身份不发这些头。
+	Model string
+	// Identity 这次出站用哪套身份（auth.Product* 之一）。空 = 按账号凭证里的 product 走；
+	// 非空是服务端按 429 自动换身份时显式指定（见 server/identity.go）。
+	Identity string
 }
 
 // ChatHeaders 设置 chat 出站请求头。形状对齐桌面端内置 CLI 的对话请求（两域都是 2.165.0，见文件头），
@@ -327,6 +333,14 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 		c.applyDesktopChatHeaders(req, a)
 	} else {
 		c.applyLegacyChatHeaders(req, a)
+	}
+	// 出站身份（见 identity.go）：桌面端就是上面的形态，另外两套在它之上改差异。
+	// 只改头，不动选号、体重写与流式链路。
+	switch c.effectiveIdentity(a, meta) {
+	case auth.ProductVSCode:
+		c.applyVSCodeChatHeaders(req, a, meta)
+	case auth.ProductCLI:
+		c.applyCLIChatIdentity(req)
 	}
 }
 

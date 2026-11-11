@@ -560,6 +560,8 @@ HTTPDNS 用腾讯云的服务，照官方的做法：
 - 模型目录 `/v3/config`：官方后台服务拉的时候带 `repos` 参数，UA 跟启动时机有关（产品配置载入前是两段的 `WorkBuddy/<版本> CLI/<cli>`），内置 CLI 也可能自己拉，哪种是常态未确认；网关用对话的 UA、不带 `repos`。
 - 小程序的埋点事件（开学季活动）照的是一次 Windows 版 PC 微信的抓包，系统写 `windows`、`machineId` 是抓包里的固定值；小程序 web-view 的 UA 却是 iPhone 微信，开学季接口和埋点请求从 1.1.2 起也用这个 UA（以前没设，发的是 Go 默认的 `Go-http-client/1.1`）。没有小程序的包、也没有 PC 微信的 UA 抓包可对照，系统和 UA 两边都没改成一致，见[官网网页的请求](#官网网页的请求)。
 
+- 出站身份有两套没实测过：VSCode 扩展形态（`product: "vscode"` / `auto` 换到那一跳）的头取自 Open VSX 上 `Tencent-Cloud.coding-copilot` 4.12.39997873 的解包源码（`UserAgentHttpInterceptor`、`CustomHeadersHttpProxyInterceptor`、`buildModelRequestHeaders`），**没有用真扩展抓包核对**；CLI 形态与桌面端只差一个 `acp-connection-id`（见[出站身份](identity.md)）。默认是桌面端，这两套只有在账号凭证里显式设 `product` 或 `auto` 时才发，出问题是 `11128`（不罚号），不会封号。线索来源：同类项目（workbuddy2api-hub）按客户端形态分了三条配额线，本仓库按它的思路自己实现了头集合。
+
 ## 官方升级后怎么核对
 
 1. 从官网下载两个域的新安装包，各自解到一个空目录，只读，不运行。

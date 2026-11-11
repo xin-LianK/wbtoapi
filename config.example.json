@@ -74,7 +74,9 @@
     "model_optimization": false,
     "tls_fingerprint": true,
     "cache_retention": "",
-    "cache_retention_models": ""
+    "cache_retention_models": "",
+    "vscode_ide_version": "",
+    "vscode_product_version": ""
   },
   "features": {
     "sanitize_blacklist_fingerprints": true
