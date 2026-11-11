@@ -27,19 +27,21 @@ import (
 
 var translators = builtin.Registry()
 
-// tracedPaths 请求日志按这些路径记账：对话链路的三个入口和 /v1/search/messages（/mcp 只在调了搜索工具时
-// 记，见 mcp.go）。
+// tracedPaths 请求日志按这些路径记账：对话链路的三个入口、Codex 的压缩入口和 /v1/search/messages
+// （/mcp 只在调了搜索工具时记，见 mcp.go）。
 var tracedPaths = map[string]bool{
-	"/v1/chat/completions": true,
-	"/v1/messages":         true,
-	"/v1/responses":        true,
-	"/v1/search/messages":  true,
+	"/v1/chat/completions":  true,
+	"/v1/messages":          true,
+	"/v1/responses":         true,
+	"/v1/responses/compact": true,
+	"/v1/search/messages":   true,
 }
 
 func (h *Handler) registerBridgeRoutes() {
 	h.mux.HandleFunc("POST /v1/messages", h.withKeyAuth(sdktranslator.FormatClaude, true, h.anthropicMessages))
 	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withKeyAuth(sdktranslator.FormatClaude, true, h.countTokens))
 	h.mux.HandleFunc("POST /v1/responses", h.withKeyAuth(sdktranslator.FormatOpenAIResponse, true, h.openaiResponses))
+	h.mux.HandleFunc("POST /v1/responses/compact", h.withKeyAuth(sdktranslator.FormatOpenAIResponse, true, h.responsesCompact))
 	h.mux.HandleFunc("POST /v1/search/messages", h.withKeyAuth(sdktranslator.FormatClaude, true, h.searchMessages))
 	h.mux.Handle("/mcp", h.withKeyAuth(sdktranslator.FormatOpenAI, true, h.mcpHandler().ServeHTTP))
 	h.mux.HandleFunc("/v1/v1/", h.doubledV1)
@@ -74,52 +76,80 @@ func (h *Handler) anthropicMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // openaiResponses POST /v1/responses（Codex CLI、OpenAI Responses SDK）。
+//
+// 压缩相关项要先在翻译层之前处理：`compaction_trigger` 和 `compaction` 都不是聊天消息，交给翻译器
+// 会被当未知项丢掉——压缩回合会变成一次普通回答（Codex 报「got 0 compaction output items」），
+// 回放会丢掉唯一一份摘要。见 compaction.go。
 func (h *Handler) openaiResponses(w http.ResponseWriter, r *http.Request) {
 	body, err := readRequestBody(r)
 	if err != nil {
 		writeBridgeError(w, sdktranslator.FormatOpenAIResponse, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	h.bridgeBody(w, r, sdktranslator.FormatOpenAIResponse, body)
+	patched, turn, err := rewriteCompactionInput(body, false)
+	if err != nil {
+		writeBridgeError(w, sdktranslator.FormatOpenAIResponse, http.StatusBadRequest, "invalid_request",
+			"request body is not valid JSON: "+err.Error())
+		return
+	}
+	if turn {
+		h.compactBody(w, r, patched, peekStream(body))
+		return
+	}
+	h.bridgeBody(w, r, sdktranslator.FormatOpenAIResponse, patched)
 }
 
 // bridgeBody 把读好的请求体翻成聊天格式交给 chatCompletions，写出时翻回客户端的协议。
 func (h *Handler) bridgeBody(w http.ResponseWriter, r *http.Request, format sdktranslator.Format, body []byte) {
+	model, routed, stream, ok := h.bridgePrologue(w, r, format, body)
+	if !ok {
+		return
+	}
+	env := translators.TranslateRequestEnvelope(r.Context(), format, sdktranslator.FormatOpenAI, sdktranslator.RequestEnvelope{
+		Format: format, Model: model, Stream: stream, Body: body,
+	})
+	if env.Err != nil {
+		writeBridgeError(w, format, http.StatusBadRequest, "invalid_request", env.Err.Error())
+		return
+	}
+	ctx := r.Context()
+	if routed {
+		ctx = context.WithValue(ctx, routedKey{}, true)
+	}
+	r2 := r.Clone(ctx)
+	r2.Body = io.NopCloser(bytes.NewReader(env.Body))
+	r2.ContentLength = int64(len(env.Body))
+	bw := &bridgeWriter{ctx: r.Context(), w: w, format: format, model: model, orig: body, chat: env.Body}
+	h.chatCompletions(bw, r2)
+	bw.finish()
+}
+
+// bridgePrologue 解析客户端请求体、按路由规则定下上游模型、对一下目录，返回路由后的模型和 stream。
+// 出错时已经把错误按入口协议写给客户端，调用方直接返回。
+func (h *Handler) bridgePrologue(w http.ResponseWriter, r *http.Request, format sdktranslator.Format, body []byte) (model string, routed, stream, ok bool) {
 	var peek struct {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
 	}
 	if err := json.Unmarshal(body, &peek); err != nil {
 		writeBridgeError(w, format, http.StatusBadRequest, "invalid_request", "request body is not valid JSON: "+err.Error())
-		return
+		return "", false, false, false
 	}
 	if peek.Model == "" {
 		writeBridgeError(w, format, http.StatusBadRequest, "invalid_request", "model is required")
-		return
+		return "", false, false, false
 	}
 	// 先路由再判断：Claude Code / Codex 不配模型时发的官方默认名靠路由规则落到上游模型
-	model, routed := h.routeModel(r.Context(), peek.Model)
+	model, routed = h.routeModel(r.Context(), peek.Model)
 	if msg := h.unknownModel(model, format); msg != "" {
 		if routed {
 			// 规则命中了但目标写错：指给用户改哪条规则，而不是让他再加规则
 			msg = "model route " + peek.Model + " -> " + model + ": the target is not in the gateway model list (GET /v1/models); fix the route in the panel (模型与档位 → 模型路由)"
 		}
 		writeBridgeError(w, format, http.StatusNotFound, "model_not_found", msg)
-		return
+		return "", false, false, false
 	}
-	env := translators.TranslateRequestEnvelope(r.Context(), format, sdktranslator.FormatOpenAI, sdktranslator.RequestEnvelope{
-		Format: format, Model: model, Stream: peek.Stream, Body: body,
-	})
-	if env.Err != nil {
-		writeBridgeError(w, format, http.StatusBadRequest, "invalid_request", env.Err.Error())
-		return
-	}
-	r2 := r.Clone(context.WithValue(r.Context(), routedKey{}, true))
-	r2.Body = io.NopCloser(bytes.NewReader(env.Body))
-	r2.ContentLength = int64(len(env.Body))
-	bw := &bridgeWriter{ctx: r.Context(), w: w, format: format, model: model, orig: body, chat: env.Body}
-	h.chatCompletions(bw, r2)
-	bw.finish()
+	return model, routed, peek.Stream, true
 }
 
 // unknownModel 模型目录里没有这个模型时返回给客户端的说明，有或判断不了时返回空串。
