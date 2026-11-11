@@ -239,6 +239,15 @@ type Config struct {
 		// TLSFingerprint 出站是否把 TLS 握手伪装成官方桌面端客户端的 ClientHello（默认 true）。
 		// 键缺席保留 true，显式 false 才关（关掉回落 Go 标准库 TLS，旧行为）。改这项要重启生效。
 		TLSFingerprint bool `json:"tls_fingerprint"`
+		// CacheRetention 出站对话请求体补的 cache_retention：""（或 off，默认）= 不补，
+		// "long" = 1 小时提示缓存，"short" = 5 分钟提示缓存。官方 CLI 2.169.0 起对非自定义模型补
+		// long；网关 UA 报的 2.165.0 不补，所以这是可选增强：1 小时缓存在部分模型上写入更贵
+		// （实测只覆盖过 deepseek），建议先用 cache_retention_models 放行几个模型试。
+		// 面板保存即生效；客户端自己带了 cache_retention 的一律不改。
+		CacheRetention string `json:"cache_retention"`
+		// CacheRetentionModels 只给这些模型补 cache_retention：逗号分隔，按模型名前缀匹配
+		// （不区分大小写），空 = 所有模型都补。
+		CacheRetentionModels string `json:"cache_retention_models"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -732,6 +741,12 @@ func applyEnv(c *Config) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.TLSFingerprint = b
 		}
+	}
+	if v := os.Getenv("WB2A_CACHE_RETENTION"); v != "" {
+		c.Upstream.CacheRetention = v
+	}
+	if v := os.Getenv("WB2A_CACHE_RETENTION_MODELS"); v != "" {
+		c.Upstream.CacheRetentionModels = v
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {

@@ -72,7 +72,9 @@
     "chat_device_token": false,
     "passthrough_ip": false,
     "model_optimization": false,
-    "tls_fingerprint": true
+    "tls_fingerprint": true,
+    "cache_retention": "",
+    "cache_retention_models": ""
   },
   "features": {
     "sanitize_blacklist_fingerprints": true

@@ -930,6 +930,12 @@ type Client struct {
 	// 面板保存配置热改，与 SanitizeFingerprints 同样用 atomic.Bool。
 	ModelOptimization atomic.Bool
 
+	// CacheRetention 出站对话请求体补 cache_retention 的规则（config upstream.cache_retention 与
+	// cache_retention_models）。nil / 零值 = 不补，这是默认：官方 2.165.0 不补这个字段，而且 1 小时
+	// 缓存在部分模型上写入更贵，只能按模型白名单放行。面板保存热改，chat 热路径并发读，用
+	// atomic.Pointer 换整份策略。
+	CacheRetention atomic.Pointer[CacheRetentionPolicy]
+
 	// OnEarning 领到积分时调用（签到、领奖、补偿、旅行、新手礼包、连登兑换，见 earning.go）；nil = 不记。
 	// 在发出第一个请求之前设好，之后不再改。
 	OnEarning func(Earning)
@@ -1162,9 +1168,20 @@ func (c *Client) prepareBody(body []byte, realm string) []byte {
 	// 不再自动补 prompt_cache_key（客户端自己带的照转）：官方客户端不发它；10-19 生产实测
 	// deepseek、glm、kimi 两域带不带都不多命中，glm 会话 id 每轮换新时带它反而更少命中。
 	// 前缀缓存靠稳定的 X-Conversation-ID，见 ChatHeaders。
-	// reasoning_summary 对齐官方 CLI，见 InjectOfficialBodyFields。
-	body = InjectOfficialBodyFields(body)
+	// reasoning_summary / cache_retention 对齐官方 CLI，见 InjectOfficialBodyFields。
+	body = InjectOfficialBodyFields(body, c.cacheRetentionPolicy())
 	return body
+}
+
+// cacheRetentionPolicy 当前的 cache_retention 规则；没设置（含零值 Client）就是不补。
+func (c *Client) cacheRetentionPolicy() CacheRetentionPolicy {
+	if c == nil {
+		return CacheRetentionPolicy{}
+	}
+	if p := c.CacheRetention.Load(); p != nil {
+		return *p
+	}
+	return CacheRetentionPolicy{}
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。

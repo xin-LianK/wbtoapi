@@ -194,6 +194,20 @@ export const CONFIG_TABS: ConfigTab[] = [
           toggle('sanitize_blacklist_fingerprints', ['features', 'sanitize_blacklist_fingerprints'], '出站请求指纹脱敏'),
           toggle('model_optimization', ['upstream', 'model_optimization'], '允许上游用对话做模型优化',
             '关闭时每条对话都声明不允许（X-Private-Data: true），和官方桌面端默认一样；打开等于在桌面端打开「模型优化」：个人号允许，企业号仍不允许'),
+          {
+            name: 'cache_retention', path: ['upstream', 'cache_retention'], label: '提示缓存（cache_retention）', kind: 'select',
+            options: [
+              { id: 'off', label: 'off — 不补这个字段（默认）' },
+              { id: 'long', label: 'long — 1 小时提示缓存' },
+              { id: 'short', label: 'short — 5 分钟提示缓存' },
+            ],
+            hint: '官方 CLI 2.169 起对非自定义模型补 long，网关默认不补（对的是 2.165）。1 小时缓存在部分模型上写入更贵，建议先用下面一行放行几个模型试；客户端自己带了这个字段的一律不改',
+          },
+          {
+            name: 'cache_retention_models', path: ['upstream', 'cache_retention_models'], label: '缓存只给这些模型', kind: 'text',
+            placeholder: '留空 = 所有模型；如 deepseek-, glm-', clearable: true,
+            hint: '逗号分隔的模型名前缀，不区分大小写；留空时上面一开就所有模型都补',
+          },
           toggle('session_sticky_enabled', ['session_sticky', 'enabled'], '会话粘性路由'),
         ],
       },

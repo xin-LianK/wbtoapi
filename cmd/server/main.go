@@ -239,6 +239,7 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	up.ChatDeviceToken = cfg.Upstream.ChatDeviceToken
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
 	up.ModelOptimization.Store(cfg.Upstream.ModelOptimization)
+	applyCacheRetention(up, cfg.Upstream.CacheRetention, cfg.Upstream.CacheRetentionModels)
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -932,6 +933,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.ModelOptimization.Store(newCfg.Upstream.ModelOptimization)
+	applyCacheRetention(up, newCfg.Upstream.CacheRetention, newCfg.Upstream.CacheRetentionModels)
 	upstream.SetTLSMimic(newCfg.Upstream.TLSFingerprint) // TLS 指纹伪装开关（atomic，新建连接起用）
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
@@ -978,6 +980,20 @@ func applyCNChatBase(up *upstream.Client, cfg *Config) {
 	if cfg.CN.ChatBase != "" {
 		up.ChatBaseCN = cfg.CN.ChatBase
 	}
+}
+
+// applyCacheRetention 把 upstream.cache_retention / cache_retention_models 装到出站 client 上（面板保存
+// 热生效）。值写错不算致命：记一行日志、这次按「不补」处理，别把整个网关拦在启动上。
+func applyCacheRetention(up *upstream.Client, retention, models string) {
+	pol, err := upstream.ParseCacheRetentionPolicy(retention, models)
+	if err != nil {
+		log.Printf("配置 WARN %v，这次按不补 cache_retention 处理", err)
+	}
+	if pol.Retention == "" {
+		up.CacheRetention.Store(nil)
+		return
+	}
+	up.CacheRetention.Store(&pol)
 }
 
 // logStores 日志留存要热改的几样：请求记录归档、任务日志、系统日志、积分获取流水、用量统计。零值什么都不改。
