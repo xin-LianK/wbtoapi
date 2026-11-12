@@ -17,6 +17,7 @@
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer | OpenAI 兼容对话补全，支持流式与非流式、工具调用、图片输入、推理参数。网关不限制请求体大小，超限由上游返回 |
+| `POST /v1/completions` | Bearer | OpenAI legacy 文本补全（`prompt` → 一条 user 消息走 chat 流水线，响应翻回 `text_completion`）。只支持字符串 prompt，`suffix` / `logprobs` / `best_of` / 多 prompt / token id 会明确回 400；`max_tokens` 缺省 16，`echo` 在响应侧拼回 prompt 原文 |
 | `POST /v1/messages` | Bearer 或 `x-api-key` | Anthropic Messages 格式（Claude Code），见[下节](#claude-code-与-codex-入口) |
 | `POST /v1/messages/count_tokens` | Bearer 或 `x-api-key` | 按字数估算输入 token，不发上游 |
 | `POST /v1/responses` | Bearer 或 `x-api-key` | OpenAI Responses 格式（Codex） |

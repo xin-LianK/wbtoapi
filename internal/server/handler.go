@@ -196,6 +196,7 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux(), turns: session.NewTurnIDs()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/completions", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.completions))
 	h.registerBridgeRoutes()
 	h.mux.HandleFunc("GET /v1/models", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))

@@ -31,6 +31,7 @@ var translators = builtin.Registry()
 // （/mcp 只在调了搜索工具时记，见 mcp.go）。
 var tracedPaths = map[string]bool{
 	"/v1/chat/completions":  true,
+	"/v1/completions":       true,
 	"/v1/messages":          true,
 	"/v1/responses":         true,
 	"/v1/responses/compact": true,
