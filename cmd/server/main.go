@@ -433,6 +433,10 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 		log.Printf("[notify] 告警通道已启用：%s", notifier.Format())
 	}
 
+	// 状态类阈值巡检（可用号 / 全池积分 / 密钥用量 / 代理到期）。见 internal/alerts。
+	// 各项阈值 <=0 时不检查，默认配置不会产生任何消息。
+	alertChecker := newAlertChecker(cfg, p, keys, proxyReg, notifier)
+
 	// 本地备份（见 internal/backup）。只收凭证、状态 JSON 与配置；
 	// request-logs 的 JSONL 归档不进包（体积远大于其余全部数据且可再生）。
 	backupDir := cfg.Backup.Dir
@@ -516,7 +520,12 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 			return Load(cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, cfgPath, live, p, up, sch, pacer, logs)
+			restart, err := saveConfig(raw, cfgPath, live, p, up, sch, pacer, logs)
+			if err == nil {
+				// 阈值告警跟着配置热生效：改完阈值不用重启就能验到效果。
+				reloadAlertConfig(alertChecker, cfgPath)
+			}
+			return restart, err
 		},
 		// 积分历史账本（只读展示；写入由上面的余额观察者完成）。
 		CreditHistory: creditHist,
@@ -611,6 +620,8 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	}
 	go sch.Run(ctx)
 	sch.SetNotifier(notifier)
+	// 阈值告警巡检：启动后第一轮立即体检，之后按 notify.alerts.interval_minutes。
+	go alertChecker.Run(ctx)
 	// 定时备份（interval<=0 或未启用时 Start 立即返回，不起 goroutine）。
 	backups.Start(ctx, time.Duration(cfg.Backup.IntervalHours)*time.Hour)
 	// 后台版本检查（首次立即查一次，之后按 update.check_hours 周期）。

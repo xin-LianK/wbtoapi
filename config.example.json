@@ -87,13 +87,21 @@
     "alias": {}
   },
   "notify": {
-    "_comment": "出站告警，缺省 enabled=true 且 format 缺省 bark（个人自用最顺手），配好 url 前静默（不发任何请求）。format: bark(iOS，url 填 https://api.day.app/<你的device_key>) / wecom(企业微信群机器人) / telegram(token+chat_id) / generic(裸 JSON POST)。只为失败告警（签到异常、账号被禁用），全成功不打扰。",
+    "_comment": "出站告警，缺省 enabled=true 且 format 缺省 bark（个人自用最顺手），配好 url 前静默（不发任何请求）。format: bark(iOS，url 填 https://api.day.app/<你的device_key>) / wecom(企业微信群机器人) / telegram(token+chat_id) / generic(裸 JSON POST)。只为失败告警（签到异常、账号被禁用），全成功不打扰。alerts 是状态类阈值巡检：各项阈值 <=0 = 不检查该项，默认全部关闭（升级后不会突然开始发消息）。key_quota_percent 填百分数（80 = 80%），日限比今日用量、总量限比累计用量。",
     "enabled": true,
     "url": "",
     "format": "bark",
     "token": "",
     "chat_id": "",
-    "min_interval_minutes": 10
+    "min_interval_minutes": 10,
+    "alerts": {
+      "enabled": false,
+      "interval_minutes": 5,
+      "min_healthy_accounts": 0,
+      "min_total_credits": 0,
+      "key_quota_percent": 0,
+      "proxy_expiry_days": 0
+    }
   },
   "backup": {
     "_comment": "本地备份（缺省开启）：auths/*.json + data/*.json + config.json 打成 tar.gz。dir 空 = <state_file 目录>/backups。interval_hours<=0 时不自动备份（仍可在面板手动触发）。",

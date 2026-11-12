@@ -421,6 +421,26 @@ type Config struct {
 		ChatID string `json:"chat_id"`
 		// MinIntervalMinutes 同类消息去重窗口（分钟），<=0 回落 10。
 		MinIntervalMinutes int `json:"min_interval_minutes"`
+		// Alerts 状态类阈值巡检（可用号、全池积分、密钥用量、代理到期），见 internal/alerts。
+		//
+		// 与上面的事件类告警互补：签到失败、号被禁用当场就发；而"号快没了""积分快见底"
+		// 没有哪个请求会触发，只能靠周期巡检。各项阈值 <=0 = **不检查该项**，
+		// 所以默认配置不产生任何告警。
+		Alerts struct {
+			// Enabled 总开关。关掉后不再巡检（配置里留着阈值也不生效）。
+			Enabled bool `json:"enabled"`
+			// IntervalMinutes 巡检间隔（分钟），<=0 回落 5。
+			IntervalMinutes int `json:"interval_minutes"`
+			// MinHealthyAccounts 可用账号数下限：低于它告警（0 = 不检查）。
+			MinHealthyAccounts int `json:"min_healthy_accounts"`
+			// MinTotalCredits 可用账号剩余积分合计下限（0 = 不检查）。已禁用的号不计入。
+			MinTotalCredits int64 `json:"min_total_credits"`
+			// KeyQuotaPercent 客户端密钥用量占比阈值（百分数，如 80 表示 80%；0 = 不检查）。
+			// 日限与总量限里取最紧的一项。
+			KeyQuotaPercent float64 `json:"key_quota_percent"`
+			// ProxyExpiryDays 代理到期提醒窗口（天，0 = 不检查）。
+			ProxyExpiryDays int `json:"proxy_expiry_days"`
+		} `json:"alerts"`
 	} `json:"notify"`
 
 	// Backup 本地备份（auths + data + config 打包）。
@@ -1045,6 +1065,11 @@ func (c *Config) normalize() error {
 	}
 	if c.Notify.MinIntervalMinutes <= 0 {
 		c.Notify.MinIntervalMinutes = 10
+	}
+	// 阈值巡检的间隔缺省 5 分钟：比签到/余额刷新轻，出问题时也足够及时。
+	// 阈值项本身不设缺省（0 = 不检查），老配置升级后行为不变。
+	if c.Notify.Alerts.IntervalMinutes <= 0 {
+		c.Notify.Alerts.IntervalMinutes = 5
 	}
 	if c.Backup.Keep <= 0 {
 		c.Backup.Keep = 7

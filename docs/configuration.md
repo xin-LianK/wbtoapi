@@ -178,6 +178,29 @@
 
 一般在面板「模型与档位 → 对外隐藏的模型」里编辑，加一项、删一项都立即生效。
 
+### 告警
+
+`notify` 是出站告警（webhook / 推送）。通道与去重：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `notify.enabled` | `true` | 总开关。`url`（telegram 是 `token`+`chat_id`）没配时静默，不发任何请求 |
+| `notify.format` | `bark` | `bark`（iOS，`url` 填 `https://api.day.app/<device_key>`）/ `wecom`（企业微信群机器人）/ `telegram` / `generic`（裸 JSON POST） |
+| `notify.min_interval_minutes` | `10` | 同一条消息的去重窗口。定时任务每轮都会重跑，没有去重会刷屏 |
+
+事件类告警（签到异常、账号被禁用）在各自的失败分支当场发。**状态类**告警靠 `notify.alerts` 周期巡检——可用号快没了、积分快见底这类事情没有哪个请求会触发，不巡检就没人知道：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `notify.alerts.enabled` | `false` | 巡检总开关（`notify.enabled` 关掉时也等于关掉：没有出口） |
+| `notify.alerts.interval_minutes` | `5` | 巡检间隔，最小 1 分钟。启动后第一轮立即体检 |
+| `notify.alerts.min_healthy_accounts` | `0` | 可用账号数低于它就告警（口径同面板「概况」的可用数）；`0` = 不检查。可用数为 0 时按 error 级别发 |
+| `notify.alerts.min_total_credits` | `0` | 可用账号剩余积分合计低于它就告警（已禁用的号不计入）；`0` = 不检查 |
+| `notify.alerts.key_quota_percent` | `0` | 客户端密钥用量达到这个百分比就告警。日限比「今日用量」，总量限比「累计用量」，取最紧的一项；`0` = 不检查 |
+| `notify.alerts.proxy_expiry_days` | `0` | 代理在这个天数内到期就告警，已到期的单独点名；`0` = 不检查 |
+
+阈值全部默认 `0`（不检查），所以升级后不会突然开始发消息。各项都要等 `notify.format` 的通路配好才发得出去。改完在面板保存配置即生效，不用重启。
+
 ### 会话粘性与 Redis
 
 | 字段 | 默认 | 说明 |
