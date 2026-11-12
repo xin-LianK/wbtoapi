@@ -109,7 +109,7 @@ func TestCheckKeys(t *testing.T) {
 		t.Errorf("只该列出超阈值的密钥: %s", m.Text)
 	}
 	// 占比高的排前面
-	if strings.Index(m.Text, "92%") < 0 {
+	if !strings.Contains(m.Text, "92%") {
 		t.Errorf("正文应含占比: %s", m.Text)
 	}
 }
