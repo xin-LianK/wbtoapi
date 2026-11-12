@@ -3,8 +3,21 @@
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
 
 // 请求指标（/panel/api/request_metrics、request_logs）的展示口径，与上游旧面板一致（见 requests.test.ts）。
+import { api } from './api'
 import { fmtMs, fmtTok } from './format'
-import type { RequestEvent } from './types'
+import type { ReplayResult, RequestEvent } from './types'
+
+/**
+ * 复测一个模型（请求记录每行的「复测」）。
+ *
+ * 不是"重放原请求"：请求记录按设计只存元数据，不存提示词与正文。复测拿这条记录的
+ * 模型名再发一条最小请求（内容 hi、max_tokens 16），走真实选号与换号链路，
+ * 用来判断"这个模型现在通不通、走的哪个号"。
+ */
+export async function replayModel(model: string): Promise<ReplayResult> {
+  const d = await api<{ result: ReplayResult }>('requests/replay', { method: 'POST', body: { model } })
+  return d.result
+}
 
 export const OUTCOME_LABEL: Record<string, string> = {
   success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断',

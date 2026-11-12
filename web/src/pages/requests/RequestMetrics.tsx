@@ -17,13 +17,13 @@ import { dayClock, fmtMs, fmtTok } from '../../lib/format'
 import { useNow } from '../../lib/hooks'
 import { useAccountNames, useRequestMetrics } from '../../lib/queries'
 import {
-  OUTCOME_LABEL, cacheRateText, matchRequest, mergeRequests, outcomeLevel, recentCount, requestCredit, requestLogText,
+  OUTCOME_LABEL, cacheRateText, matchRequest, mergeRequests, outcomeLevel, recentCount, replayModel, requestCredit, requestLogText,
   requestTokens,
 } from '../../lib/requests'
 import { retentionText, storageProblem, storageSummary } from '../../lib/storage'
 import { useRequestStream } from '../../lib/stream'
 import { initialRange } from '../../lib/timerange'
-import type { RequestEvent, RequestMetrics as Metrics } from '../../lib/types'
+import type { ReplayResult, RequestEvent, RequestMetrics as Metrics } from '../../lib/types'
 import { BusyButton, Empty, ErrorBox, Loaded } from '../../components/Feedback'
 import { Hint } from '../../components/Hint'
 import { InfoTip, Panel } from '../../components/Panel'
@@ -67,6 +67,45 @@ function Tokens({ e }: { e: RequestEvent }) {
 }
 
 const dash = <span className="text-muted">—</span>
+
+/**
+ * 复测：拿这条记录的模型现在再发一条最小请求（内容 hi、max_tokens 16）。
+ *
+ * 请求记录不存提示词与正文，所以这里复现的是**模型与链路**，不是原来的问题内容：
+ * 失败记录里最常见的偶发 429、号在冷却、全池不可用，复测一下就分得清。
+ * 结果就地显示，不写回这条历史记录（那一条是当时发生的事实，不该被覆盖）。
+ */
+function Replay({ model }: { model?: string }) {
+  const [busy, setBusy] = useState(false)
+  const [res, setRes] = useState<ReplayResult | null>(null)
+  const [err, setErr] = useState('')
+  if (!model) return dash
+  const run = async () => {
+    setBusy(true)
+    setErr('')
+    setRes(null)
+    try {
+      setRes(await replayModel(model))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <span className="inline-flex items-center gap-2">
+      <BusyButton size="sm" variant="secondary" busy={busy} onPress={() => void run()}>复测</BusyButton>
+      {res && (res.ok ? (
+        <Hint tip={[res.reply, res.account && '账号 ' + res.account].filter(Boolean).join('\n') || '通'} className="whitespace-nowrap text-xs text-success">
+          通 · {fmtMs(res.duration_ms)}
+        </Hint>
+      ) : (
+        <Hint tip={res.error || '不通'} className="whitespace-nowrap text-xs text-danger">{res.status || '—'} 不通</Hint>
+      ))}
+      {err && <span className="whitespace-nowrap text-xs text-danger">{err}</span>}
+    </span>
+  )
+}
 
 export function RequestMetrics() {
   const names = useAccountNames()
@@ -186,6 +225,7 @@ export function RequestMetrics() {
                   <Table.Column className="text-right">Token</Table.Column>
                   <Table.Column className="text-right">积分</Table.Column>
                   <Table.Column>请求 ID</Table.Column>
+                  <Table.Column>复测</Table.Column>
                 </Table.Header>
                 <Table.Body>
                   {shown.map((e, i) => (
@@ -209,6 +249,7 @@ export function RequestMetrics() {
                       <Table.Cell className="text-right font-mono tabular-nums"><Tokens e={e} /></Table.Cell>
                       <Table.Cell className="whitespace-nowrap text-right font-mono tabular-nums">{e.credit_known ? requestCredit(e).replace(' credit', '') : '—'}</Table.Cell>
                       <Table.Cell><span className="select-all font-mono text-xs text-muted">{e.request_id || '—'}</span></Table.Cell>
+                      <Table.Cell><Replay model={e.model} /></Table.Cell>
                     </Table.Row>
                   ))}
                 </Table.Body>
@@ -240,6 +281,7 @@ export function RequestMetrics() {
                   <div className="break-all font-mono text-xs text-muted">{[e.client_ip, e.user_agent].filter(Boolean).join(' · ')}</div>
                 )}
                 {e.request_id && <span className="select-all break-all font-mono text-xs text-muted">{e.request_id}</span>}
+                <Replay model={e.model} />
               </li>
             ))}
           </ul>

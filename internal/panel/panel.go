@@ -16,6 +16,7 @@
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -113,6 +114,10 @@ type Config struct {
 	// 都 false = 显式关闭。缺省 enabled=true 之后这个区分是必须的，
 	// 否则面板会对着一个发不出消息的通道显示「已启用」。
 	NotifyConfigured bool
+
+	// Replay 用指定模型重发一条最小请求（请求记录 → 复测）。
+	// nil = 该按钮不可用（面板接口返回 501）。
+	Replay func(ctx context.Context, model string) (ReplayResult, error)
 
 	// Backup 本地备份器（nil = 未启用）。
 	Backup *backup.Manager
@@ -242,6 +247,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_stream", p.withAuth(p.requestStream))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
+	p.mux.HandleFunc("POST /panel/api/requests/replay", p.withAuth(p.requestReplay))
 	p.mux.HandleFunc("GET /panel/api/credit_history", p.withAuth(p.creditHistory))
 	p.mux.HandleFunc("GET /panel/api/credit_log", p.withAuth(p.creditLog))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))

@@ -576,6 +576,20 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	// 面板聊天测试台：把真实 chat 流水线注入面板（panel 先于 handler 构造，
 	// 只能用 setter 补这一步）。
 	pn.SetChatEndpoint(h.ChatEndpoint())
+	// 面板「请求记录 → 复测」：用记录的模型走一次真实 chat 流水线（正常选号、
+	// 计入用量与请求记录），让运维不必回客户端就能判断"现在这个模型还通不通"。
+	pn.SetReplay(func(ctx context.Context, model string) (panel.ReplayResult, error) {
+		out, err := h.ReplayModel(ctx, model)
+		if err != nil {
+			return panel.ReplayResult{}, err
+		}
+		return panel.ReplayResult{
+			OK: out.OK, Status: out.Status, Model: out.Model, Reply: out.Reply,
+			Error: out.Error, Account: out.Account, TTFBMs: out.TTFBMs,
+			DurationMs: out.DurationMs, Credit: out.Credit,
+			At: out.At.Format(time.RFC3339),
+		}, nil
+	})
 	// 测活走 handler 的对话链路（面板单测、全部测活、定时测活都经 scheduler 调它）。
 	sch.SetLiveness(h.TestAccount)
 

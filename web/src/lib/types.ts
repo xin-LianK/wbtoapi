@@ -523,6 +523,25 @@ export interface RequestMetrics {
   archive?: ArchiveStats
 }
 
+/**
+ * 请求记录「复测」的结果：拿这条记录的模型名现在再发一条最小请求。
+ * 请求记录本身不存提示词与响应正文，所以复测复现的是模型与链路，不是原问题内容。
+ */
+export interface ReplayResult {
+  ok: boolean
+  status: number
+  model: string
+  /** 上游回复的文字片段（没有正文时是思考内容） */
+  reply?: string
+  error?: string
+  /** 实际服务的账号标签 */
+  account?: string
+  ttfb_ms?: number
+  duration_ms: number
+  credit?: number
+  at?: string
+}
+
 /** 进程级计数（实时流每次都带回来，表头的汇总因此保持连续） */
 export interface RequestTotals {
   completed: number
