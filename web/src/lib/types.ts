@@ -49,6 +49,8 @@ export interface Account {
   credits_expiring?: number
   credits_earliest_expiry?: string
   credits_earliest_remaining?: number
+  /** 全部未来到期批次按自然日聚合（升序）；路由取最早一批，面板角标用它说明「后面还有几批」 */
+  credits_expiry_buckets?: { date: string; expires_at?: string; remain: number }[]
   cooling: boolean
   cool_kind?: string
   cool_remaining_sec?: number

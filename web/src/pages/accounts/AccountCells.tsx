@@ -152,11 +152,36 @@ export function RateLimitList({ a, now }: { a: Account; now: number }) {
   )
 }
 
-/** 最早到期的一批积分：「3 天后到期 120 分」（路由按最早到期优先选号，这里能看出为什么选它） */
-export function EarliestExpiry({ a, now }: { a: Account; now: number }) {
+/** 积分批次：按到期时间升序，只保留还没过期、还有剩余的批。优先用后端按日聚合的
+ *  credits_expiry_buckets；老状态文件（或后端只回最早一批）时退回 credits_earliest_*。 */
+function creditBatches(a: Account, now: number): { at: number; remain: number }[] {
+  const out: { at: number; remain: number }[] = []
+  for (const b of a.credits_expiry_buckets ?? []) {
+    const at = timeMs(b.expires_at) ?? (b.date ? Date.parse(b.date) : null)
+    if (at == null || at <= now || !(b.remain > 0)) continue
+    out.push({ at, remain: b.remain })
+  }
+  out.sort((x, y) => x.at - y.at)
+  if (out.length) return out
   const at = timeMs(a.credits_earliest_expiry)
-  if (at == null || at <= now || !a.credits_earliest_remaining) return null
-  return <span className="text-xs text-muted">{until(at, now)}到期 {fmtTok(a.credits_earliest_remaining)} 分</span>
+  if (at == null || at <= now || !a.credits_earliest_remaining) return []
+  return [{ at, remain: a.credits_earliest_remaining }]
+}
+
+/** 最早到期的一批积分：「3 天后到期 120 分 · 另有 2 批 80 分」（路由按最早到期优先选号，
+ *  这里能看出为什么选它，也提醒后面还有几批会一起作废）。 */
+export function EarliestExpiry({ a, now }: { a: Account; now: number }) {
+  const batches = creditBatches(a, now)
+  if (!batches.length) return null
+  const [first, ...rest] = batches
+  const restSum = rest.reduce((s, b) => s + b.remain, 0)
+  const tip = batches.map((b) => `${until(b.at, now)}到期 ${fmtTok(b.remain)} 分`).join('；')
+  return (
+    <span className="text-xs text-muted" title={tip}>
+      {until(first.at, now)}到期 {fmtTok(first.remain)} 分
+      {rest.length > 0 && <> · 另有 {rest.length} 批 {fmtTok(restSum)} 分</>}
+    </span>
+  )
 }
 
 export function CreditsCell({ a, poolMax, now }: { a: Account; poolMax: number; now: number }) {
