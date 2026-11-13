@@ -580,3 +580,143 @@ func TestPrepareBodyDropsReasoningTextParts(t *testing.T) {
 		}
 	}
 }
+
+// TestHardenToolSchemaKeywords 工具 schema 约束关键字的类型回正（11129 实案：客户端把
+// 数字/布尔序列化成字符串，上游 Go 校验器整条 400）。覆盖数字类、布尔类、字符串类、
+// enum、additionalProperties、嵌套（properties/items/allOf/$defs）、属性名与 default
+// 不被误改、幂等、与 sanitize 开关无关。
+func TestHardenToolSchemaKeywords(t *testing.T) {
+	// at 按 key/下标路径取值，取不到直接失败。
+	at := func(t *testing.T, obj map[string]any, path ...any) any {
+		t.Helper()
+		var cur any = obj
+		for _, p := range path {
+			switch k := p.(type) {
+			case string:
+				m, ok := cur.(map[string]any)
+				if !ok {
+					t.Fatalf("path %v: want object, got %T", path, cur)
+				}
+				cur = m[k]
+			case int:
+				l, ok := cur.([]any)
+				if !ok || k >= len(l) {
+					t.Fatalf("path %v: bad array at %T", path, cur)
+				}
+				cur = l[k]
+			}
+		}
+		return cur
+	}
+
+	// 每个参数都带一处「字符串化的类型」，并留一条正常字段做对照。
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"n": map[string]any{"type": "integer", "minimum": "1", "maximum": "10", "default": nil},
+			"s": map[string]any{"type": "string", "minLength": "1", "maxLength": "9", "description": 42},
+			"a": map[string]any{"type": "array", "minItems": "2", "uniqueItems": "true",
+				"items": map[string]any{"type": "string", "pattern": "^a$"}},
+			"e": map[string]any{"type": "string", "enum": "a,b"},
+			"o": map[string]any{"type": "object", "additionalProperties": "false",
+				"properties": map[string]any{"minimum": map[string]any{"type": "number", "multipleOf": "0.5"}}},
+			"bad": map[string]any{"type": "number", "exclusiveMinimum": "not-a-number"},
+		},
+		"allOf":    []any{map[string]any{"properties": map[string]any{"x": map[string]any{"maximum": "3"}}}},
+		"$defs":    map[string]any{"d": map[string]any{"type": "integer", "exclusiveMaximum": "8"}},
+		"required": []any{"n"},
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":    "deepseek-v4.1-flash",
+		"messages": []any{map[string]any{"role": "user", "content": `{"minimum":"1"}`}},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "t", "parameters": params}},
+			map[string]any{"name": "bare", "parameters": map[string]any{"type": "object", "maxProperties": "3"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	props := []any{"tools", 0, "function", "parameters", "properties"}
+	for _, sanitize := range []bool{false, true} {
+		out := PrepareBodyOptWithEfforts(body, sanitize, nil)
+		obj, err := decodeBody(out)
+		if err != nil {
+			t.Fatalf("sanitize=%v unmarshal: %v", sanitize, err)
+		}
+		cases := []struct {
+			name string
+			path []any
+			want any
+		}{
+			{"minimum 字符串回正", append(props, "n", "minimum"), float64(1)},
+			{"maximum 字符串回正", append(props, "n", "maximum"), float64(10)},
+			{"minLength 字符串回正", append(props, "s", "minLength"), float64(1)},
+			{"minItems 字符串回正", append(props, "a", "minItems"), float64(2)},
+			{"uniqueItems 字符串回正", append(props, "a", "uniqueItems"), true},
+			{"description 数字转字符串", append(props, "s", "description"), "42"},
+			{"嵌套 multipleOf 回正", append(props, "o", "properties", "minimum", "multipleOf"), float64(0.5)},
+			{"additionalProperties 字符串回正", append(props, "o", "additionalProperties"), false},
+			{"allOf 内 maximum 回正", []any{"tools", 0, "function", "parameters", "allOf", 0, "properties", "x", "maximum"}, float64(3)},
+			{"$defs 内 exclusiveMaximum 回正", []any{"tools", 0, "function", "parameters", "$defs", "d", "exclusiveMaximum"}, float64(8)},
+			{"裸 parameters 也纠", []any{"tools", 1, "parameters", "maxProperties"}, float64(3)},
+			// 属性名恰好叫 minimum 时不能被当成关键字改写（值仍是子 schema）
+			{"属性名不当关键字", append(props, "o", "properties", "minimum", "type"), "number"},
+			{"正常字段不动", append(props, "n", "type"), "integer"},
+		}
+		for _, tc := range cases {
+			if got := at(t, obj, tc.path...); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("sanitize=%v %s: got %#v (%T), want %#v", sanitize, tc.name, got, got, tc.want)
+			}
+		}
+		// enum 非数组直接删（保留错误值只会继续 400）
+		if _, has := at(t, obj, append(props, "e")...).(map[string]any)["enum"]; has {
+			t.Errorf("sanitize=%v: 非数组 enum 未删除", sanitize)
+		}
+		// 解析不出来的数字关键字删除
+		if _, has := at(t, obj, append(props, "bad")...).(map[string]any)["exclusiveMinimum"]; has {
+			t.Errorf("sanitize=%v: 不可解析的 exclusiveMinimum 未删除", sanitize)
+		}
+		// default:null 是合法写法，不能顺手删
+		if v, has := at(t, obj, append(props, "n")...).(map[string]any)["default"]; !has || v != nil {
+			t.Errorf("sanitize=%v: default:null 被误改（has=%v v=%#v）", sanitize, has, v)
+		}
+		// 消息正文里的同形字符串不碰（只动 tools 子树）
+		msg := at(t, obj, "messages", 0, "content")
+		if msg != `{"minimum":"1"}` {
+			t.Errorf("sanitize=%v: 消息正文被改写: %#v", sanitize, msg)
+		}
+		// 幂等：再跑一遍输出逐字节相同
+		again := PrepareBodyOptWithEfforts(out, sanitize, nil)
+		if string(again) != string(out) {
+			t.Errorf("sanitize=%v: 不幂等\nfirst=%s\nagain=%s", sanitize, out, again)
+		}
+	}
+}
+
+// TestPrepareBodyKeepsValidToolSchema 已经合规的 schema 一个字节都不改：字符串化关键字
+// 回正只该发生在违规节点上，不能顺手重排/丢字段。
+func TestPrepareBodyKeepsValidToolSchema(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object",` +
+		`"properties":{"n":{"type":"integer","minimum":1,"maximum":10,"enum":[1,2]}},` +
+		`"required":["n"],"additionalProperties":false}}}]}`
+	out := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+	obj, err := decodeBody(out)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	fn := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	params := fn["parameters"].(map[string]any)
+	if _, has := params["additionalProperties"]; !has {
+		t.Fatalf("合规的 additionalProperties:false 被删")
+	}
+	n := params["properties"].(map[string]any)["n"].(map[string]any)
+	if n["minimum"] != float64(1) || n["maximum"] != float64(10) {
+		t.Fatalf("合规数字被改写: %#v", n)
+	}
+	if _, has := n["enum"]; !has {
+		t.Fatalf("合规 enum 被删")
+	}
+}

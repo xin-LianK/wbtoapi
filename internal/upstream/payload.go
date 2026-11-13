@@ -11,6 +11,7 @@ package upstream
 import (
 	"encoding/json"
 	"log"
+	"strconv"
 	"strings"
 )
 
@@ -54,6 +55,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	}
 	normalizeToolChoice(obj)
 	normalizeToolPatterns(obj)
+	hardenToolSchemaKeywords(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	dropReasoningContentParts(obj)
@@ -492,4 +494,187 @@ func unescapePatternLiteralEscapes(node any) {
 			unescapePatternLiteralEscapes(v)
 		}
 	}
+}
+
+// 工具 schema 里这些关键字上游要求固定类型（数字 / 布尔 / 字符串 / 数组）。客户端
+// 把数字序列化成字符串（"minimum":"1"）、布尔写成字符串（"uniqueItems":"true"）、
+// 或给 enum 一个非数组值时，上游 Go 校验器直接 400 code=11129 invalid function call
+// parameters，整条请求被拒——换账号无用（schema 级拒绝），只能在发送前修。
+//
+// 与 normalizeToolPatterns 同一立场：这是「让请求通过」，不是脱敏，故与 sanitize
+// 开关无关。纠正口径只做**类型回正**，不做语义猜测：解析不出来的值直接删（保留
+// 错误值只会继续 400，删掉等于放弃这条约束、请求可以通过）。
+var (
+	// schemaNumericKeywords 必须是数字的约束关键字。
+	schemaNumericKeywords = []string{
+		"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+		"minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties",
+	}
+	// schemaBoolKeywords 必须是布尔的关键字。
+	schemaBoolKeywords = []string{"uniqueItems", "deprecated", "readOnly", "writeOnly"}
+	// schemaTextKeywords 必须是字符串的关键字（数字/布尔写法无害可转，对象数组只能删）。
+	schemaTextKeywords = []string{"description", "title", "format", "pattern"}
+	// schemaChildMapKeywords 值是「名字 → 子 schema」映射的关键字（名字本身不是关键字，
+	// 只往下递归值，不对属性名做任何纠正）。
+	schemaChildMapKeywords = []string{"properties", "patternProperties", "$defs", "definitions"}
+	// schemaChildKeywords 值是子 schema 或子 schema 数组的关键字。
+	schemaChildKeywords = []string{
+		"items", "additionalItems", "not", "if", "then", "else",
+		"contains", "propertyNames", "unevaluatedProperties", "unevaluatedItems",
+		"allOf", "anyOf", "oneOf", "prefixItems",
+	}
+)
+
+// hardenToolSchemaKeywords 纠正 tools 子树里 schema 约束关键字的类型（11129 实案：
+// 客户端把 "minimum" 写成 "1" 这类字符串，整条请求被上游 Go 校验器拒收）。
+//
+// 只动 tools[].function.parameters 与裸 tools[].parameters；幂等（已合规的节点一个
+// 字节都不改），不碰消息正文、不碰属性名、不碰 default（default:null 是合法写法）。
+func hardenToolSchemaKeywords(obj map[string]any) {
+	rawTools, ok := obj["tools"].([]any)
+	if !ok {
+		return
+	}
+	for _, raw := range rawTools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fn, ok := tool["function"].(map[string]any); ok {
+			hardenSchemaNode(fn["parameters"])
+		}
+		hardenSchemaNode(tool["parameters"])
+	}
+}
+
+// hardenSchemaNode 递归纠正单个 schema 节点的关键字类型。
+func hardenSchemaNode(node any) {
+	m, ok := node.(map[string]any)
+	if !ok {
+		return
+	}
+	for _, k := range schemaNumericKeywords {
+		if v, has := m[k]; has {
+			if nv, ok := coerceSchemaNumber(v); ok {
+				m[k] = nv
+			} else {
+				delete(m, k)
+			}
+		}
+	}
+	for _, k := range schemaBoolKeywords {
+		if v, has := m[k]; has {
+			if nv, ok := coerceSchemaBool(v); ok {
+				m[k] = nv
+			} else {
+				delete(m, k)
+			}
+		}
+	}
+	for _, k := range schemaTextKeywords {
+		if v, has := m[k]; has {
+			if nv, ok := coerceSchemaText(v); ok {
+				m[k] = nv
+			} else {
+				delete(m, k)
+			}
+		}
+	}
+	// enum / examples 只认数组；写成逗号串或对象时上游同样按 11129 拒。
+	for _, k := range []string{"enum", "examples"} {
+		if v, has := m[k]; has {
+			if _, ok := v.([]any); !ok {
+				delete(m, k)
+			}
+		}
+	}
+	// additionalProperties 合法形态是布尔或 schema 对象；字符串化布尔回正，对象递归，
+	// 其余（null / 数字）删。
+	if v, has := m["additionalProperties"]; has {
+		switch n := v.(type) {
+		case map[string]any:
+			hardenSchemaNode(n)
+		case string:
+			if nv, ok := coerceSchemaBool(n); ok {
+				m["additionalProperties"] = nv
+			} else {
+				delete(m, "additionalProperties")
+			}
+		case bool:
+			// 已合规
+		default:
+			delete(m, "additionalProperties")
+		}
+	}
+	for _, k := range schemaChildMapKeywords {
+		children, ok := m[k].(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, child := range children {
+			hardenSchemaNode(child)
+		}
+	}
+	for _, k := range schemaChildKeywords {
+		switch n := m[k].(type) {
+		case map[string]any:
+			hardenSchemaNode(n)
+		case []any:
+			for _, child := range n {
+				hardenSchemaNode(child)
+			}
+		}
+	}
+}
+
+// coerceSchemaNumber 把字符串化的数字回正；bool 不算数字（true 不是 1），解析不了报 false。
+func coerceSchemaNumber(v any) (any, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+			return f, true
+		}
+	}
+	return nil, false
+}
+
+// coerceSchemaBool 把字符串化的布尔回正（大小写不敏感），0/1 也认（客户端常见的整数写法）。
+func coerceSchemaBool(v any) (bool, bool) {
+	switch n := v.(type) {
+	case bool:
+		return n, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(n)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	case float64:
+		switch n {
+		case 1:
+			return true, true
+		case 0:
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// coerceSchemaText 把标量值转成字符串；对象/数组/null 转不了，报 false 由调用方删。
+func coerceSchemaText(v any) (string, bool) {
+	switch n := v.(type) {
+	case string:
+		return n, true
+	case bool:
+		if n {
+			return "true", true
+		}
+		return "false", true
+	case float64:
+		return strconv.FormatFloat(n, 'f', -1, 64), true
+	}
+	return "", false
 }
