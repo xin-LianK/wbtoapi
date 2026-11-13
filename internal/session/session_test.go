@@ -455,6 +455,30 @@ func TestOneShotAffinityKey(t *testing.T) {
 		}
 	}
 
+	// 带 user_id 的请求同样走亲和（LibreChat / one-api 这类总带 metadata.user_id）：
+	// user_id 并进前缀，每个终端用户各自一组桶，互不串；两种写法同值时键相同。
+	uidMeta1 := r.BindKey([]byte(body("S", "same", `,"metadata":{"user_id":"u1"}`)), dk, "key1")
+	uidMeta1b := r.BindKey([]byte(body("S", "same", `,"metadata":{"user_id":"u1"}`)), dk, "key1")
+	uidTop1 := r.BindKey([]byte(body("S", "same", `,"user_id":"u1"`)), dk, "key1")
+	uid2 := r.BindKey([]byte(body("S", "same", `,"metadata":{"user_id":"u2"}`)), dk, "key1")
+	for name, k := range map[string]string{"带 user_id": uidMeta1, "顶层 user_id": uidTop1} {
+		if !strings.HasPrefix(k, oneShotKeyPrefix) {
+			t.Errorf("%s: 未走亲和键: %q", name, k)
+		}
+		if k == ref {
+			t.Errorf("%s: 应与不带 user_id 的键不同（否则不同用户会共用桶）", name)
+		}
+	}
+	if uidMeta1 != uidMeta1b {
+		t.Errorf("同一 user_id 两次键不同: %q vs %q", uidMeta1, uidMeta1b)
+	}
+	if uidMeta1 != uidTop1 {
+		t.Errorf("同一 user_id 两种写法应同键: %q vs %q", uidMeta1, uidTop1)
+	}
+	if uidMeta1 == uid2 {
+		t.Errorf("不同 user_id 撞同一键: %q", uidMeta1)
+	}
+
 	// 以下形态一律原样返回会话键。
 	passthrough := []struct {
 		name    string
@@ -465,7 +489,6 @@ func TestOneShotAffinityKey(t *testing.T) {
 			`{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`, dk},
 		{"显式会话 id", body("S", "u1", ""), "conv-123"},
 		{"d- 开头但非派生形状", body("S", "u1", ""), "d-not-a-hash"},
-		{"带 metadata.user_id", body("S", "u1", `,"metadata":{"user_id":"u"}`), dk},
 		{"无固定前缀", `{"model":"m","messages":[{"role":"user","content":"u1"}]}`, dk},
 		{"空会话键", body("S", "u1", ""), ""},
 	}

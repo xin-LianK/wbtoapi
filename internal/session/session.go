@@ -596,15 +596,22 @@ func ExtractKey(body []byte) string {
 	return deriveKey(obj)
 }
 
+// userIDValue 取 user 维度标识（metadata.user_id 优先，其次顶层 user_id），没有返回空串。
+// 这是「谁在用」的标识，不是会话标识：ExtractKey 不拿它当粘性键，一次性亲和把它并进
+// 前缀做分用户隔离。
+func userIDValue(obj map[string]any) string {
+	if meta, ok := obj["metadata"].(map[string]any); ok {
+		if v := strOrEmpty(meta["user_id"]); v != "" {
+			return v
+		}
+	}
+	return strOrEmpty(obj["user_id"])
+}
+
 // hasUserIDKey 报告已解析 body 是否携带 user 维度标识（metadata.user_id 或顶层
 // user_id，非空字符串才算）。只用于派生回退闸（ExtractKey）；解析失败按无处理。
 func hasUserIDKey(obj map[string]any) bool {
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		if strOrEmpty(meta["user_id"]) != "" {
-			return true
-		}
-	}
-	return strOrEmpty(obj["user_id"]) != ""
+	return userIDValue(obj) != ""
 }
 
 // derivedKeyPrefix 派生键前缀，与显式会话 id 的命名空间隔离：
@@ -697,22 +704,22 @@ func isDerivedKey(k string) bool {
 
 // oneShotAffinityKey 给一次性调用派生稳定亲和键：SHA-256(固定前缀 + 桶号) 前 16 字节。
 //
-// 固定前缀 = system + tools + 模型 + 客户端密钥（salt）；桶号 = 首条 user 文本签名的
-// 前 4 字节 % shards。于是「同一套 system/tools 的一次性调用」持续落在至多 shards 个号
-// 上，上游按号存放的前缀缓存能反复命中，而不同 user 文本仍会打散到不同桶、不会把
-// 全部流量压在一个号上。
+// 固定前缀 = system + tools + 模型 + 客户端密钥（salt）+ user 标识；桶号 = 首条 user
+// 文本签名的前 4 字节 % shards。于是「同一套 system/tools 的一次性调用」持续落在至多
+// shards 个号上，上游按号存放的前缀缓存能反复命中，而不同 user 文本仍会打散到不同桶、
+// 不会把全部流量压在一个号上。
 //
-// 认不出的形态（含历史消息、无固定前缀、带 user_id）一律返回空串：这种情况宁可退回
-// 普通轮换，也不猜。
+// 带 metadata.user_id 的请求**也走这条**：user_id 并进前缀，相当于每个终端用户各有一组
+// 桶，互不干扰。这与 ExtractKey 的 P1-anti-monopoly 约定不冲突——那里防的是「同一份内容
+// 被几十个用户共享一个号」，这里的键随 user_id 变化，只会分得更散，不会并到一个号上。
+//
+// 认不出的形态（含历史消息、无固定前缀）一律返回空串：宁可退回普通轮换，也不猜。
 func oneShotAffinityKey(body []byte, shards int, salt string) string {
 	if shards <= 0 || len(body) == 0 {
 		return ""
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	if hasUserIDKey(obj) {
 		return ""
 	}
 	msgs, ok := obj["messages"].([]any)
@@ -756,7 +763,7 @@ func oneShotAffinityKey(body []byte, shards int, salt string) string {
 		return "" // 没有可缓存的固定前缀，钉号只会白占名额
 	}
 	model, _ := obj["model"].(string)
-	prefix := systemText + "\x00" + toolsSig + "\x00" + model + "\x00" + salt
+	prefix := systemText + "\x00" + toolsSig + "\x00" + model + "\x00" + salt + "\x00" + userIDValue(obj)
 	usum := sha256.Sum256([]byte(userSig))
 	shard := int(binary.BigEndian.Uint32(usum[:4]) % uint32(shards))
 	sum := sha256.Sum256([]byte(prefix + "\x00" + strconv.Itoa(shard)))
