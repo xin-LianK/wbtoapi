@@ -812,3 +812,42 @@ func TestHardenToolSchemaStructure(t *testing.T) {
 		t.Errorf("合规 patternProperties 被改: %#v", kp["patternProperties"])
 	}
 }
+
+// TestHardenToolSchemaPattern 非法 RE2 只能删不能改：上游按 Go 的 regexp 校验 schema，
+// lookbehind / 负向断言这类 PCRE 写法会让整条请求 400/11129，换号无用。
+func TestHardenToolSchemaPattern(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object",` +
+		`"properties":{"ok":{"type":"string","pattern":"^[a-z]+$"},` +
+		`"badLookbehind":{"type":"string","pattern":"(?<=x)y"},` +
+		`"badLookahead":{"type":"string","pattern":"(?!x)."}},` +
+		`"patternProperties":{"^ok_":{"type":"string"},"(?<!p)q":{"type":"number"}}}}}]}`
+
+	out := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+	obj, err := decodeBody(out)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	fn := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	params := fn["parameters"].(map[string]any)
+	props := params["properties"].(map[string]any)
+
+	if got := props["ok"].(map[string]any)["pattern"]; got != "^[a-z]+$" {
+		t.Errorf("合规 pattern 被改: %#v", got)
+	}
+	for _, k := range []string{"badLookbehind", "badLookahead"} {
+		if _, has := props[k].(map[string]any)["pattern"]; has {
+			t.Errorf("%s: 非法 RE2 应删掉 pattern", k)
+		}
+	}
+	pp := params["patternProperties"].(map[string]any)
+	if _, has := pp["^ok_"]; !has {
+		t.Errorf("合规 patternProperties 键被删")
+	}
+	if _, has := pp["(?<!p)q"]; has {
+		t.Errorf("非法 RE2 的 patternProperties 键应删掉")
+	}
+	if len(pp) != 1 {
+		t.Errorf("patternProperties 应只剩 1 个键，得到 %d 个", len(pp))
+	}
+}

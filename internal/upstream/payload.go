@@ -11,6 +11,7 @@ package upstream
 import (
 	"encoding/json"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -610,6 +611,7 @@ func hardenSchemaNode(node any) {
 	// 反序列化 schema 就失败（同样 400/11129），而且不像标量那样「转不了就删」就完事——
 	// 删掉 properties 等于放弃整个对象的字段约束，只能删；type 删掉只是约束变宽。
 	hardenSchemaStructure(m)
+	hardenSchemaPatterns(m)
 	for _, k := range schemaChildMapKeywords {
 		children, ok := m[k].(map[string]any)
 		if !ok {
@@ -635,6 +637,34 @@ func hardenSchemaNode(node any) {
 var schemaTypes = map[string]bool{
 	"object": true, "array": true, "string": true, "number": true,
 	"integer": true, "boolean": true, "null": true,
+}
+
+// hardenSchemaPatterns 校验「值是正则」的两处：pattern 与 patternProperties 的键。
+// 上游用 Go 的 regexp 校验 schema，非法 RE2（lookbehind、反向引用、`\_` 这类未定义
+// 转义）会让整条请求 400/11129。正则合法性没法"转"，只能删掉这条约束。
+// 编译开销与模式长度成正比，正常工具定义的 pattern 都很短。
+func hardenSchemaPatterns(m map[string]any) {
+	if v, has := m["pattern"]; has {
+		if s, ok := v.(string); ok {
+			if _, err := regexp.Compile(s); err != nil {
+				delete(m, "pattern")
+			}
+		}
+	}
+	// patternProperties 的键也是正则；map 键不能原地改，先收集再删。
+	props, ok := m["patternProperties"].(map[string]any)
+	if !ok {
+		return
+	}
+	var bad []string
+	for k := range props {
+		if _, err := regexp.Compile(k); err != nil {
+			bad = append(bad, k)
+		}
+	}
+	for _, k := range bad {
+		delete(props, k)
+	}
 }
 
 // hardenSchemaStructure 纠正「结构位置写错类型」的关键字：type 给了数组/数字、

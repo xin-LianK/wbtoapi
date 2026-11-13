@@ -32,7 +32,7 @@ flowchart LR
 5. **转发**：出站一律 `stream:true`；客户端要非流式时，网关在本地把整段流聚合成一个响应。
 6. **出错换号**：按错误类型决定是否惩罚账号，然后换一个账号重试。号的代理连不上（连不上代理、代理认证失败、代理拒绝转发）不算号的错，也不算官方入口的错：不罚号、不切入口、不记熔断，代理标成不通、绑在上面的号暂停选号，直接换号，见[按号代理与代理池](proxy.md#代理不通)。
 
-**工具 schema 体检**：第 3 步里还会纠正 `tools[].function.parameters` 中类型写错的关键字——数字类（`minimum`、`maxLength`、`multipleOf` 等）被客户端序列化成字符串、布尔类（`uniqueItems`、`deprecated`、`readOnly` 等）写成 `"true"`、`additionalProperties` 写成字符串、`enum` / `examples` 给了非数组。官方校验器遇到这些直接回 `400 code=11129 invalid function call parameters`，属于 schema 级拒收，换账号没用，只能在发送前回正：能转成数字/布尔的转，转不出来的删掉这一条约束。结构位置写错也同样处理：`type` 给了数字或含非法类型名（只留 `object`/`array`/`string`/`number`/`integer`/`boolean`/`null`，数组形式会去重）、`properties` / `patternProperties` / `$defs` / `definitions` 不是对象、`required` 写成逗号串或数组里有非字符串、`items` 写成类型名（回正成 `{"type": ...}`），认不出的删掉。只动工具定义，不碰消息正文、不碰属性名、不碰 `default`；和指纹脱敏开关无关（这是「让请求通过」，不是脱敏）。
+**工具 schema 体检**：第 3 步里还会纠正 `tools[].function.parameters` 中类型写错的关键字——数字类（`minimum`、`maxLength`、`multipleOf` 等）被客户端序列化成字符串、布尔类（`uniqueItems`、`deprecated`、`readOnly` 等）写成 `"true"`、`additionalProperties` 写成字符串、`enum` / `examples` 给了非数组。官方校验器遇到这些直接回 `400 code=11129 invalid function call parameters`，属于 schema 级拒收，换账号没用，只能在发送前回正：能转成数字/布尔的转，转不出来的删掉这一条约束。结构位置写错也同样处理：`type` 给了数字或含非法类型名（只留 `object`/`array`/`string`/`number`/`integer`/`boolean`/`null`，数组形式会去重）、`properties` / `patternProperties` / `$defs` / `definitions` 不是对象、`required` 写成逗号串或数组里有非字符串、`items` 写成类型名（回正成 `{"type": ...}`），认不出的删掉。`pattern` 和 `patternProperties` 的键还要能编译成 RE2：上游用 Go 的 `regexp` 校验，PCRE 才有的 lookbehind、负向断言、反向引用这类写法同样按 11129 拒，网关编译不过就把这条约束删掉。只动工具定义，不碰消息正文、不碰属性名、不碰 `default`；和指纹脱敏开关无关（这是「让请求通过」，不是脱敏）。
 
 ## 选号策略
 
