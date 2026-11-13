@@ -78,6 +78,16 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		// 11129 工具 schema 校验失败同属请求级：schema 描述这次请求要什么，与账号无关。
+		// 判成通用 ErrClient 会挨个号白跑一遍（在途名额也白占），最后仍回 400。
+		{400, `{"code":11129,"msg":"invalid_function_call_parameters"}`, ErrBadParams},
+		{400, `{"code": 11129, "msg":"Invalid function call parameters: tools[0].function.parameters.minimum should be number"}`, ErrBadParams},
+		{400, `{"error":{"code":"11129","message":"tools is invalid"}}`, ErrBadParams},
+		// 信封被中转剥掉、只剩文案时也要认出（lower 比较，大小写不敏感）。
+		{400, `invalid function call parameters`, ErrBadParams},
+		{400, `Invalid Function Call Parameters: uniqueItems should be boolean`, ErrBadParams},
+		// 防过宽：11129 之外的 400 仍按通用 4xx 只换号不罚。
+		{400, `{"code":11130,"msg":"unknown"}`, ErrClient},
 		// 图片格式/数据错误是确定性请求错误，分类后不轮转、不罚号。
 		{400, `{"code":11101,"msg":"Parse message failed: invalid image_url content at index 2: json: cannot unmarshal string into Go value of type v2.ImageContent"}`, ErrImageInvalid},
 		{400, `{"code":11135,"msg":"invalid_image_data"}`, ErrImageInvalid},

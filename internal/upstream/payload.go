@@ -606,6 +606,10 @@ func hardenSchemaNode(node any) {
 			delete(m, "additionalProperties")
 		}
 	}
+	// 结构级形态：properties / required / items / type 写成非对象、非数组时，上游
+	// 反序列化 schema 就失败（同样 400/11129），而且不像标量那样「转不了就删」就完事——
+	// 删掉 properties 等于放弃整个对象的字段约束，只能删；type 删掉只是约束变宽。
+	hardenSchemaStructure(m)
 	for _, k := range schemaChildMapKeywords {
 		children, ok := m[k].(map[string]any)
 		if !ok {
@@ -625,6 +629,131 @@ func hardenSchemaNode(node any) {
 			}
 		}
 	}
+}
+
+// schemaTypes 是 JSON Schema 认得的类型名（大小写敏感，和上游校验器一致）。
+var schemaTypes = map[string]bool{
+	"object": true, "array": true, "string": true, "number": true,
+	"integer": true, "boolean": true, "null": true,
+}
+
+// hardenSchemaStructure 纠正「结构位置写错类型」的关键字：type 给了数组/数字、
+// properties 给了数组、required 写成逗号串、items 写成类型名。只做确定性的形态回正，
+// 认不出来的直接删（错误值留着只会继续 400）。
+func hardenSchemaStructure(m map[string]any) {
+	if v, has := m["type"]; has {
+		if nv, ok := normalizeSchemaType(v); ok {
+			m["type"] = nv
+		} else {
+			delete(m, "type")
+		}
+	}
+	// properties / patternProperties / $defs / definitions 必须是「名字 → 子 schema」
+	// 的对象；给了数组或字符串没法还原，删掉（子 schema 也就没有递归对象了）。
+	for _, k := range schemaChildMapKeywords {
+		if v, has := m[k]; has {
+			if _, ok := v.(map[string]any); !ok {
+				delete(m, k)
+			}
+		}
+	}
+	if v, has := m["required"]; has {
+		if nv, ok := normalizeSchemaRequired(v); ok {
+			m["required"] = nv
+		} else {
+			delete(m, "required")
+		}
+	}
+	// items 合法形态是单个 schema 或 schema 数组（元组写法）；"object" 这种类型名
+	// 写法回正成 {"type":"object"}，能从意图上看出来，比删掉更保守。
+	if v, has := m["items"]; has {
+		if nv, ok := normalizeSchemaItems(v); ok {
+			m["items"] = nv
+		} else {
+			delete(m, "items")
+		}
+	}
+}
+
+// normalizeSchemaType 把 type 回正成合法类型名或类型名数组；认不出报 false（删）。
+func normalizeSchemaType(v any) (any, bool) {
+	switch n := v.(type) {
+	case string:
+		if t := strings.TrimSpace(n); schemaTypes[t] {
+			return t, true
+		}
+	case []any:
+		out := make([]any, 0, len(n))
+		seen := make(map[string]bool, len(n))
+		for _, e := range n {
+			s, ok := e.(string)
+			if !ok {
+				continue
+			}
+			if t := strings.TrimSpace(s); schemaTypes[t] && !seen[t] {
+				seen[t] = true
+				out = append(out, t)
+			}
+		}
+		if len(out) > 0 {
+			return out, true
+		}
+	}
+	return nil, false
+}
+
+// normalizeSchemaRequired 把 required 回正成去重后的字符串数组（"a,b" 与单名写法都认）。
+func normalizeSchemaRequired(v any) (any, bool) {
+	var names []string
+	switch n := v.(type) {
+	case []any:
+		names = make([]string, 0, len(n))
+		for _, e := range n {
+			if s, ok := e.(string); ok {
+				names = append(names, s)
+			}
+		}
+	case string:
+		names = strings.Split(n, ",")
+	}
+	out := make([]any, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, s := range names {
+		t := strings.TrimSpace(s)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// normalizeSchemaItems 把 items 回正成 schema 或 schema 数组；给了类型名就包成
+// {"type": ...}，其余认不出的报 false（删）。
+func normalizeSchemaItems(v any) (any, bool) {
+	switch n := v.(type) {
+	case map[string]any:
+		return n, true
+	case string:
+		if t := strings.TrimSpace(n); schemaTypes[t] {
+			return map[string]any{"type": t}, true
+		}
+	case []any:
+		out := make([]any, 0, len(n))
+		for _, e := range n {
+			if m, ok := e.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		if len(out) > 0 {
+			return out, true
+		}
+	}
+	return nil, false
 }
 
 // coerceSchemaNumber 把字符串化的数字回正；bool 不算数字（true 不是 1），解析不了报 false。

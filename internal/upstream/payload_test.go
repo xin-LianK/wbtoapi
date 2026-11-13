@@ -720,3 +720,95 @@ func TestPrepareBodyKeepsValidToolSchema(t *testing.T) {
 		t.Fatalf("合规 enum 被删")
 	}
 }
+
+// TestHardenToolSchemaStructure 结构位置写错类型时也要能通过：type 给数字、properties
+// 给数组、required 写成逗号串、items 写成类型名——上游反序列化 schema 直接 400/11129。
+// 口径是「形态回正，认不出就删」，且必须幂等（第二次运行不再改动）。
+func TestHardenToolSchemaStructure(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"t","parameters":{` +
+		`"type":5,` +
+		`"properties":[],` +
+		`"required":"a, b ,a",` +
+		`"items":"object",` +
+		`"patternProperties":["x"],` +
+		`"properties":[],` +
+		`"allOf":[{"type":["string",5,"null","string"],"minLength":"2"},` +
+		`{"items":[{"type":"string"},5],"required":[]}]}}}]}`
+
+	run := func(in []byte) map[string]any {
+		out := PrepareBodyOptWithEfforts(in, false, nil)
+		obj, err := decodeBody(out)
+		if err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return obj
+	}
+	params := func(obj map[string]any) map[string]any {
+		fn := obj["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+		return fn["parameters"].(map[string]any)
+	}
+
+	p := params(run([]byte(body)))
+	if _, has := p["type"]; has {
+		t.Errorf("type:5 应删掉，得到 %#v", p["type"])
+	}
+	if _, has := p["properties"]; has {
+		t.Errorf("properties:[] 应删掉")
+	}
+	if _, has := p["patternProperties"]; has {
+		t.Errorf("patternProperties:[] 应删掉")
+	}
+	if got := p["required"]; !reflect.DeepEqual(got, []any{"a", "b"}) {
+		t.Errorf("required 逗号串应回正为 [a b]，得到 %#v", got)
+	}
+	if got, ok := p["items"].(map[string]any); !ok || got["type"] != "object" {
+		t.Errorf(`items:"object" 应包成 {type:object}，得到 %#v`, p["items"])
+	}
+
+	branch := p["allOf"].([]any)
+	first := branch[0].(map[string]any)
+	if got := first["type"]; !reflect.DeepEqual(got, []any{"string", "null"}) {
+		t.Errorf("type 数组应只留合法类型名并去重，得到 %#v", got)
+	}
+	if first["minLength"] != float64(2) {
+		t.Errorf("同节点的标量回正不能丢: %#v", first["minLength"])
+	}
+	second := branch[1].(map[string]any)
+	if got, ok := second["items"].([]any); !ok || len(got) != 1 {
+		t.Errorf("items 数组应只留对象元素，得到 %#v", second["items"])
+	}
+	if _, has := second["required"]; has {
+		t.Errorf("required:[] 应删掉")
+	}
+
+	// 幂等：把结果再跑一遍，序列化后逐字节相同。
+	once := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+	twice := PrepareBodyOptWithEfforts(once, false, nil)
+	if string(once) != string(twice) {
+		t.Errorf("不幂等:\n一次 %s\n二次 %s", once, twice)
+	}
+
+	// 反证：合规结构不能被改。type 数组、单 schema items、字符串 required 数组都算合规。
+	okBody := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"t","parameters":{` +
+		`"type":["object","null"],"properties":{"a":{"type":"string"}},` +
+		`"required":["a"],"items":{"type":"string"},"patternProperties":{"^x":{"type":"number"}}}}}]}`
+	okOut, err := decodeBody(PrepareBodyOptWithEfforts([]byte(okBody), false, nil))
+	if err != nil {
+		t.Fatalf("unmarshal 合规: %v", err)
+	}
+	kp := params(okOut)
+	if got := kp["type"]; !reflect.DeepEqual(got, []any{"object", "null"}) {
+		t.Errorf("合规 type 数组被改: %#v", got)
+	}
+	if got := kp["required"]; !reflect.DeepEqual(got, []any{"a"}) {
+		t.Errorf("合规 required 被改: %#v", got)
+	}
+	if got, ok := kp["items"].(map[string]any); !ok || got["type"] != "string" {
+		t.Errorf("合规 items 被改: %#v", kp["items"])
+	}
+	if got, ok := kp["patternProperties"].(map[string]any); !ok || len(got) != 1 {
+		t.Errorf("合规 patternProperties 被改: %#v", kp["patternProperties"])
+	}
+}

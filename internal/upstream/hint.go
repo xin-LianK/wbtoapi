@@ -180,3 +180,13 @@ func codeMarker(lower, code string) bool {
 	}
 	return false
 }
+
+// containsAny 报告 s 是否包含 subs 中任意一个子串（空列表恒为 false）。
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}

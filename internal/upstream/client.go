@@ -369,6 +369,13 @@ func isPromptTooLongStatus(status int) bool {
 var alreadyCheckinMarkers = []string{"已签到", "already"}
 var badParamsMarkerCode = `"code":11101`
 
+// invalidFunctionParamsMarkers 工具 schema 校验失败的文案形态（业务码 11129）。code 缺失
+// 时（有的中转把 msg 单独转发、信封被剥掉）靠文案兜底；比较对象是 lower，故这里全小写。
+var invalidFunctionParamsMarkers = []string{
+	"invalid function call parameters",
+	"invalid_function_call_parameters",
+}
+
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
 // 与容器时区无关）。
 var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
@@ -864,7 +871,13 @@ func Classify(status int, body string) ErrKind {
 		// 归 ErrBadParams：不冷却/不熔断/不计错，且**不轮转**——11101 发生在上游解析
 		// 请求体阶段，还没走到模型路由，所以"不同账号可能有不同模型权限"其实是
 		// 11102（ErrModelBlocked）的理由，那里已有 (账号,模型) 负缓存避让。
-		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
+		//
+		// 11129 invalid function call parameters 同一档：工具 schema 描述的是**这次请求
+		// 要什么**，与哪个账号接无关，换号只会把每个健康号都白跑一遍（在途名额也白占），
+		// 最后仍要把 400 还给客户端。发送前的类型纠偏见 payload.go 的
+		// hardenToolSchemaKeywords；这里兜的是纠偏也修不掉的形态（结构级错误）。
+		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) ||
+			hasBusinessCode(body, "11129") || containsAny(lower, invalidFunctionParamsMarkers) {
 			return ErrBadParams
 		}
 		return ErrClient
