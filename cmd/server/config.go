@@ -384,6 +384,10 @@ type Config struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
+		// OneShotShards 一次性请求的稳定亲和桶数：一次性调用（[system, user]，每次换
+		// user 文本）按「system + tools + 模型 + 密钥」固定到 ≤N 个账号上，让上游按账号
+		// 存放的前缀缓存持续命中；0 = 关闭（每次都是新会话键，行为与引入前一致）。
+		OneShotShards int `json:"oneshot_shards"` // 默认 4
 	} `json:"session_sticky"`
 
 	// Pacing 出站请求节奏（账号维度，见 internal/pace）。
@@ -598,6 +602,7 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	c.SessionSticky.OneShotShards = 4
 	return c
 }
 
@@ -906,6 +911,14 @@ func (c *Config) normalize() error {
 	}
 	if c.SessionGCInterval, err = time.ParseDuration(c.SessionSticky.GCInterval); err != nil {
 		return fmt.Errorf("session_sticky.gc_interval: %w", err)
+	}
+	// 一次性请求亲和桶数：0 = 关闭；负数无意义，钳 0；上限 16（再多也摊不平负载，
+	// 只是把同一段前缀的缓存打散到更多号上，与初衷相反）。
+	if c.SessionSticky.OneShotShards < 0 {
+		c.SessionSticky.OneShotShards = 0
+	}
+	if c.SessionSticky.OneShotShards > 16 {
+		c.SessionSticky.OneShotShards = 16
 	}
 	// 快过期窗口：空 = 禁用（ExpiringSoonDur 0）；非空必须可解析（拼写错误 fail fast）。
 	if c.Pool.ExpiringSoon != "" {

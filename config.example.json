@@ -161,7 +161,8 @@
   "session_sticky": {
     "enabled": true,
     "ttl": "30m",
-    "gc_interval": "5m"
+    "gc_interval": "5m",
+    "oneshot_shards": 4
   },
   "pacing": {
     "enabled": true,

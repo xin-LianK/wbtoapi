@@ -178,9 +178,12 @@ func TestSessionConfigRealmAware(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "cn1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"})
 	p.Add(&auth.Auth{UID: "g1", AccessToken: "at", ExpiresAt: 9999999999, Domain: "www.workbuddy.ai"})
-	cfg := sessionConfig(time.Minute, time.Minute, redisstore.Noop{}, p)
+	cfg := sessionConfig(time.Minute, time.Minute, redisstore.Noop{}, p, 4)
 	if cfg.TTL != time.Minute || cfg.GCInterval != time.Minute || cfg.Available == nil || cfg.AssignableForModel == nil {
 		t.Fatalf("配置没带全: %+v", cfg)
+	}
+	if cfg.OneShotShards != 4 {
+		t.Fatalf("一次性亲和桶数没带上: %d", cfg.OneShotShards)
 	}
 	for realm, want := range map[string][]string{"cn": {"cn1"}, "global": {"g1"}, "": {"cn1", "g1"}} {
 		got := cfg.AvailableForModel("m", realm, nil)

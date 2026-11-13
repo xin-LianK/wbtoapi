@@ -17,10 +17,12 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +76,15 @@ type Config struct {
 	// 已绑定会话的续用仍按 AvailableForModel 校验，免得免费号一出现就把会话全挪走。
 	// nil 时分配也用 AvailableForModel。
 	AssignableForModel func(model, realm string, skip map[string]bool) []string
+	// OneShotShards 一次性请求的稳定亲和桶数（0 = 关闭，行为与引入前一致）。
+	//
+	// 一次性调用（[system, user]，每次换 user 文本）在 deriveKey 下每次都是新键，于是
+	// 每次都被当成新会话、被派到不同账号；而上游前缀缓存**按账号存放**，换号等于整段
+	// 前缀重付。打开后把「固定部分」（system + tools + 模型 + 客户端密钥）哈希成亲和键，
+	// 只让易变的 user 文本决定落到 N 个桶里的哪一个：同样的前缀持续命中少数几个号的
+	// 缓存，又不至于全压在一个号上。思路借鉴 workbuddy2api-hub 的 WB_MSGSTAT_SHARDS，
+	// 见 README 致谢。
+	OneShotShards int
 }
 
 // Router 会话粘性路由器。
@@ -642,6 +653,114 @@ func deriveKey(obj map[string]any) string {
 	}
 	sum := sha256.Sum256([]byte(systemText + "\x00" + firstUserText))
 	return derivedKeyPrefix + hex.EncodeToString(sum[:16])
+}
+
+// oneShotKeyPrefix 一次性调用亲和键的前缀：与显式会话 id（无前缀）和派生会话键
+// （derivedKeyPrefix）分开命名空间，三类键互不相撞。
+const oneShotKeyPrefix = "a-"
+
+// BindKey 返回本次请求「账号绑定」该用的键。
+//
+// 绝大多数请求原样返回 sessKey（粘性语义不变）。只有同时满足下面几条时改用一次性
+// 亲和键（见 oneShotAffinityKey）：
+//   - OneShotShards > 0（配置开关）
+//   - sessKey 是推导出来的（derivedKeyPrefix）：客户端显式给的会话 id 一律优先，不抢
+//   - 请求体是一次性形态：只有一条 user 消息、没有 assistant/tool 历史
+//   - 有可缓存的固定前缀（system 或 tools 至少一个）
+//   - 没带 user 维度标识（沿用 ExtractKey 的 P1-anti-monopoly 闸）
+//
+// 关键：只换绑定键，不换 sessKey 本身——出站会话 id（ConversationRequestID 等）与请求
+// 日志的会话维度仍按原会话键派生，不会把互不相关的一次性调用并成一段对话。
+func (r *Router) BindKey(body []byte, sessKey, salt string) string {
+	if r.cfg.OneShotShards <= 0 || !isDerivedKey(sessKey) {
+		return sessKey
+	}
+	if k := oneShotAffinityKey(body, r.cfg.OneShotShards, salt); k != "" {
+		return k
+	}
+	return sessKey
+}
+
+// isDerivedKey 判断键是不是 deriveKey 生成的那种形状（"d-" + 32 位小写十六进制）。
+// 光看前缀不够：客户端显式给的会话 id 也可能以 "d-" 开头，那种一律按原样保留。
+func isDerivedKey(k string) bool {
+	if len(k) != len(derivedKeyPrefix)+32 || !strings.HasPrefix(k, derivedKeyPrefix) {
+		return false
+	}
+	for _, c := range k[len(derivedKeyPrefix):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// oneShotAffinityKey 给一次性调用派生稳定亲和键：SHA-256(固定前缀 + 桶号) 前 16 字节。
+//
+// 固定前缀 = system + tools + 模型 + 客户端密钥（salt）；桶号 = 首条 user 文本签名的
+// 前 4 字节 % shards。于是「同一套 system/tools 的一次性调用」持续落在至多 shards 个号
+// 上，上游按号存放的前缀缓存能反复命中，而不同 user 文本仍会打散到不同桶、不会把
+// 全部流量压在一个号上。
+//
+// 认不出的形态（含历史消息、无固定前缀、带 user_id）一律返回空串：这种情况宁可退回
+// 普通轮换，也不猜。
+func oneShotAffinityKey(body []byte, shards int, salt string) string {
+	if shards <= 0 || len(body) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	if hasUserIDKey(obj) {
+		return ""
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return ""
+	}
+	systemText, userSig := "", ""
+	userMsgs := 0
+	for _, m := range msgs {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			return "" // 形态认不全：不猜
+		}
+		switch strOrEmpty(msg["role"]) {
+		case "system", "developer":
+			if systemText == "" {
+				systemText = messageText(msg["content"])
+			}
+		case "user":
+			userMsgs++
+			if userSig == "" {
+				userSig = userContentSignature(msg["content"])
+			}
+		default:
+			// assistant / tool / function / 未知角色：有历史，不是一次性调用。
+			return ""
+		}
+	}
+	if userMsgs != 1 || userSig == "" {
+		return ""
+	}
+	toolsSig := ""
+	if tools, has := obj["tools"]; has && tools != nil {
+		raw, err := json.Marshal(tools)
+		if err != nil {
+			return ""
+		}
+		toolsSig = string(raw)
+	}
+	if systemText == "" && toolsSig == "" {
+		return "" // 没有可缓存的固定前缀，钉号只会白占名额
+	}
+	model, _ := obj["model"].(string)
+	prefix := systemText + "\x00" + toolsSig + "\x00" + model + "\x00" + salt
+	usum := sha256.Sum256([]byte(userSig))
+	shard := int(binary.BigEndian.Uint32(usum[:4]) % uint32(shards))
+	sum := sha256.Sum256([]byte(prefix + "\x00" + strconv.Itoa(shard)))
+	return oneShotKeyPrefix + hex.EncodeToString(sum[:16])
 }
 
 // userContentSignature 把已解析的 content（any）转回 RawMessage 后取**会话级稳定**

@@ -208,6 +208,7 @@
 | `session_sticky.enabled` | `true` | 同一会话尽量固定用同一个账号 |
 | `session_sticky.ttl` | `30m` | 会话绑定有效期，每次使用滚动续期。过期后再来的请求先回到这段对话用过的号，见[会话粘性](gateway.md#会话粘性) |
 | `session_sticky.gc_interval` | `5m` | 过期绑定清理周期 |
+| `session_sticky.oneshot_shards` | `4` | 一次性请求（只有一条用户消息、无历史）按「系统提示词 + 工具 + 模型 + 密钥」固定到 ≤N 个账号上，让上游按号存放的前缀缓存持续命中；`0` 关闭，见[会话粘性](gateway.md#会话粘性) |
 | `upstash.url` / `upstash.token` | 空 | Upstash Redis（或任意 `rediss://` 地址）。空 = 不镜像，功能不受影响；配置后池状态、会话绑定与会话记录异步镜像到 Redis |
 
 ## 上游超时

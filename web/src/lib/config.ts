@@ -24,6 +24,7 @@ export interface FieldDef {
    */
   clearable?: boolean
   min?: number
+  max?: number
   step?: number
   options?: { id: string; label: string }[]
 }
@@ -160,6 +161,10 @@ export const CONFIG_TABS: ConfigTab[] = [
           toggle('expiring_first', ['pool', 'expiring_first'], '快过期优先分配', '层内有快过期号就只分给它们；关掉退回 ×3 软加权'),
           duration('expiring_soon', ['pool', 'expiring_soon'], '快过期路由窗口', '168h', '窗口内的批次算「快过期」；窗口越大命中号越多、偏好越稀；0 关闭'),
           duration('ttl', ['session_sticky', 'ttl'], '会话粘性 TTL', '30m', undefined, true),
+          num('oneshot_shards', ['session_sticky', 'oneshot_shards'], '一次性请求亲和桶数', '4', {
+            min: 0, max: 16, step: 1, restart: true,
+            hint: '只有一条用户消息、无历史的一次性调用按「系统提示词 + 工具 + 模型 + 密钥」固定到 ≤N 个账号上，让上游按号存放的前缀缓存持续命中；0 = 关闭',
+          }),
         ],
       },
     ],
@@ -329,6 +334,7 @@ export function validateField(f: FieldDef, value: string | boolean): string | nu
     const n = Number(v)
     if (!Number.isFinite(n)) return '请填数字'
     if (f.min != null && n < f.min) return '不能小于 ' + f.min
+    if (f.max != null && n > f.max) return '不能大于 ' + f.max
   }
   return null
 }

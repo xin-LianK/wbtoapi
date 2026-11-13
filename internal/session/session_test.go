@@ -408,3 +408,100 @@ func TestLookupForModelOnlyReusesValidBinding(t *testing.T) {
 		t.Fatal("lookup allocated a replacement")
 	}
 }
+
+// TestOneShotAffinityKey 一次性调用的稳定亲和键（session_sticky.oneshot_shards）：
+// 同一套 system/tools/模型/密钥下，不同 user 文本只在 ≤N 个桶里落键；形态不满足
+// （多轮、显式会话 id、带 user_id、无固定前缀、开关关闭）时一律原样返回会话键。
+func TestOneShotAffinityKey(t *testing.T) {
+	body := func(system, user, extra string) string {
+		return `{"model":"deepseek-v4.1-flash","messages":[` +
+			`{"role":"system","content":"` + system + `"},` +
+			`{"role":"user","content":"` + user + `"}]` + extra + `}`
+	}
+	r := New(Config{TTL: time.Minute, OneShotShards: 4})
+	const dk = "d-0123456789abcdef0123456789abcdef" // deriveKey 的形状：d- + 32 位十六进制
+
+	// 同一固定前缀、200 个不同 user 文本：键落在 1..4 个桶里，且不止一个桶（要打散负载）。
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		k := r.BindKey([]byte(body("S", fmt.Sprintf("u%d", i), "")), dk, "key1")
+		if !strings.HasPrefix(k, oneShotKeyPrefix) {
+			t.Fatalf("未走亲和键: %q", k)
+		}
+		seen[k] = true
+	}
+	if len(seen) > 4 || len(seen) < 2 {
+		t.Fatalf("桶数 = %d，应落在 2..4 之间", len(seen))
+	}
+
+	// 同一 user 文本 → 同一键（幂等、可重复命中）。
+	if k1, k2 := r.BindKey([]byte(body("S", "same", "")), dk, "key1"),
+		r.BindKey([]byte(body("S", "same", "")), dk, "key1"); k1 != k2 {
+		t.Fatalf("同一请求两次键不同: %q vs %q", k1, k2)
+	}
+
+	// 固定前缀变了（system / tools / 模型 / 密钥任一）→ 键必须变（缓存是另一段前缀）。
+	ref := r.BindKey([]byte(body("S", "same", "")), dk, "key1")
+	for name, got := range map[string]string{
+		"system 变": r.BindKey([]byte(body("S2", "same", "")), dk, "key1"),
+		"密钥变":      r.BindKey([]byte(body("S", "same", "")), dk, "key2"),
+		"tools 变": r.BindKey([]byte(`{"model":"deepseek-v4.1-flash","messages":[`+
+			`{"role":"system","content":"S"},{"role":"user","content":"same"}],`+
+			`"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object"}}}]}`), dk, "key1"),
+		"模型变": r.BindKey([]byte(strings.Replace(body("S", "same", ""), "deepseek-v4.1-flash", "glm-5", 1)), dk, "key1"),
+	} {
+		if got == ref {
+			t.Errorf("%s: 键没变（%q）", name, got)
+		}
+	}
+
+	// 以下形态一律原样返回会话键。
+	passthrough := []struct {
+		name    string
+		body    string
+		sessKey string
+	}{
+		{"多轮（有 assistant）", `{"model":"m","messages":[{"role":"system","content":"S"},` +
+			`{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}`, dk},
+		{"显式会话 id", body("S", "u1", ""), "conv-123"},
+		{"d- 开头但非派生形状", body("S", "u1", ""), "d-not-a-hash"},
+		{"带 metadata.user_id", body("S", "u1", `,"metadata":{"user_id":"u"}`), dk},
+		{"无固定前缀", `{"model":"m","messages":[{"role":"user","content":"u1"}]}`, dk},
+		{"空会话键", body("S", "u1", ""), ""},
+	}
+	for _, tc := range passthrough {
+		if got := r.BindKey([]byte(tc.body), tc.sessKey, "key1"); got != tc.sessKey {
+			t.Errorf("%s: 应原样返回 %q，得到 %q", tc.name, tc.sessKey, got)
+		}
+	}
+
+	// 开关关掉（0）→ 行为与引入前完全一致。
+	off := New(Config{TTL: time.Minute})
+	if got := off.BindKey([]byte(body("S", "u1", "")), dk, "key1"); got != dk {
+		t.Fatalf("OneShotShards=0 仍改键: %q", got)
+	}
+}
+
+// TestOneShotAffinityBindsAndWarms 亲和键真的参与绑定与 warm：同一固定前缀的两次不同
+// 一次性调用在同一次分配后粘住同一个号，warm 名单也按亲和键记（Bind → rememberLocked）。
+func TestOneShotAffinityBindsAndWarms(t *testing.T) {
+	uids := []string{"a"}
+	r := New(Config{TTL: time.Minute, Available: func() []string { return uids }, OneShotShards: 1})
+	const dk = "d-0123456789abcdef0123456789abcdef"
+	body := func(user string) []byte {
+		return []byte(`{"model":"m","messages":[{"role":"system","content":"S"},{"role":"user","content":"` + user + `"}]}`)
+	}
+	k1 := r.BindKey(body("one"), dk, "")
+	r.Bind(k1, "a")
+	// 另一个 user 文本、shards=1 → 同一个桶 → 同一个亲和键 → 继续命中已绑定的号。
+	k2 := r.BindKey(body("two"), dk, "")
+	if k2 != k1 {
+		t.Fatalf("shards=1 时不同 user 文本应同键: %q vs %q", k1, k2)
+	}
+	if uid, ok := r.ResolveForModel(k2, "m", "", nil); !ok || uid != "a" {
+		t.Fatalf("亲和绑定未命中: %q %v", uid, ok)
+	}
+	if got := r.WarmUIDs(k2); len(got) != 1 || got[0] != "a" {
+		t.Fatalf("warm 未按亲和键记录: %#v", got)
+	}
+}

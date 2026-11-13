@@ -192,7 +192,7 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 		redisMode = "upstash"
 	}
 	if cfg.SessionSticky.Enabled {
-		sessRouter = session.New(sessionConfig(cfg.SessionTTL, cfg.SessionGCInterval, store, p))
+		sessRouter = session.New(sessionConfig(cfg.SessionTTL, cfg.SessionGCInterval, store, p, cfg.SessionSticky.OneShotShards))
 		sessRouter.LoadFromStore() // 启动时从 Redis 恢复粘性（读操作仅此处）
 		sessRouter.StartGC()
 		defer sessRouter.StopGC()
