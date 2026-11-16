@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// TestDesktopProfileHeaders 锁定 WorkBuddy 桌面端（国内版 5.9.3）的真实出站头形态。
+// TestDesktopProfileHeaders 锁定 WorkBuddy 桌面端（国内版 5.11.3）的真实出站头形态。
 //
 // 依据：2026-10-21 从 C:\Program Files\WorkBuddy\resources\app.asar 提取的
 // buildVlmGatewayHeaders + applyGatewayHeaders + applyTraceHeaders，

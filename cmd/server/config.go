@@ -208,9 +208,10 @@ type Config struct {
 		// 请求前两段对调（applicationName 国内版 WorkBuddy、国际版 workbuddy-ai）。
 		UserAgent string `json:"user_agent"`
 		// ClientVersion 桌面端版本（UA 的版本段与 X-IDE-Version），两域共用一个值。
-		// 空 = 内置默认：国内版 5.9.3、国际版 5.9.4（官方安装包）。
+		// 空 = 内置默认：国内版 5.11.3、国际版 5.9.4（官方安装包）。
 		ClientVersion string `json:"client_version"`
-		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认 2.165.0（两域桌面端内置的 CLI）。
+		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认：国内版 2.176.0、国际版 2.165.0
+		// （两域桌面端内置的 CLI）。
 		CliVersion string `json:"cli_version"`
 		// ClientName 对话请求的归属头 X-IDE-Name / X-IDE-Type 取值。空 = "WorkBuddy"，同官方
 		// 桌面端（带 X-Agent-Purpose 与 X-IDE-*）；配 "SaaS" 还原旧行为：对话不带这几个头，
@@ -240,9 +241,9 @@ type Config struct {
 		// 键缺席保留 true，显式 false 才关（关掉回落 Go 标准库 TLS，旧行为）。改这项要重启生效。
 		TLSFingerprint bool `json:"tls_fingerprint"`
 		// CacheRetention 出站对话请求体补的 cache_retention：""（或 off，默认）= 不补，
-		// "long" = 1 小时提示缓存，"short" = 5 分钟提示缓存。官方 CLI 2.169.0 起对非自定义模型补
-		// long；网关 UA 报的 2.165.0 不补，所以这是可选增强：1 小时缓存在部分模型上写入更贵
-		// （实测只覆盖过 deepseek），建议先用 cache_retention_models 放行几个模型试。
+		// "long" = 1 小时提示缓存，"short" = 5 分钟提示缓存。官方内置 CLI 2.169.0 起对非自定义模型
+		// 补 long，国内版现在内置的 2.176.0 也是；网关默认不补是刻意的偏差：1 小时缓存在部分模型上
+		// 写入更贵（实测只覆盖过 deepseek），建议先用 cache_retention_models 放行几个模型试。
 		// 面板保存即生效；客户端自己带了 cache_retention 的一律不改。
 		CacheRetention string `json:"cache_retention"`
 		// CacheRetentionModels 只给这些模型补 cache_retention：逗号分隔，按模型名前缀匹配

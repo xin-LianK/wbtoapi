@@ -14,7 +14,7 @@ import (
 
 // TestChatHeadersOfficialShape chat 出站头对齐官方 CLI 的对话请求（10-19 生产逐项实测）：
 // 该带的都带，官方对话请求里没有的一个都不带；企业号加 X-Enterprise-Id 与同值的 X-Tenant-Id；
-// 两域（国内版 5.9.3、国际版 5.9.4，都内置 2.165.0）都带 X-Agent-Runtime: local-agent。
+// 两域（国内版 5.11.3 内置 2.176.0、国际版 5.9.4 内置 2.165.0）都带 X-Agent-Runtime: local-agent。
 func TestChatHeadersOfficialShape(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })

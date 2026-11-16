@@ -7,7 +7,7 @@
 // 被 429 时自动往下一条换（server/identity.go）。
 //
 // 依据：
-//   - 桌面端：WorkBuddy 桌面端安装包（5.9.3 / 5.9.4）内置的 CLI，就是 headers.go 一直在对齐的那套，
+//   - 桌面端：WorkBuddy 桌面端安装包（国内版 5.11.3、国际版 5.9.4）内置的 CLI，就是 headers.go 一直在对齐的那套，
 //     2026-10 生产实测过。
 //   - VSCode：Open VSX 上的 Tencent-Cloud.coding-copilot 4.12.39997873 解包源码里的
 //     UserAgentHttpInterceptor / CustomHeadersHttpProxyInterceptor / buildModelRequestHeaders。

@@ -6,11 +6,11 @@
 
 | 项 | 国内版 | 国际版 |
 |---|---|---|
-| 桌面端安装包 | WorkBuddy 5.9.3（macOS arm64） | WorkBuddy AI 5.9.4（macOS arm64） |
-| 内置 CLI（`@tencent-ai/codebuddy-code`） | 2.165.0 | 2.165.0 |
+| 桌面端安装包 | WorkBuddy 5.11.3（Windows x64） | WorkBuddy AI 5.9.4（macOS arm64） |
+| 内置 CLI（`@tencent-ai/codebuddy-code`） | 2.176.0 | 2.165.0 |
 | `applicationName`（product.json） | `WorkBuddy` | `workbuddy-ai` |
 
-2026-10-20 从官网下载两个安装包（当时国内版是 5.8.3、国际版是 5.8.4），只解包阅读，没有运行；国内版 5.9.3（2026-10-28）、国际版 5.9.4（2026-10-31）出来后照同样的做法重新对过，见[与桌面端 5.9.3 的对照](#与桌面端-593-的对照)和[与国际版桌面端 5.9.4 的对照](#与国际版桌面端-594-的对照)。要看的文件有三处：
+2026-10-20 从官网下载两个安装包（当时国内版是 5.8.3、国际版是 5.8.4），只解包阅读，没有运行；国内版 5.9.3（2026-10-28）、国际版 5.9.4（2026-10-31）出来后照同样的做法重新对过，见[与桌面端 5.9.3 的对照](#与桌面端-593-的对照)和[与国际版桌面端 5.9.4 的对照](#与国际版桌面端-594-的对照)；国内版 5.11.3 是 11-16 从本机安装目录读的，见[与桌面端 5.11.3 的对照](#与桌面端-5113-的对照)。要看的文件有三处：
 
 - `app.asar.unpacked/cli/dist/codebuddy-lite-wb.mjs`：内置 CLI，对话、模型目录、联网搜索、备用入口切换都由它做；
 - `app.asar.unpacked/cli/product.json`：版本、`applicationName`、产品开关与备用入口配置；
@@ -112,6 +112,23 @@ npm 上更新的 CLI 只作对照，取值以安装包内置的版本为准：�
 - 刷新令牌：桌面端由后台服务刷新（`common2.js` 里两个登录提供者的 `refreshSession`），UA 是后台服务的。网关以前用对话的 UA，国际版第一段对不上；刷新后取账号一起改了。
 - 没改的：官方 `/v3/config` 也由后台服务拉（`CloudProductProvider`），带查询参数 `repos`（本机 git 仓库的信息）。后台服务在产品配置载入前用兜底的客户端信息，那时 UA 只有 `WorkBuddy/<版本> CLI/<cli>` 两段，载入后是上面的三段；内置 CLI 也可能自己拉。什么时机发哪种 UA、`repos` 为空时怎么发，未确认。网关仍按对话的 UA 拉，不带 `repos`。
 
+### 与桌面端 5.11.3 的对照
+
+2026-11-16 用本机安装的国内版桌面端（`C:\Program Files\WorkBuddy`，只解包阅读，没有运行）对照：
+
+- 安装包：`resources/app.asar` 的 `package.json` 是 `@genie/workbuddy-desktop` **5.11.3**；`cli/package.json` 是 `@genie/agent-cli` **2.176.0**（5.9.3 时是 2.165.0）。`cli/product.json` 的 `commit` 是 `ecace0f7028166695994300182295329b8b95449`、`date` 是 `2026-11-12T16:49:29.764Z`。同一天更新器目录里的 `installer.exe` 也是 5.11.3，装的就是这个包。
+- 环境没变：安装目录 `version` 文件仍是 `37.10.3-43`（Electron 37.10.3），从 `WorkBuddy.exe` 里读到的 Node 仍是 `v22.21.1` → `X-Stainless-Runtime-Version` 不变。
+- `X-Stainless-*` 不变：SDK 所在分块仍是 `lazy-lite-wb/3043.50ee4dca.mjs`（哈希与 5.9.3 相同），包里的 openai 仍是 6.25.0。
+- `applicationName` 仍是 `WorkBuddy`，`deploymentType` 仍是 `SaaS`；后台服务 UA 仍由 `CLIENT_INFO_*` 环境变量拼（`WorkbuddyClientInfoProvider`），`CLI/` 段取 `cli/package.json` 的版本，所以两段只剩版本号变。
+- 对话头（`buildConversationHeaders` 与 `ModelProvider.getCustomHeaders`）：常规对话仍是 `X-Agent-Intent: craft`、`X-Agent-Type: main`、`X-Agent-Purpose: conversation`、`X-Agent-Runtime: local-agent`、`X-IDE-*`、`X-Private-Data`，`X-Private-Data` 的算法（`resolveModelOptimizationEnabled` + `applyPrivateDataHeaderPolicy`）和 2.165.0 逐字相同。
+- `X-Agent-Type` 的取值集合变宽了：`resolveModelCallAgentType` 新增 `compaction`（压缩轮次）、`auxiliary`（辅助调用），会话侧还有 `team` / `subagent`。网关的对话是单轮直连，没有压缩、子会话和团队上下文，仍发 `main`。
+- 新头都是分支场景才发，网关不用跟：`X-Root-Request-ID`（只有带 `meta.rootRequestId` 才发）、`X-Parent-Conversation-ID`（只有子会话才有）、`X-Compaction` / `X-Context-Compacted`（只有在压缩上下文时才发）、`X-Data-Tag`（只在遥测上报里发 `customTokenPlan`）、`X-Skip-Auth-Interceptor` / `X-Skip-User-Agent-Merge`（只在设了跳过内部头的环境变量时发）。
+- 后台服务（`main/`）那几条：`AuthService` 的 `buildHeaders` 还是 `Accept`、`Authorization`、`Content-Type`、`X-User-Id`、企业号再带 `X-Enterprise-Id`/`X-Tenant-Id`、`X-Domain`；积分与签到仍是 `/v2/billing/meter/*`（`checkin-activity-status` 还在，新增的 `checkin-status` 是另一个 `BackendProvider` 的界面层路径，网关本来就不走）；`axios/1.16.1` 不变；`X-Device-Token` / `X-Device-Token-Error` / `X-Custom-Channel-Id` / `X-Device-Id-List` 的取法和 5.9.3 相同。
+- 业务码：`11145` 仍不在内置 CLI 的额度用尽集合里；`14017` 仍是 `quota_not_activated`（网关按可自愈的软冷却处理），`11140` 仍是 `auth_forbidden`。
+- 变化、网关跟着改的：国内版版本号 `5.11.3`、内置 CLI `2.176.0`，上报的 `commit`、`releaseDate` 换成 `ecace0f7…`、`2026-11-12T16:49:29.764Z`。CLI 版本两域从此分开（国际版 5.9.4 内置的仍是 2.165.0）。
+- 变化、网关没跟的：内置 CLI 2.169.0 起对非自定义模型补 `cache_retention`（默认 `long`），2.176.0 也一样，网关默认仍不补（`upstream.cache_retention` 留空），见[配置](configuration.md)里的说明——这是刻意偏差，因为 1 小时缓存写入在部分模型上更贵。
+- 未确认：国际版有没有比 5.9.4 更新的包（本机只有国内版）；国内版这两项取的是 Windows 包的 `product.json`，官方 mac 包的 `date` 过去比 Windows 早几十秒，这次没有 mac 包可读。
+
 ## 几类请求
 
 | | 对话 | 上报、外观、专家列表、登录、刷新令牌 | 积分、签到 | 成长中心、积分补偿、新手礼包、试用、账号资料 | 联网搜索 |
@@ -144,12 +161,12 @@ npm 上更新的 CLI 只作对照，取值以安装包内置的版本为准：�
 
 对话请求另有这些头和字段：
 
-- 对话请求由 OpenAI Node SDK 6.25.0 组好，再经内置 CLI 的 `axiosToFetchAdapter` 交给请求框架发出：SDK 加的头只去掉 `Authorization` 和 `User-Agent`，其余照发（只有设了跳过内部头的环境变量时才删）。所以对话的 `Accept` 是 SDK 的 `application/json`（`chat/completions` 不是二进制端点，走 `buildHeaders` 的默认 `Accept`；这版 SDK 流式也不改 `Accept`，由请求体 `stream:true` 决定流式），另带 8 个 `X-Stainless-*`：`Retry-Count: 0`（`maxRetries` 为 0，只发一次）、`Timeout: 1200`（SDK 把请求级超时回落到客户端超时，桌面端 `resolveRequestTimeoutMs` 默认 1200000ms，/1000）、`Lang: js`、`Package-Version: 6.25.0`、`OS: MacOS`（`normalizePlatform(process.platform)`，darwin → MacOS）、`Arch: arm64`（`normalizeArch(process.arch)`）、`Runtime: node`、`Runtime-Version`（运行 CLI 的 Node 的版本：桌面端以 `ELECTRON_RUN_AS_NODE` 在 Electron 里跑 CLI，两域 5.9.3 / 5.8.4 的 mac 包都是 Electron 37.10.3、内置 Node `v22.21.1`，2026-10-28 分别读 `Electron Framework` 实测，国际版 5.9.4 也一样）。SDK 所在的分块（`lazy-lite-wb/3043.50ee4dca.mjs`）5.8.3 和 5.9.3 一字不差，国际版 5.9.4 内置的 CLI 和国内版 5.9.3 相同。网关 2026-10-28 起照这组值发（`injectSDKHeaders`）：`OS` / `Arch` 不取网关所在机器而是照设备指纹（`deviceOS` / `deviceArch`）映射，与设备信息同源；`client_name="SaaS"`（旧行为）不伪装桌面端，不发 `X-Stainless-*`，`Accept` 回落 `application/json, text/event-stream`；
+- 对话请求由 OpenAI Node SDK 6.25.0 组好，再经内置 CLI 的 `axiosToFetchAdapter` 交给请求框架发出：SDK 加的头只去掉 `Authorization` 和 `User-Agent`，其余照发（只有设了跳过内部头的环境变量时才删）。所以对话的 `Accept` 是 SDK 的 `application/json`（`chat/completions` 不是二进制端点，走 `buildHeaders` 的默认 `Accept`；这版 SDK 流式也不改 `Accept`，由请求体 `stream:true` 决定流式），另带 8 个 `X-Stainless-*`：`Retry-Count: 0`（`maxRetries` 为 0，只发一次）、`Timeout: 1200`（SDK 把请求级超时回落到客户端超时，桌面端 `resolveRequestTimeoutMs` 默认 1200000ms，/1000）、`Lang: js`、`Package-Version: 6.25.0`、`OS: MacOS`（`normalizePlatform(process.platform)`，darwin → MacOS）、`Arch: arm64`（`normalizeArch(process.arch)`）、`Runtime: node`、`Runtime-Version`（运行 CLI 的 Node 的版本：桌面端以 `ELECTRON_RUN_AS_NODE` 在 Electron 里跑 CLI，两域 5.9.3 / 5.8.4 的 mac 包都是 Electron 37.10.3、内置 Node `v22.21.1`，2026-10-28 分别读 `Electron Framework` 实测，国际版 5.9.4 也一样；国内版 5.11.3 的 Windows 包 11-16 读到的是同一个 Electron 和 Node）。SDK 所在的分块（`lazy-lite-wb/3043.50ee4dca.mjs`）5.8.3 和 5.9.3 一字不差，国际版 5.9.4 内置的 CLI 和国内版 5.9.3 相同，5.11.3 内置的 2.176.0 仍是这一块。网关 2026-10-28 起照这组值发（`injectSDKHeaders`）：`OS` / `Arch` 不取网关所在机器而是照设备指纹（`deviceOS` / `deviceArch`）映射，与设备信息同源；`client_name="SaaS"`（旧行为）不伪装桌面端，不发 `X-Stainless-*`，`Accept` 回落 `application/json, text/event-stream`；
 - `X-Agent-Intent: craft`、`X-Agent-Type: main`、`X-Agent-Purpose: conversation`；
-- `X-Agent-Runtime: local-agent`：2.165.0 起才有（国内版 5.9.3、国际版 5.9.4），取会话元数据的 `agentRuntime`，桌面端给本机的会话设 `local-agent`；国际版 5.8.4 内置的 2.161.0 不发。网关两域都发（国际版 2026-10-31 起）；
+- `X-Agent-Runtime: local-agent`：2.165.0 起才有（国内版 5.9.3 起、国际版 5.9.4 起；国内版 5.11.3 内置的 2.176.0 也带），取会话元数据的 `agentRuntime`，桌面端给本机的会话设 `local-agent`；国际版 5.8.4 内置的 2.161.0 不发。网关两域都发（国际版 2026-10-31 起）；
 - `X-IDE-Name` / `X-IDE-Type: WorkBuddy`，`X-IDE-Version` 为桌面端版本；
-- `X-Private-Data`：告诉上游能不能拿这段对话做模型优化，`"true"` 是不允许。2.161.0（国际版 5.8.4，以及国内版 5.8.3）：设置里的 `enableModelOptimization` 设过就照设置；没设过、且产品开关 `DisableYuanbaoChannel` 为真（两个域的安装包都是）时发 `"true"`。2.165.0（国内版 5.9.3、国际版 5.9.4）改了：设过照设置；没设过时先看产品开关 `DefaultModelOptimizationOff`（国内版包里是 `false`、国际版是 `true`，为真时直接发 `"true"`；经 `abTestService` 读，远端配置会不会改它未确认），再看是不是企业版（`isEnterpriseEditionAccount`：有企业 id，或账号类型是 `ultimate`、`exclusive`），结果国内版个人号发 `"false"`、企业号发 `"true"`，国际版都发 `"true"`。网关默认一律发 `"true"`，国际版和官方没动过开关时一样，对国内版等于用户在桌面端手动关了这个开关（2026-10-28 定）；打开 `upstream.model_optimization` 时个人号发 `"false"`、企业号仍发 `"true"`，和 5.9.3 没动过开关时一样（5.9.3 手动打开的话企业号也发 `"false"`，网关取保守的一边）；
-- 后台服务每次提问前另加的头（`createWorkbuddyAppServerBeforePromptExpertActivation`）：经 `switchExpertPluginForSession` 设成内置 CLI 的 `internalModelRequestHeaders`，内置 CLI 只加在官方模型的请求上（`shouldApplyInternalModelRequestHeaders`，自定义模型不加）。5.8.3、5.9.3 和国际版 5.9.4 的这段代码相同：
+- `X-Private-Data`：告诉上游能不能拿这段对话做模型优化，`"true"` 是不允许。2.161.0（国际版 5.8.4，以及国内版 5.8.3）：设置里的 `enableModelOptimization` 设过就照设置；没设过、且产品开关 `DisableYuanbaoChannel` 为真（两个域的安装包都是）时发 `"true"`。2.165.0（国内版 5.9.3、国际版 5.9.4）改了（2.176.0 与它逐字相同，11-16 核对）：设过照设置；没设过时先看产品开关 `DefaultModelOptimizationOff`（国内版包里是 `false`、国际版是 `true`，为真时直接发 `"true"`；经 `abTestService` 读，远端配置会不会改它未确认），再看是不是企业版（`isEnterpriseEditionAccount`：有企业 id，或账号类型是 `ultimate`、`exclusive`），结果国内版个人号发 `"false"`、企业号发 `"true"`，国际版都发 `"true"`。网关默认一律发 `"true"`，国际版和官方没动过开关时一样，对国内版等于用户在桌面端手动关了这个开关（2026-10-28 定）；打开 `upstream.model_optimization` 时个人号发 `"false"`、企业号仍发 `"true"`，和 5.9.3 没动过开关时一样（5.9.3 手动打开的话企业号也发 `"false"`，网关取保守的一边）；
+- 后台服务每次提问前另加的头（`createWorkbuddyAppServerBeforePromptExpertActivation`）：经 `switchExpertPluginForSession` 设成内置 CLI 的 `internalModelRequestHeaders`，内置 CLI 只加在官方模型的请求上（`shouldApplyInternalModelRequestHeaders`，自定义模型不加）。5.8.3、5.9.3、国内版 5.11.3 和国际版 5.9.4 的这段代码相同：
   - `X-Device-Token`：腾讯图灵盾（TuringShield）原生 SDK 给的设备令牌（`getTuringDeviceToken`；mac 包里是 arm64 的 `native/turing-sdk/build/Release/turing_sdk.node`，SDK 只支持 macOS 和 Windows）。令牌缓存着用，到了刷新间隔就在后台换新；没有令牌而有错误码时改发 `X-Device-Token-Error`（错误码只留 ASCII 可见字符、截到 64 个），两样都没有时都不发。远端产品开关 `TuringDeviceToken` 为 `false` 时停用；
   - `X-Moderation-Type: ["protected"]`（值就是这串字符，带方括号和引号）：专家是云端专家（`expertIsCloud`）或付费专家（`expertPayMode`），或启用的技能里有云端技能时加（`shouldProtectSession`）；
   - 专家对话的 `X-Expert-Id` 和团队专家的 `X-Expert-Team-Task: true`，见本节最后一条。
@@ -159,7 +176,7 @@ npm 上更新的 CLI 只作对照，取值以安装包内置的版本为准：�
 - `X-Conversation-Request-ID`：轮次 id，每次用户发言开一轮时生成，是 `uuidv7()` 去掉连字符（`generateConversationRequestId`）；
 - `X-Conversation-Message-ID`、`X-Request-ID`：同一个模型消息 id，每次调模型新生成，同样是 `uuidv7()` 去掉连字符（`withModelMessageCorrelation`）。上报事件里的会话 id、轮次 id、消息 id 也是这三种形状。网关客户端没给会话 id 时的做法见[会话粘性](gateway.md#会话粘性)；
 - 链路头 `traceparent`、`b3` 与 `X-B3-*`；
-- 请求体带了思考档位（`reasoning_effort` 或 `reasoning.effort`）时补 `reasoning_summary: "auto"`（`injectReasoningSummaryIfNeeded`）。2.161.0、2.165.0 都不发 `cache_retention`，也不发 `prompt_cache_key`；
+- 请求体带了思考档位（`reasoning_effort` 或 `reasoning.effort`）时补 `reasoning_summary: "auto"`（`injectReasoningSummaryIfNeeded`）。2.161.0、2.165.0 都不发 `cache_retention`（2.169.0 起才补，国内版 5.11.3 内置的 2.176.0 已补，网关默认仍不补，见[与桌面端 5.11.3 的对照](#与桌面端-5113-的对照)），也都不发 `prompt_cache_key`；
 - 任务中心的专家对话就是一次普通对话，只多带 `X-Expert-Id`（专家插件激活时追加）；团队专家（专家列表里 `expertType` 为 `team`）另带 `X-Expert-Team-Task: true`（后台服务的 `applyPreparedExpertSettings`），网关按专家列表里的类型带。
 
 模型目录：网关用对话的 UA，按 GET 拉 `/v3/config`，带 `Connection: close`。官方后台服务也拉（`CloudProductProvider`，另带查询参数 `repos`），UA 跟时机有关，未确认，见[与国际版桌面端 5.9.4 的对照](#与国际版桌面端-594-的对照)。企业号另拉企业模型，见[企业号模型目录](#企业号模型目录)。

@@ -4,7 +4,8 @@
 
 // official_body.go 出站 chat body 补官方 CLI 会补的字段（WorkBuddy 桌面端安装包内置的
 // @tencent-ai/codebuddy-code，dist/codebuddy-lite-wb.mjs 的 injectReasoningSummaryIfNeeded 与
-// resolveCacheRetention；10-20 读 5.8.3 / 5.8.4 内置的 2.161.0，两域现在的 2.165.0 也一样）。
+// resolveCacheRetention；10-20 读 5.8.3 / 5.8.4 内置的 2.161.0，10-31 读 5.9.x 的 2.165.0，
+// 11-16 读 5.11.3 内置的 2.176.0）。
 package upstream
 
 import (
@@ -26,9 +27,9 @@ const (
 // CacheRetentionPolicy 出站对话请求体补 cache_retention 的规则。
 //
 // 官方口径：模型请求处理器发现 body 里没有 cache_retention 就补上，默认 "long"，只有设了
-// CODEBUDDY_DISABLE_PROMPT_CACHING_1H 才用 "short"（npm 上 2.169.0 起；网关 UA 报的 2.165.0 只补
-// reasoning_summary，不补这个）。所以「补」本身是官方行为，只是要按 CLI 版本走，且 1 小时缓存
-// 在部分模型上写入更贵（实测只覆盖过 deepseek），因此默认关、按模型白名单放行。
+// CODEBUDDY_DISABLE_PROMPT_CACHING_1H 才用 "short"（npm 上 2.169.0 起；桌面端内置的 2.176.0 现在
+// 也会补，2.165.0 只补 reasoning_summary）。也就是 UA 报的这个版本本身就会补这个字段，网关默认仍
+// 不补是刻意的偏差：1 小时缓存在部分模型上写入更贵（实测只覆盖过 deepseek），要补就按模型白名单放行。
 type CacheRetentionPolicy struct {
 	// Retention 空 = 不补；CacheRetentionLong / CacheRetentionShort。
 	Retention string

@@ -944,9 +944,9 @@ type Client struct {
 	ModelOptimization atomic.Bool
 
 	// CacheRetention 出站对话请求体补 cache_retention 的规则（config upstream.cache_retention 与
-	// cache_retention_models）。nil / 零值 = 不补，这是默认：官方 2.165.0 不补这个字段，而且 1 小时
-	// 缓存在部分模型上写入更贵，只能按模型白名单放行。面板保存热改，chat 热路径并发读，用
-	// atomic.Pointer 换整份策略。
+	// cache_retention_models）。nil / 零值 = 不补，这是默认：官方 2.176.0 起对非自定义模型补 long，
+	// 网关现在 UA 报的也是 2.176.0，不补是刻意的偏差（1 小时缓存在部分模型上写入更贵）；补的时候
+	// 只按模型白名单放行。面板保存热改，chat 热路径并发读，用 atomic.Pointer 换整份策略。
 	CacheRetention atomic.Pointer[CacheRetentionPolicy]
 
 	// OnEarning 领到积分时调用（签到、领奖、补偿、旅行、新手礼包、连登兑换，见 earning.go）；nil = 不记。
@@ -2087,7 +2087,8 @@ func mergeModelInfos(primary, secondary []ModelInfo) []ModelInfo {
 }
 
 // enterpriseModelsPath 企业模型目录端点路径模板。
-// 依据：官方桌面端内置 CLI 的 ModelsProductProvider（2.161.0 起，两域现在的 2.165.0 相同）——只有账号有
+// 依据：官方桌面端内置 CLI 的 ModelsProductProvider（2.161.0 起；国内版现在的 2.176.0、国际版
+// 2.165.0 相同）——只有账号有
 // enterpriseId 才调，GET <endpoint>/console/enterprises/{enterpriseId}/config/models，
 // 走请求框架并带内置 CLI 的 UA，超时 5 秒。响应 {"code":0,"data":[模型对象, ...]}，
 // data 直接是数组（10-20 生产用个人号请求 /console/enterprises/personal/config/models

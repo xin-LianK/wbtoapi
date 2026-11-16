@@ -5,7 +5,7 @@
 package upstream
 
 // capqueue_test.go 容量排队（6020）：6020 回应里的排位与 retry_after、查询间隔、查询和取消的请求形状
-// （照官方桌面端 5.9.3 主进程的 queue:getStatus、queue:cancel），以及查询回应怎么归成三种状态。
+// （照官方桌面端 5.11.3 主进程的 queue:getStatus、queue:cancel），以及查询回应怎么归成三种状态。
 
 import (
 	"context"

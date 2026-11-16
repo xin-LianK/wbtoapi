@@ -17,23 +17,27 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
-// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy-darwin-arm64-5.9.3、国际版 5.9.4，都内置 CLI
-// @tencent-ai/codebuddy-code 2.165.0）。对话、刷新令牌、模型目录由内置
+// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy 5.11.3、国际版 5.9.4，国内版内置 CLI
+// @tencent-ai/codebuddy-code 2.176.0、国际版仍是 2.165.0）。对话、刷新令牌、模型目录由内置
 // CLI 发；积分、签到、成长任务、旅行、上报由桌面端后台服务发。两者用同一套请求框架，UA 段序不同。
 const (
 	// defaultClientVersionCN / defaultClientVersionGlobal 两域桌面端版本（UA 与 X-IDE-Version）。
 	// config upstream.client_version 可覆盖（两域共用一个值，空 = 内置默认）。
-	defaultClientVersionCN     = "5.9.3"
+	// 国内版 5.11.3 是 2026-11-12 构建（Windows 包，11-16 读 app.asar 的 package.json 核对）；
+	// 国际版 5.9.4 之后没有新包可读，仍按 5.9.4（未确认是否有更新）。
+	defaultClientVersionCN     = "5.11.3"
 	defaultClientVersionGlobal = "5.9.4"
 	// defaultCliVersionCN / defaultCliVersionGlobal 两域桌面端内置 CLI 的版本（UA 的 `CLI/<ver>` 段）。
 	// config upstream.cli_version 可覆盖（两域共用一个值，空 = 内置默认）。
-	defaultCliVersionCN     = "2.165.0"
+	// 国内版 5.11.3 内置 2.176.0；国际版 5.9.4 内置 2.165.0，没有更新的国际版包可核对。
+	defaultCliVersionCN     = "2.176.0"
 	defaultCliVersionGlobal = "2.165.0"
 	// deploymentType 两域 product.json 的 deploymentType。官方请求框架的 ProductEndpointHttpInterceptor
 	// 把它作为 X-Product 加到经过框架的每个请求上（对话、刷新令牌、模型目录、积分等都在内）。
 	deploymentType = "SaaS"
 	// X-Stainless-* 的固定取值依据：内置 CLI 的对话经 OpenAI SDK（@openai 的 JS 版）发出，SDK 的
-	// buildHeaders 给每个请求加这组头（见 cli/dist/lazy-lite-wb/3043.*.mjs，2.161.0 与 2.165.0 是同一份），
+	// buildHeaders 给每个请求加这组头（见 cli/dist/lazy-lite-wb/3043.*.mjs，2.161.0、2.165.0 与
+	// 2.176.0 是同一份：2.176.0 的分块仍是 3043.50ee4dca.mjs，11-16 核对），
 	// axiosToFetchAdapter 把 SDK 的头原样交给出站（只删 authorization 与 user-agent）。
 	//   - stainlessPackageVersion：SDK 版本（X-Stainless-Package-Version），两域内置 CLI 同为 6.25.0。
 	//   - stainlessTimeout：X-Stainless-Timeout，SDK 取客户端 timeout（桌面端 resolveRequestTimeoutMs
@@ -43,8 +47,9 @@ const (
 	stainlessTimeout        = "1200"
 	stainlessRetryCount     = "0"
 	// nodeRuntimeVersionCN / nodeRuntimeVersionGlobal 两域桌面端 Electron 内置的 Node 版本
-	// （X-Stainless-Runtime-Version = process.version）。国内版 5.9.3、国际版 5.9.4 都是 Electron 37.10.3
-	// 内置 v22.21.1（2026-10-28、10-31 读 Electron Framework 实测，与 5.8.x 相同）。
+	// （X-Stainless-Runtime-Version = process.version）。国内版 5.11.3、国际版 5.9.4 都是 Electron 37.10.3
+	// 内置 v22.21.1（2026-10-28、10-31 读 Electron Framework 实测；5.11.3 的 Windows 包 11-16 读
+	// 安装目录 version 文件仍是 37.10.3，并在 WorkBuddy.exe 里读到 v22.21.1，与 5.8.x 相同）。
 	nodeRuntimeVersionCN     = "v22.21.1"
 	nodeRuntimeVersionGlobal = "v22.21.1"
 )
@@ -82,7 +87,7 @@ func applicationNameFor(a *auth.Auth) string {
 
 // defaultCLIUA 内置 CLI 的 UA（UserAgentHttpInterceptor）：
 // `<platform>/<ver> <applicationName>/<ver> CLI/<cli>`，platform 由桌面端固定传 "WorkBuddy"。
-// 国内版 `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`，国际版 `WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。
+// 国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。
 func (c *Client) defaultCLIUA(a *auth.Auth) string {
 	v := c.clientVersion(a)
 	return "WorkBuddy/" + v + " " + applicationNameFor(a) + "/" + v + " CLI/" + c.cliVersion(a)
@@ -92,7 +97,7 @@ func (c *Client) defaultCLIUA(a *auth.Auth) string {
 // `<applicationName>/<ver> <platform>/<ver> CLI/<cli>`。后台服务的 platform 取产品配置的
 // applicationName（WorkbuddyClientInfoProvider.initClientInfo）：桌面端只给内置 CLI 的进程设
 // CLIENT_INFO_PLATFORM=WorkBuddy，后台服务的子进程环境里没有（buildDaemonProcessEnv），所以两段都是
-// 应用名。国内版 `WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0`，和 CLI 的 UA 一样；国际版
+// 应用名。国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，和 CLI 的 UA 一样；国际版
 // `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。2026-10-31 读 5.8.3、5.9.4 安装包核对，同类项目
 // misakano7545/workbuddy2api-panel 的真机抓包也是这样；1.8.0 及以前国际版第二段发的是 WorkBuddy。
 func (c *Client) defaultDaemonUA(a *auth.Auth) string {
@@ -237,8 +242,8 @@ type ChatMeta struct {
 	Identity string
 }
 
-// ChatHeaders 设置 chat 出站请求头。形状对齐桌面端内置 CLI 的对话请求（两域都是 2.165.0，见文件头），
-// 10-19 生产用国内版、国际版个人号逐项实测均 200（当时两域都是 2.161.0）：
+// ChatHeaders 设置 chat 出站请求头。形状对齐桌面端内置 CLI 的对话请求（国内版 2.176.0、国际版
+// 2.165.0，见文件头），10-19 生产用国内版、国际版个人号逐项实测均 200（当时两域都是 2.161.0）：
 //   - 官方对话请求不带 Origin / Referer / Accept-Language / X-CodeBuddy-Request / X-Machine-ID /
 //     X-Session-ID，也不带 X-No-*（那几个只在登录前的 auth/state、auth/token 上发）。
 //   - 账号头：Authorization、X-User-Id；企业号加 X-Enterprise-Id 与同值的 X-Tenant-Id，个人号
@@ -344,7 +349,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	}
 }
 
-// desktopProfile 当前用桌面端（5.9.3 / 5.9.4）形态；显式 "legacy" 回到旧形态（回滚对照用）。
+// desktopProfile 当前用桌面端（5.11.3 / 5.9.4）形态；显式 "legacy" 回到旧形态（回滚对照用）。
 func (c *Client) desktopProfile() bool {
 	return !strings.EqualFold(strings.TrimSpace(c.Profile), "legacy")
 }
@@ -413,9 +418,9 @@ func (c *Client) applyLegacyChatHeaders(req *http.Request, a *auth.Auth) {
 	}
 }
 
-// agentRuntime 对话和联网搜索的 X-Agent-Runtime：2.165.0 每条都带，取会话的 agentRuntime，两域桌面端
-// （国内版 5.9.3、国际版 5.9.4）给本地对话（含专家对话）设的都是 local-agent。国际版 5.8.4 内置的
-// 2.161.0 没有这个头，网关 2026-10-31 随国际版换到 5.9.4 起两域都发。
+// agentRuntime 对话和联网搜索的 X-Agent-Runtime：2.165.0 起每条都带（2.176.0 也带，11-16 核对），
+// 取会话的 agentRuntime，两域桌面端（国内版 5.11.3、国际版 5.9.4）给本地对话（含专家对话）设的都是
+// local-agent。国际版 5.8.4 内置的 2.161.0 没有这个头，网关 2026-10-31 随国际版换到 5.9.4 起两域都发。
 const agentRuntime = "local-agent"
 
 // chatDomain chat 出站的 X-Domain：国际版固定 www.workbuddy.ai（与国际版登录域相同，不回退
@@ -428,10 +433,11 @@ func chatDomain(a *auth.Auth) string {
 }
 
 // privateDataValue X-Private-Data 取值，告诉上游这段对话能不能拿去做模型优化。默认一律
-// "true"（不允许）。两域内置的 2.165.0 在用户没动过「模型优化」开关时按产品开关
+// "true"（不允许）。两域内置 CLI 在用户没动过「模型优化」开关时按产品开关
 // DefaultModelOptimizationOff 算：国际版 5.9.4 包里是 true，个人版、企业版都发 "true"，和网关的默认
-// 一样；国内版 5.9.3 包里是 false，个人版发 "false"、企业版发 "true"，所以对国内版来说网关的默认
-// 等于用户在桌面端手动关了这个开关。2026-10-28 用户定：默认仍不允许。
+// 一样；国内版 5.11.3 包里是 false，个人版发 "false"、企业版发 "true"，所以对国内版来说网关的默认
+// 等于用户在桌面端手动关了这个开关（2.176.0 的 getCustomHeaders + applyPrivateDataHeaderPolicy
+// 算法与 2.165.0 相同，11-16 核对）。2026-10-28 用户定：默认仍不允许。
 // upstream.model_optimization 打开后个人版发 "false"；企业版（有企业 id，或账号类型是 ultimate /
 // exclusive，同官方 isEnterpriseEditionAccount）仍发 "true"，和官方没动过开关时一样。
 func (c *Client) privateDataValue(a *auth.Auth) string {
