@@ -50,8 +50,8 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-// 1.22.1-panel：出站身份对齐官方国内版桌面端 5.11.3（内置 CLI 2.176.0）。
-const appVersion = "1.22.1-panel"
+// 1.23.0-panel：补齐 system 提示词里的渠道指纹；任务发现区分「面板做不了」。
+const appVersion = "1.23.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
