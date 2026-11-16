@@ -507,6 +507,151 @@ func TestContainsFoldASCII(t *testing.T) {
 	}
 }
 
+// workspace root 是 Codex / Claude Code 系 system prompt 的渠道指纹（上游 604bb31）：
+// 只改 system 级内容，其余角色原样出站。
+func TestWorkspaceRootScrubbedInSystemOnly(t *testing.T) {
+	const hit = "Relative paths resolve from the workspace root; absolute paths identify files."
+	const want = "Relative paths resolve from the root of the workspace; absolute paths identify files."
+	ms := []any{
+		map[string]any{"role": "system", "content": hit},
+		map[string]any{"role": "developer", "content": hit}, // 未过 normalizeRoles 时原样（PrepareBody 会先归一）
+		map[string]any{"role": "user", "content": hit},
+		map[string]any{"role": "assistant", "content": hit},
+		map[string]any{"role": "tool", "content": hit},
+		map[string]any{"content": hit}, // 无 role
+	}
+	if !sanitizeMessages(ms) {
+		t.Fatal("system 里的 workspace root 未被改写")
+	}
+	if got, _ := ms[0].(map[string]any)["content"].(string); got != want {
+		t.Errorf("system content = %q, want %q", got, want)
+	}
+	for i := 1; i < len(ms); i++ {
+		if got, _ := ms[i].(map[string]any)["content"].(string); got != hit {
+			t.Errorf("第 %d 条消息（role=%v）不该被改：%q", i, ms[i].(map[string]any)["role"], got)
+		}
+	}
+}
+
+// 工具参数里的同一短语一字节不变：它既是用户的真实内容，也是上游 review 的 JSON 有效性反例
+// （{"command":"echo workspace root; cc_version=1"} 被连带清洗后 cc_version 被删、JSON 失效）。
+func TestWorkspaceRootToolCallArgumentsUntouched(t *testing.T) {
+	const args = `{"command":"echo workspace root; cc_version=1"}`
+	ms := []any{map[string]any{
+		"role": "assistant", "content": nil,
+		"tool_calls": []any{map[string]any{
+			"id": "c1", "type": "function",
+			"function": map[string]any{"name": "Bash", "arguments": args},
+		}},
+	}}
+	if sanitizeMessages(ms) {
+		t.Error("tool_calls.arguments 不该被改动")
+	}
+	fn := ms[0].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if got := fn["arguments"].(string); got != args {
+		t.Fatalf("arguments 被改动：%q -> %q", args, got)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(fn["arguments"].(string)), &obj); err != nil {
+		t.Fatalf("arguments 不是合法 JSON: %v", err)
+	}
+}
+
+// 大小写混写、制表符分隔同样命中。
+func TestWorkspaceRootCaseAndTab(t *testing.T) {
+	for in, want := range map[string]string{
+		"from the Workspace Root; use relative":  "from the root of the workspace; use relative",
+		"from the workspace\troot; use relative": "from the root of the workspace; use relative",
+		"WORKSPACE  ROOT":                        "root of the workspace",
+	} {
+		if got := sanitizeTextForSystem(in); got != want {
+			t.Errorf("sanitizeTextForSystem(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 更长的词与带连字符的复合词不算独立短语，不改。
+func TestWorkspaceRootLongerFormsNotTouched(t *testing.T) {
+	for _, in := range []string{
+		"workspace roots are listed below",
+		"my-workspace root is /srv",
+		"deepseek_workspace root",
+		"see workspace_root for details",
+	} {
+		if got := sanitizeTextForSystem(in); got != in {
+			t.Errorf("不该命中：%q -> %q", in, got)
+		}
+	}
+}
+
+// 幂等：同一段文本跑两次结果一致。
+func TestWorkspaceRootIdempotent(t *testing.T) {
+	in := "Paths resolve from the workspace root; " + ccIdentity
+	once := sanitizeTextForSystem(in)
+	if twice := sanitizeTextForSystem(once); twice != once {
+		t.Errorf("not idempotent: %q -> %q -> %q", in, once, twice)
+	}
+	if strings.Contains(strings.ToLower(once), "workspace root") {
+		t.Errorf("短语仍残留：%q", once)
+	}
+}
+
+// 只含该短语、不含其他指纹时，不进入键值剥离层：cc_version= 保留，JSON 仍有效。
+func TestWorkspaceRootDoesNotTriggerKVStrip(t *testing.T) {
+	in := `{"command":"echo workspace root; cc_version=1"}`
+	out := sanitizeTextForSystem(in)
+	if !strings.Contains(out, "cc_version=1") {
+		t.Fatalf("键值被误删：%q", out)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(out), &obj); err != nil {
+		t.Fatalf("改后不是合法 JSON: %v（%q）", err, out)
+	}
+	if !strings.Contains(out, "root of the workspace") {
+		t.Errorf("短语未改写：%q", out)
+	}
+}
+
+// 端到端：Codex / Claude Code 入口把 system 内容折成 role=system 的消息（Responses 的
+// instructions、Claude 的 system 字段），经 PrepareBody 后该短语必须已被改写。
+// developer 角色靠 normalizeRoles 先归一为 system，同样要改。
+func TestPrepareBodyOptSystemWorkspaceRoot(t *testing.T) {
+	body := []byte(`{"model":"kimi-k3","messages":[` +
+		`{"role":"system","content":"Relative paths resolve from the workspace root; absolute paths identify files."},` +
+		`{"role":"developer","content":"Also resolve from the workspace root."},` +
+		`{"role":"user","content":"what is workspace root?"}]}`)
+	out := PrepareBodyOpt(body, true)
+	var obj map[string]any
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	msgs := obj["messages"].([]any)
+	for i := 0; i < 2; i++ {
+		c, _ := msgs[i].(map[string]any)["content"].(string)
+		if strings.Contains(strings.ToLower(c), "workspace root") {
+			t.Errorf("消息 %d 的 system 指纹未改写：%q", i, c)
+		}
+		if !strings.Contains(c, "root of the workspace") {
+			t.Errorf("消息 %d 缺改写结果：%q", i, c)
+		}
+	}
+	if u, _ := msgs[2].(map[string]any)["content"].(string); u != "what is workspace root?" {
+		t.Errorf("user 原文不该被改：%q", u)
+	}
+}
+
+// system 里的其他指纹（身份句、billing header）不能被 system 专用路径漏掉。
+func TestSystemPathStillScrubsOtherFingerprints(t *testing.T) {
+	in := ccIdentity + " " + ccHeader + " Relative paths resolve from the workspace root."
+	out := sanitizeTextForSystem(in)
+	if strings.Contains(out, ccIdentity) || strings.Contains(out, "x-anthropic-billing-header") {
+		t.Errorf("system 路径漏掉了既有指纹：%q", out)
+	}
+	if strings.Contains(strings.ToLower(out), "workspace root") {
+		t.Errorf("system 路径漏掉了 workspace root：%q", out)
+	}
+}
+
 // newTestUpstream 起一个假上游并捕获请求。
 func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()

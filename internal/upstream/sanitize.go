@@ -92,11 +92,16 @@ var sanitizeRewrites = [][2]string{
 	},
 }
 
-// 以下四条是上游 11128「Illegal API invocation from an unapproved channel」的渠道指纹，
+// 以下五条是上游 11128「Illegal API invocation from an unapproved channel」的渠道指纹，
 // 取自同类项目的真号实测（workbuddy2api-hub #61/#533/#537/#570/#574，
 // ithtelab/workbuddy-manager #246/#250，mmqz/cpa-multi-plugins #46/#49）：
 // 大小写不敏感、连续子串匹配，改一个词或换语序即放行。
-// 作用域与上面的规则一致，所有角色都改：有项目实测放在 user 或 assistant 历史里同样被拦。
+//
+// 作用域：身份句、品牌句、OhMyOpenCode 三条所有角色都改——有项目实测放在 user 或 assistant
+// 历史里同样被拦。**workspace root（sanitizeWorkspaceRootRe）是唯一例外**：只改 system 级
+// 内容（见 sanitizeTextForSystem）。它是 Codex / Claude Code 系 system prompt 的固定用语，
+// 而 user 原文和工具参数里的同一短语是用户的真实内容，改了等于篡改请求（上游 604bb31 的
+// 取舍也是这个口径）。
 var (
 	// sanitizeIdentityStartRe 自我介绍句的开头到归属动词，例如
 	// "You are an AI agent powered by DeepSeek Harness."、
@@ -116,6 +121,16 @@ var (
 	// sanitizeBrandRe 散文里的 DeepSeek Harness 和 GUI 描述句连着出现时同样命中，缩成 DeepSeek。
 	// 只认空格与制表符，deepseek-harness、deepseek_harness 这类路径与标识符不动。
 	sanitizeBrandRe = regexp.MustCompile(`(?i)DeepSeek[ \t]+Harness`)
+	// sanitizeWorkspaceRootRe Codex / Claude Code 系 system prompt 的特征短语 workspace root
+	// （"Relative paths resolve from the workspace root; absolute paths identify …"）：
+	// 上游 604bb31 起按它做渠道指纹累计判定，命中即 400 11-128。只作用于 system 级内容
+	// （见 sanitizeTextForSystem），其余角色与工具参数原样保留；也**不进**特征预检，
+	// 避免只含该短语的文本被连带跑一遍键值剥离（上游 review 的无效 JSON 反例）。
+	//
+	// 左边界不用 \b：\b 把「非词字符」都算边界，my-workspace root 这种项目名带 root 的
+	// 复合词会被一起改掉。这里排除字母数字、下划线与连字符，只认独立出现的短语；
+	// 右边界保留 \b，workspace roots 这类更长的词不命中。
+	sanitizeWorkspaceRootRe = regexp.MustCompile(`(?i)(^|[^0-9A-Za-z_-])workspace[ \t]+root\b`)
 	// sanitizeOmORe OhMyOpenCode 子代理的身份串，两半各自单独出现都放行，只拆开连在一起的这一段。
 	sanitizeOmORe = regexp.MustCompile(`(?i)Sisyphus-Junior - Focused executor from OhMyOpenCode`)
 )
@@ -171,7 +186,9 @@ func rewriteIdentitySentences(text string) string {
 	}
 }
 
-// hasChannelFingerprint 四条渠道指纹的预检：先做不分配内存的字面量探测，命中再跑正则。
+// hasChannelFingerprint 渠道指纹的预检：先做不分配内存的字面量探测，命中再跑正则。
+// 只覆盖身份句、品牌句、OhMyOpenCode 三条——workspace root 有意不在这里（它只在
+// system 级做定点替换，见 sanitizeTextForSystem），否则单独出现就会拉起整条键值剥离链。
 func hasChannelFingerprint(text string) bool {
 	if containsFoldASCII(text, "harness") && sanitizeBrandRe.MatchString(text) {
 		return true
@@ -229,12 +246,39 @@ func hasFingerprint(text string) bool {
 	return sanitizeBareHdrRe.MatchString(text) || hasChannelFingerprint(text)
 }
 
+// sanitizeTextForSystem system 级文本净化：先走既有完整链（header / 键值 / 身份句 /
+// 品牌句），再把 workspace root 这个渠道指纹短语换成语序自然的 root of the workspace。
+//
+// 为什么是「先完整链 + 一次定点替换」而不是「只替换短语」：system 消息此前一直走
+// sanitizeText，其他指纹（Claude Code 身份句、billing header）在 system 里最常见，
+// 换成只做短语替换会让这些指纹从此漏网。
+//
+// 为什么该短语不进 sanitizeFeatures / hasChannelFingerprint：它单独出现时不该触发
+// 键值剥离。上游 review 的反例 {"command":"echo workspace root; cc_version=1"} 被
+// 全通道清洗后 cc_version=1 被删、JSON 失效，正是这条要避开的。
+func sanitizeTextForSystem(text string) string {
+	out := sanitizeText(text)
+	if !sanitizeWorkspaceRootRe.MatchString(out) {
+		return out
+	}
+	return sanitizeWorkspaceRootRe.ReplaceAllString(out, "${1}root of the workspace")
+}
+
 // sanitizeContent 兼容字符串与多模态数组；只动 text part，image 等 part 不动。
 // 返回净化后的值及是否发生变化。
-func sanitizeContent(v any) (any, bool) {
+func sanitizeContent(v any) (any, bool) { return sanitizeContentWith(v, sanitizeText) }
+
+// sanitizeContentForSystem system 级的 content 净化：形状同 sanitizeContent，
+// 文本部分走 sanitizeTextForSystem（多一条 workspace root 改写）。
+func sanitizeContentForSystem(v any) (any, bool) {
+	return sanitizeContentWith(v, sanitizeTextForSystem)
+}
+
+// sanitizeContentWith 按传入的文本净化函数处理 content（string 或 text part 数组）。
+func sanitizeContentWith(v any, fix func(string) string) (any, bool) {
 	switch c := v.(type) {
 	case string:
-		s := sanitizeText(c)
+		s := fix(c)
 		return s, s != c
 	case []any:
 		changed := false
@@ -247,7 +291,7 @@ func sanitizeContent(v any) (any, bool) {
 			if !ok {
 				continue
 			}
-			if s := sanitizeText(text); s != text {
+			if s := fix(text); s != text {
 				m["text"] = s
 				changed = true
 			}
@@ -291,6 +335,13 @@ func sanitizeToolCalls(v any) bool {
 }
 
 // sanitizeMessages 净化 messages 中的 content 与 tool_calls；任一命中返回 true。
+//
+// 按角色分流：system 的 content 多洗一条 workspace root 渠道指纹（见
+// sanitizeTextForSystem），其余角色的 content、所有角色的 reasoning /
+// reasoning_content / tool_calls.arguments 一律走原 sanitizeText，同一短语原样出站。
+//
+// 只认 system：payload.go 的 normalizeRoles 在 sanitizeMessages 之前跑，已把 developer
+// 改写成 system，这里不必再认 developer。
 func sanitizeMessages(messages []any) bool {
 	changed := false
 	for _, msg := range messages {
@@ -298,10 +349,16 @@ func sanitizeMessages(messages []any) bool {
 		if !ok {
 			continue
 		}
+		// system 的 content 走 system 版；其余字段（reasoning / reasoning_content /
+		// tool_calls）无论什么角色都走通用版。
+		fixContent := sanitizeContent
+		if role, ok := m["role"].(string); ok && strings.EqualFold(strings.TrimSpace(role), "system") {
+			fixContent = sanitizeContentForSystem
+		}
 		// content 与 tool_calls 各自独立判断：content 可以为 null（工具调用轮），
 		// 早期版本在此 continue，导致这类消息的 tool_calls 完全不被净化。
 		if c, ok := m["content"]; ok {
-			if nc, ch := sanitizeContent(c); ch {
+			if nc, ch := fixContent(c); ch {
 				m["content"] = nc
 				changed = true
 			}
