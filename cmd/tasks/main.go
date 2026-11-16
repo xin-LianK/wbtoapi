@@ -56,8 +56,9 @@ func main() {
 
 	up := upstream.New()
 	// 跨账号汇总：同一个新任务在一个账号上看到就够了
-	missing := map[string]string{}    // code -> 标题（需人工实现）
-	byFamily := map[string][]string{} // 族名 -> 码（自动跑，无需改代码）
+	missing := map[string]string{}     // code -> 标题（需人工实现）
+	unsupported := map[string]string{} // code -> 原因（面板做不了，已知限制）
+	byFamily := map[string][]string{}  // 族名 -> 码（自动跑，无需改代码）
 	total := 0
 
 	for _, f := range files {
@@ -96,9 +97,16 @@ func main() {
 		for _, t := range tasks {
 			total++
 			mark := "✅"
+			reason := panel.AutoTaskUnsupportedReason(t.TaskCode)
 			switch {
 			case supported[t.TaskCode]:
 				// 逐码白名单：已是精确实现
+			case reason != "":
+				// 面板做不了：已知限制，不是待补的缺口（见 autotask.go 的 unsupportedTaskCodes）
+				mark = "⛔"
+				if _, ok := unsupported[t.TaskCode]; !ok {
+					unsupported[t.TaskCode] = reason
+				}
 			case panel.AutoTaskFamilyOf(t.TaskCode) != "":
 				mark = "🔁"
 				fam := panel.AutoTaskFamilyOf(t.TaskCode)
@@ -124,8 +132,20 @@ func main() {
 		}
 		fmt.Println()
 	}
+	if len(unsupported) > 0 {
+		codes := make([]string, 0, len(unsupported))
+		for c := range unsupported {
+			codes = append(codes, c)
+		}
+		sort.Strings(codes)
+		fmt.Printf("⛔ %d 个任务面板做不了（已知限制，不是缺口，不用补代码）：\n", len(codes))
+		for _, c := range codes {
+			fmt.Printf("   %-34s %s\n", c, unsupported[c])
+		}
+		fmt.Println()
+	}
 	if len(missing) == 0 {
-		fmt.Printf("✅ 全部 %d 个任务都有覆盖（精确实现或事件链族）。\n", total)
+		fmt.Printf("✅ 全部 %d 个任务都有覆盖（精确实现、事件链族或已知限制）。\n", total)
 		return
 	}
 	codes := make([]string, 0, len(missing))
@@ -141,6 +161,8 @@ func main() {
 	fmt.Println("判据靠解包客户端或抓一次真实操作样本；跑完用本工具复查是否还有缺口。")
 	fmt.Println("若该码属于已有事件链族（判据只是「事件到没到」），把它加进 eventChainActions 的")
 	fmt.Println("familyPrefix 即可，族内后续所有新码都不再需要改代码。")
+	fmt.Println("面板确实做不到的（要真人操作、判据没实测），登记到 unsupportedTaskCodes 而不是补映射，")
+	fmt.Println("否则它会被一直当成「需人工实现」的待办。")
 }
 
 // sortedFamilyNames 族名升序（输出稳定）。

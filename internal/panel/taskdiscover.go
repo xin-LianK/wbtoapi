@@ -52,14 +52,15 @@ var discoverAutoRun atomic.Bool
 type DiscoveredTask struct {
 	Code        string    `json:"code"`
 	Title       string    `json:"title,omitempty"`
-	Family      string    `json:"family,omitempty"`  // 命中的事件链族；空 = 需人工实现
-	Implemented bool      `json:"implemented"`       // 精确白名单或已登记 mp 码
-	Auto        bool      `json:"auto"`              // 当前是否会被自动执行
-	Source      string    `json:"source,omitempty"`  // default | miniprogram
-	Credit      int64     `json:"credit,omitempty"`  // 奖励积分
-	Target      int64     `json:"target,omitempty"`  // 目标进度
-	Current     int64     `json:"current,omitempty"` // 观察到的最好进度
-	Stuck       int       `json:"stuck,omitempty"`   // 连续无进展轮数
+	Family      string    `json:"family,omitempty"`      // 命中的事件链族；空 = 需人工实现
+	Implemented bool      `json:"implemented"`           // 精确白名单或已登记 mp 码
+	Unsupported bool      `json:"unsupported,omitempty"` // 面板做不了（见 unsupportedTaskCodes），不是待办
+	Auto        bool      `json:"auto"`                  // 当前是否会被自动执行
+	Source      string    `json:"source,omitempty"`      // default | miniprogram
+	Credit      int64     `json:"credit,omitempty"`      // 奖励积分
+	Target      int64     `json:"target,omitempty"`      // 目标进度
+	Current     int64     `json:"current,omitempty"`     // 观察到的最好进度
+	Stuck       int       `json:"stuck,omitempty"`       // 连续无进展轮数
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
 	Note        string    `json:"note,omitempty"`
@@ -167,12 +168,13 @@ func exactActionFor(code string) *autoAction {
 
 // TaskDiscoverStats 一轮发现的汇总。
 type TaskDiscoverStats struct {
-	Accounts int `json:"accounts"` // 参与扫描的账号数
-	Tasks    int `json:"tasks"`    // 观察到的任务码总数
-	New      int `json:"new"`      // 本轮首次出现的码
-	AutoRun  int `json:"auto_run"` // 族内可自动跑的码
-	Manual   int `json:"manual"`   // 需人工实现（无族规则）的码
-	Errors   int `json:"errors"`   // 拉取失败次数（不中断）
+	Accounts    int `json:"accounts"`    // 参与扫描的账号数
+	Tasks       int `json:"tasks"`       // 观察到的任务码总数
+	New         int `json:"new"`         // 本轮首次出现的码
+	AutoRun     int `json:"auto_run"`    // 族内可自动跑的码
+	Manual      int `json:"manual"`      // 需人工实现（无族规则）的码
+	Unsupported int `json:"unsupported"` // 面板做不了（已知限制，不是待办）的码
+	Errors      int `json:"errors"`      // 拉取失败次数（不中断）
 }
 
 // observedTask 一条观察结果。Source 只用于面板展示是哪个口径下发的。
@@ -295,9 +297,17 @@ func ObserveTasks(obs []observedTask) TaskDiscoverStats {
 		d.LastSeen = now
 
 		met := d.Target > 0 && d.Current >= d.Target
+		reason := AutoTaskUnsupportedReason(code)
+		d.Unsupported = false
 		switch {
 		case d.Implemented:
 			d.Auto, d.Note = false, ""
+		case reason != "":
+			// 面板做不了：加映射也跑不通，不能显示成「需人工实现」的待办。
+			// 放在族判定之前——这类码本来就不该被族前缀当自动跑项接走（当前两个码都没有族前缀，
+			// 顺序留作防御，将来若某个已知限制的码落进族前缀范围也不会被误跑）。
+			d.Auto, d.Unsupported = false, true
+			d.Note = "面板做不了：" + reason
 		case d.Family == "":
 			d.Auto = false
 			d.Note = "需人工实现：无事件链族规则，在 autoActions 补一行映射"
@@ -315,9 +325,12 @@ func ObserveTasks(obs []observedTask) TaskDiscoverStats {
 		if isNew {
 			log.Printf("panel: 发现新任务 code=%s title=%q 族=%q 自动跑=%v", code, d.Title, d.Family, d.Auto)
 		}
-		if d.Auto {
+		switch {
+		case d.Auto:
 			st.AutoRun++
-		} else if !d.Implemented {
+		case d.Unsupported:
+			st.Unsupported++
+		case !d.Implemented:
 			st.Manual++
 		}
 	}
@@ -325,15 +338,16 @@ func ObserveTasks(obs []observedTask) TaskDiscoverStats {
 	saveDiscoverLocked()
 	disc.Unlock()
 
-	if st.New > 0 || st.Manual > 0 {
-		log.Printf("panel: 任务发现：%d 个账号 · 观察 %d 个码 · 新增 %d · 族内自动跑 %d · 需人工或已停跑 %d",
-			st.Accounts, st.Tasks, st.New, st.AutoRun, st.Manual)
+	if st.New > 0 || st.Manual > 0 || st.Unsupported > 0 {
+		log.Printf("panel: 任务发现：%d 个账号 · 观察 %d 个码 · 新增 %d · 族内自动跑 %d · 面板做不了 %d · 需人工或已停跑 %d",
+			st.Accounts, st.Tasks, st.New, st.AutoRun, st.Unsupported, st.Manual)
 	}
 	return st
 }
 
 // DiscoveredTaskList 面板用：按「待处理优先」排序的快照。
-// 排序：未实现且未自动跑（需人工）→ 自动跑中 → 已实现；同组内按最后观察时间倒序。
+// 排序：未实现且未自动跑（需人工）→ 自动跑中 → 已实现 → 面板做不了；同组内按最后观察时间倒序。
+// 面板做不了（已知限制）排在最后：它们没有待办含义，排在前面会把待补代码的缺口挤下去。
 func DiscoveredTaskList() []DiscoveredTask {
 	disc.RLock()
 	defer disc.RUnlock()
@@ -343,6 +357,8 @@ func DiscoveredTaskList() []DiscoveredTask {
 	}
 	rank := func(t DiscoveredTask) int {
 		switch {
+		case t.Unsupported:
+			return 3
 		case t.Implemented:
 			return 2
 		case t.Auto:

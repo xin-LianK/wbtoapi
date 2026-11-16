@@ -18,8 +18,8 @@
 //   - expert_5 / Expert_team_use_3：真实专家列表 + 召唤链 + 真实 chat（服务端 requestId）
 //   - expert_actual_use（三账号实测）
 //   - Hp_Appearance：appearance/set + appearance_skin_apply 事件（两账号实测）
+//   - skill_1：真实对话 + skill_info 技能加载事件（2026-09-12 人杰2 实测点亮）
 //
-// 仍未破解：skill_1（疑似要求真实 Skill 工具调用）。
 // 不做：Expert_lighthouse（需真实连接器授权）、Expert_Philanthropy（真实捐款）。
 //
 // 所有动作幂等：已 claimed/已达标的任务直接跳过，不重复消耗上游配额。
@@ -293,6 +293,11 @@ func autoActionFor(code string) *autoAction {
 			return &autoActions[i]
 		}
 	}
+	// 面板做不了（已知限制）：不加动作、也不走族回落。放这里当兜底，将来若某个已知
+	// 限制的码落进某个族前缀范围，也不会被判成「族内新码」自动跑一轮。
+	if unsupportedTaskCodes[code] != "" {
+		return nil
+	}
 	// 族回落受两个开关约束：自动跑必须开启，且该码没被判为「跑了也不动」。
 	if !discoverAutoRun.Load() || discoverExhausted(code) {
 		return nil
@@ -335,6 +340,27 @@ var mpTaskCodes = map[string]bool{
 
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
 func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
+
+// unsupportedTaskCodes 面板**做不了**（而不是「还没实现」）的任务码 → 一句话原因。
+//
+// 与 autoActions 的缺口分开登记：这些码加多少行映射都跑不通，不是待办。任务发现、
+// cmd/tasks 与面板据此显示「面板做不了」，不再并进「需人工实现」的统计与排序
+// （后者会被当成没人补代码的待办，看着像遗漏）。
+//
+// 两类原因不要混：
+//   - 需要真人操作（微信里关注公众号满 24 小时），接口层面没有可上报的判据；
+//   - 判据未经实测（skill_share 疑似要真实分享行为）。盲写动作会让「一键完成」
+//     白跑一轮真实对话、白占配额，比不做更糟——先登记口径，实测后再决定。
+var unsupportedTaskCodes = map[string]string{
+	"wb_wechat_oa_subscribe_task": "需在微信里关注公众号满 24 小时，面板做不了",
+	"skill_share":                 "判据未实测（疑似需真实技能分享行为），暂不自动",
+}
+
+// AutoTaskUnsupportedReason 任务码是否属于「面板做不了」，返回原因（非该集合为空串）。
+// 供任务发现（taskdiscover.go）与诊断工具（cmd/tasks）统一口径。
+func AutoTaskUnsupportedReason(code string) string {
+	return unsupportedTaskCodes[strings.TrimSpace(code)]
+}
 
 // AutoTaskCodes 返回已实现自动化的任务码，供诊断工具（cmd/tasks）对照上游下发列表。
 // 上游新增任务时不必改代码就能发现缺口：跑 cmd/tasks 看哪些码不在这个集合里。

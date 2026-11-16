@@ -5,6 +5,7 @@
 package panel
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -278,6 +279,76 @@ func TestRunTaskDiscoverOnce(t *testing.T) {
 	}
 	if d := byCode["brand_new_task"]; d.Credit != 50 {
 		t.Errorf("credit = %d, want 50（奖励字段应被记录）", d.Credit)
+	}
+}
+
+// TestDiscoverUnsupportedCodes 面板做不了的任务码（wb_wechat_oa_subscribe_task 要真人关注、
+// skill_share 判据未实测）不能再算「需人工实现」：它们加映射也跑不通，混在待补缺口里
+// 会让面板一直显示成待办。
+func TestDiscoverUnsupportedCodes(t *testing.T) {
+	resetDiscover(t)
+	b := &sweepBackend{
+		listFn: func(bool) []map[string]any {
+			return []map[string]any{
+				sweepTask("wb_wechat_oa_subscribe_task", 1, 0, "accepted", nil),
+				sweepTask("skill_share", 1, 0, "accepted", nil),
+				sweepTask("brand_new_task", 1, 0, "accepted", nil), // 真缺口，仍应算需人工
+			}
+		},
+	}
+	p := newSweepPanel(t, b, &auth.Auth{UID: "u1", AccessToken: "at"})
+	st := p.RunTaskDiscoverOnce()
+
+	if st.Unsupported != 2 {
+		t.Errorf("unsupported = %d, want 2", st.Unsupported)
+	}
+	if st.Manual != 1 {
+		t.Errorf("manual = %d, want 1（只有 brand_new_task 是真缺口）", st.Manual)
+	}
+
+	byCode := map[string]DiscoveredTask{}
+	for _, d := range DiscoveredTaskList() {
+		byCode[d.Code] = d
+	}
+	for _, code := range []string{"wb_wechat_oa_subscribe_task", "skill_share"} {
+		d, ok := byCode[code]
+		if !ok {
+			t.Fatalf("%s 未被记录", code)
+		}
+		if !d.Unsupported || d.Auto || d.Implemented {
+			t.Errorf("%s = %+v，应为面板做不了（不自动跑、不算已实现）", code, d)
+		}
+		if !strings.Contains(d.Note, "面板做不了") {
+			t.Errorf("%s note = %q，应标明面板做不了", code, d.Note)
+		}
+		if autoActionFor(code) != nil {
+			t.Errorf("%s 不该有自动动作", code)
+		}
+		if growthPending(upstream.Task{TaskCode: code, Target: 1}) {
+			t.Errorf("%s 不该进待办", code)
+		}
+	}
+	if d := byCode["brand_new_task"]; d.Unsupported {
+		t.Errorf("brand_new_task = %+v，真缺口不该标成面板做不了", d)
+	}
+	// 面板做不了排在最后：它们没有待办含义。
+	list := DiscoveredTaskList()
+	if len(list) > 0 && list[len(list)-1].Code == "brand_new_task" {
+		t.Errorf("真缺口不该排在面板做不了的后面：%+v", list)
+	}
+}
+
+// TestAutoTaskUnsupportedReason 登记表本身：两个已知码有原因，普通码为空。
+func TestAutoTaskUnsupportedReason(t *testing.T) {
+	for _, code := range []string{"wb_wechat_oa_subscribe_task", "skill_share", " skill_share "} {
+		if AutoTaskUnsupportedReason(code) == "" {
+			t.Errorf("%q 应登记为面板做不了", code)
+		}
+	}
+	for _, code := range []string{"chat_5", "template_9", ""} {
+		if r := AutoTaskUnsupportedReason(code); r != "" {
+			t.Errorf("%q 不该登记为面板做不了：%q", code, r)
+		}
 	}
 }
 
