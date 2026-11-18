@@ -103,6 +103,8 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 快过期硬分层（expiring_first）：生效成本层内只要存在窗口内的快过期账号，本次
 	// 选号就把候选收窄到这些账号。层内仍走下面的权重排序 + top5 加权抽签 + 防撞号 +
 	// 在途上限，所以是「先花快过期的这一批」，不是「先花最早过期的那一个」。
+	// 层内谁多接，由 routingWeightOf 的紧迫度倍数决定（见 urgency.go）：剩余越少、
+	// 额度越大的号倍数越高，而不是余额最高的号权重最高。
 	onlyExpiring := p.restrictToExpiringLocked(cands, bestTier, reqModel, now)
 	// 权重只算一次：顶 5 截断要排序，若在 sort 比较器里现算 weightOf 会翻成 O(n log n) 次
 	// 冗余浮点计算（46 账号约 500 次）。先做 O(n) 预计算，再按 (权重, uid) 排序。
@@ -120,7 +122,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			if ti != bestTier {
 				continue
 			}
-			if restrictExpiring && !expiringNow(e, now) {
+			if restrictExpiring && !p.urgentNow(e, now) {
 				continue
 			}
 			out = append(out, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
@@ -494,8 +496,11 @@ func expiringNow(e *entry, now time.Time) bool {
 // 里没有快过期号，而收费层里有，也不能为了花快过期积分去接收费模型——那正好把
 // 保底/免费优先的收益还回去。
 //
+// 「快过期」的判据是 urgentNow（紧迫度倍数 > 1，见 urgency.go），不是 expiringNow：
+// 有窗口内批次但额度低于 urgency_min_credits 的号不算，免得几分钱的尾款独占候选集。
+//
 // 两个开关都开才生效：prefer_expiring 是总闸（关掉即完全不使用到期信息），
-// expiring_first 决定是硬分层还是 ×3 软加权。调用方持 p.mu。
+// expiring_first 决定是硬分层还是软加权。调用方持 p.mu。
 func (p *Pool) restrictToExpiringLocked(cands []*entry, tier int, model string, now time.Time) bool {
 	if !p.expiringFirstEnabled() {
 		return false
@@ -504,21 +509,18 @@ func (p *Pool) restrictToExpiringLocked(cands []*entry, tier int, model string, 
 		if ti, _ := e.costTierOf(model, now); ti != tier {
 			continue
 		}
-		if expiringNow(e, now) {
+		if p.urgentNow(e, now) {
 			return true
 		}
 	}
 	return false
 }
 
-// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
-// 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
+// routingWeightOf 在普通账号权重上叠加到期紧迫度倍数（见 urgency.go）。
+// 无窗口内有效批次、额度低于下限或 prefer_expiring=false 时倍数恒为 1，结果与旧
+// weightOf 完全一致。
 func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
-	w := p.weightOf(e, maxCredits, now)
-	if p.preferExpiring && expiringNow(e, now) {
-		return w * expiringVirtualSlots
-	}
-	return w
+	return p.weightOf(e, maxCredits, now) * p.urgencyBoostOf(e, now)
 }
 
 // SetCredits 更新账号余额。

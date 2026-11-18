@@ -181,7 +181,9 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	p.SetRestrictionWave(cfg.Pool.RestrictionWaveThreshold, cfg.RestrictionWaveWindowDur, cfg.RestrictionWavePauseDur)
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring)
-	p.SetExpiringFirst(cfg.Pool.ExpiringFirst)             // 快过期硬分层（默认开）
+	p.SetExpiringFirst(cfg.Pool.ExpiringFirst) // 快过期硬分层（默认开）
+	p.SetUrgency(cfg.Pool.UrgencyBaseline, cfg.Pool.UrgencyMaxBoost, cfg.Pool.UrgencyMinCredits)
+	p.SetExpiringWindow(cfg.ExpiringSoonDur)               // 紧迫度窗口（与调度器「快过期」同口径）
 	p.SetCrossDomainFallback(cfg.Pool.CrossDomainFallback) // 裸名跨域回退（issue #135，默认关闭）
 	_ = p.SetScheduling(cfg.Pool.Strategy, cfg.Pool.AccountOrder)
 
@@ -244,6 +246,8 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	up.PassthroughIP = cfg.Upstream.PassthroughIP
 	up.ModelOptimization.Store(cfg.Upstream.ModelOptimization)
 	applyCacheRetention(up, cfg.Upstream.CacheRetention, cfg.Upstream.CacheRetentionModels)
+	// 出站强制 reasoning_effort（配置 upstream.effort_overrides）：空表 = 关闭覆写。
+	up.SetEffortOverrides(cfg.Upstream.EffortOverrides)
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
@@ -963,7 +967,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
 	up.ModelOptimization.Store(newCfg.Upstream.ModelOptimization)
 	applyCacheRetention(up, newCfg.Upstream.CacheRetention, newCfg.Upstream.CacheRetentionModels)
-	upstream.SetTLSMimic(newCfg.Upstream.TLSFingerprint) // TLS 指纹伪装开关（atomic，新建连接起用）
+	up.SetEffortOverrides(newCfg.Upstream.EffortOverrides) // 出站强制档位热生效（空表 = 关闭）
+	upstream.SetTLSMimic(newCfg.Upstream.TLSFingerprint)   // TLS 指纹伪装开关（atomic，新建连接起用）
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
 	p.SetMaxInFlight(newCfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
@@ -977,7 +982,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetRestrictionWave(newCfg.Pool.RestrictionWaveThreshold, newCfg.RestrictionWaveWindowDur, newCfg.RestrictionWavePauseDur)
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
-	p.SetExpiringFirst(newCfg.Pool.ExpiringFirst)             // 快过期硬分层热生效
+	p.SetExpiringFirst(newCfg.Pool.ExpiringFirst) // 快过期硬分层热生效
+	p.SetUrgency(newCfg.Pool.UrgencyBaseline, newCfg.Pool.UrgencyMaxBoost, newCfg.Pool.UrgencyMinCredits)
+	p.SetExpiringWindow(newCfg.ExpiringSoonDur)               // 紧迫度窗口热生效（与调度器同口径）
 	p.SetCrossDomainFallback(newCfg.Pool.CrossDomainFallback) // 裸名跨域回退热生效（issue #135）
 	// 出站节奏热生效：只换参数、不重建实例——重建会让所有账号的 nextAt 归零，
 	// 等于瞬间放行一波突发，恰好是这一层要防的事。pacer 为 nil（裸用/测试）时

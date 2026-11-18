@@ -80,7 +80,10 @@ func TestAvailableUIDsForModelRealm(t *testing.T) {
 func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 	p := realmPool(t)
 	now := time.Now()
-	p.SetCreditsDetailed("cn2", 100, 100, 100, now.Add(time.Hour), 100)
+	// 紧迫度加权以 expiring_soon 窗口为判据；100 分 / 50 小时 → need=2/h →
+	// 倍数 1+5×(2/5)=3，正好对应下面的 3 次重复。
+	p.SetExpiringWindow(168 * time.Hour)
+	p.SetCreditsDetailed("cn2", 100, 100, 100, now.Add(50*time.Hour), 100)
 
 	got := p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn", nil)
 	want := []string{"cn1", "cn2", "cn2", "cn2"}
@@ -263,8 +266,9 @@ func TestCheapestWeightedUIDsForModelRealm(t *testing.T) {
 	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"cn1"}) {
 		t.Fatalf("同一窗口内不再探索，got %v", got)
 	}
-	// 快过期虚拟实例权重照常。
-	p.SetCreditsDetailed("cn1", 100, 100, 100, time.Now().Add(time.Hour), 100)
+	// 快过期虚拟实例权重照常（100 分 / 50 小时 → 倍数 3，见 urgency.go）。
+	p.SetExpiringWindow(168 * time.Hour)
+	p.SetCreditsDetailed("cn1", 100, 100, 100, time.Now().Add(50*time.Hour), 100)
 	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "cn", nil); !reflect.DeepEqual(got, []string{"cn1", "cn1", "cn1"}) {
 		t.Fatalf("快过期号应出现 3 次，got %v", got)
 	}

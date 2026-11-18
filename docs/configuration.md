@@ -142,8 +142,11 @@
 | `pool.cross_realm` | `off` | 跨域负载均衡：`off` 关闭、`merge` 合池、`cn_first` 国内版优先；老配置的 `true` 读成 `merge`、`false` 读成 `off`，见[网关与选号](gateway.md#跨域负载均衡) |
 | `pool.credit_floor` | `0` | 积分保底：余额低于该值的账号不再接实测收费的模型；`0` = 关闭 |
 | `pool.prefer_expiring` | `true` | 快过期积分偏好总开关。关掉后完全不使用到期时间选号 |
-| `pool.expiring_first` | `true` | 硬分层：生效成本层内只要有 `expiring_soon` 窗口内的快过期账号，就只在这些账号里选号（新会话分配、请求轮换同口径）。关掉退回「×3 软加权」；层内仍是加权随机 + 防撞号，不按到期时间先后排序 |
-| `pool.expiring_soon` | `168h` | 「快过期」的窗口；窗口越大命中的号越多、偏好越稀；空或 `0` 关闭 |
+| `pool.expiring_first` | `true` | 硬分层：生效成本层内只要有 `expiring_soon` 窗口内、且单批剩余达到 `urgency_min_credits` 的快过期账号，就只在这些账号里选号（新会话分配、请求轮换同口径）。关掉退回纯软加权；层内仍是加权随机 + 防撞号，谁多接由紧迫度倍数决定 |
+| `pool.expiring_soon` | `168h` | 「快过期」的窗口，同时是紧迫度加权的适用上限：窗口外的批次即使额度很大也不算急。想救「只剩几小时」的批次就收到 `24h`；空或 `0` 关闭 |
+| `pool.urgency_baseline` | `3` | 紧迫度加权的参考消耗速率（分/小时）：倍数 = `1 + urgency_max_boost × need/(need+baseline)`，`need` = 单批剩余额度 ÷ 剩余小时。越小加权越猛 |
+| `pool.urgency_max_boost` | `5` | 紧迫度倍数上限（权重最多 ×6）。必须大到能压过积分占比项（最高 +10 权重），否则最急但余额低的号仍会输给余额高的不急号 |
+| `pool.urgency_min_credits` | `30` | 单个到期批次剩余低于此值就不参与紧迫度加权（几分的尾款不值得调流量）；`0` = 不设下限 |
 | `pool.cost_explore_interval` | `30m` | 免费层垄断时，每个窗口把一个真实请求改道给成本未知的账号，以便学到它的真实成本；`0` = 关闭 |
 | `pool.breaker_threshold` | `3` | 连续失败几次触发熔断 |
 | `pool.breaker_cooldown` / `pool.breaker_cooldown_max` | `30m` / `6h` | 熔断基础时长与指数退避上限 |

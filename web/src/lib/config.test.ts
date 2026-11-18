@@ -103,4 +103,46 @@ describe('配置表单', () => {
     expect(changedFields(a, { ...a, listen: ' :7863 ' })).toEqual([])
     expect(changedFields(a, { ...a, listen: ':8000', prefer_expiring: true })).toEqual(['listen', 'prefer_expiring'])
   })
+
+  // 键值对字段（upstream.effort_overrides）：对象在表单里是「k=v, k2=v2」文本。
+  it('键值对字段：回填按 key 排序、提交回对象、清空发 null', () => {
+    const cfg = { upstream: { effort_overrides: { 'glm-5.2': 'high', 'deepseek-v4.1-flash': 'high' } } }
+    const form = toForm(cfg)
+    expect(form.effort_overrides).toBe('deepseek-v4.1-flash=high, glm-5.2=high')
+    const body = fromForm({ ...form, effort_overrides: 'a=low, b=max' }) as { upstream: Record<string, unknown> }
+    expect(body.upstream.effort_overrides).toEqual({ a: 'low', b: 'max' })
+    // 清空必须发 null：后端保存是逐键深合并，发 {} 等于没改动，删不掉已有条目
+    const cleared = fromForm({ ...form, effort_overrides: '' }) as { upstream: Record<string, unknown> }
+    expect(cleared.upstream.effort_overrides).toBeNull()
+  })
+
+  it('键值对字段校验：格式与档位白名单', () => {
+    const f = field('effort_overrides')
+    expect(validateField(f, '')).toBeNull()
+    expect(validateField(f, 'deepseek-v4.1-flash=high')).toBeNull()
+    expect(validateField(f, 'cn:deepseek-v4.1-flash=HIGH')).toBeNull()
+    expect(validateField(f, 'deepseek-v4.1-flash')).toContain('模型=档位')
+    expect(validateField(f, 'deepseek-v4.1-flash=ultra')).toContain('档位只能是')
+  })
+
+  // 紧迫度加权三参数（pool.urgency_*）：纯数字字段，空值 = 沿用现值。
+  it('紧迫度加权参数能回填与提交，负值被校验拦住', () => {
+    const cfg = { pool: { urgency_baseline: 2.5, urgency_max_boost: 8, urgency_min_credits: 50 } }
+    const form = toForm(cfg)
+    expect(form.urgency_baseline).toBe('2.5')
+    expect(form.urgency_max_boost).toBe('8')
+    expect(form.urgency_min_credits).toBe('50')
+
+    const body = fromForm({ ...form, urgency_max_boost: '6', urgency_min_credits: '20' }) as {
+      pool: Record<string, unknown>
+    }
+    expect(body.pool.urgency_max_boost).toBe(6)
+    expect(body.pool.urgency_min_credits).toBe(20)
+    // 清空 = 不提交该键（沿用服务端现值）
+    const cleared = fromForm({ ...form, urgency_baseline: '' }) as { pool: Record<string, unknown> }
+    expect('urgency_baseline' in cleared.pool).toBe(false)
+
+    expect(validateField(field('urgency_max_boost'), '-1')).toBeTruthy()
+    expect(validateField(field('urgency_min_credits'), '-5')).toBeTruthy()
+  })
 })

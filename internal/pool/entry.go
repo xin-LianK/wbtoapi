@@ -644,6 +644,11 @@ const softStreakShiftMax = 16
 const (
 	defaultIdleWeightPerHour = 0.5
 	defaultIdleWeightMax     = 5.0
+	// 到期紧迫度加权的缺省参数（见 urgency.go）。
+	// baseline = 3 分/小时：低于这个速率就能烧完的批次，risk 不到 0.5，加权温和。
+	defaultUrgencyBaseline   = 3.0
+	defaultUrgencyMaxBoost   = 5.0
+	defaultUrgencyMinCredits = 30
 )
 
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。

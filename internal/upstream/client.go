@@ -927,6 +927,11 @@ type Client struct {
 	accountMu       sync.RWMutex
 	accountCatalogs map[string]accountCatalog
 
+	// effortOverrides 出站强制档位（配置 upstream.effort_overrides，面板保存即热生效）。
+	// 键为不带 cn:/global: 前缀的裸模型名，值为出站 reasoning_effort。零值 = 关闭覆写，
+	// 行为与没有这个功能时完全一致（见 payload.go applyEffortOverrides）。
+	effortOverrides atomic.Value // map[string]string
+
 	// globalModels 缓存 global 模型名目录探测结果（成功 ∩ 静态 overlay；
 	// 1h TTL + 5min 负缓存），见 global_models.go。按实例持有，测试新建 Client 即隔离。
 	globalModels fetchGlobalModelsCache
@@ -1183,7 +1188,7 @@ func (c *Client) prepareBody(body []byte, realm string) []byte {
 		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
+	body = PrepareBodyOptWithEffortOverride(body, c.SanitizeFingerprints.Load(), efforts, defs, c.effortOverridesSnapshot())
 	// 不再自动补 prompt_cache_key（客户端自己带的照转）：官方客户端不发它；10-19 生产实测
 	// deepseek、glm、kimi 两域带不带都不多命中，glm 会话 id 每轮换新时带它反而更少命中。
 	// 前缀缓存靠稳定的 X-Conversation-ID，见 ChatHeaders。
@@ -1201,6 +1206,30 @@ func (c *Client) cacheRetentionPolicy() CacheRetentionPolicy {
 		return *p
 	}
 	return CacheRetentionPolicy{}
+}
+
+// SetEffortOverrides 注入出站强制档位（upstream.effort_overrides，热更新）。
+// 键为裸模型名（不带 cn:/global:），值为 reasoning_effort 档位；空 map / nil 关闭覆写。
+// 存副本：调用方后续改自己的 map 不影响已生效的值。
+func (c *Client) SetEffortOverrides(m map[string]string) {
+	if len(m) == 0 {
+		c.effortOverrides.Store(map[string]string(nil))
+		return
+	}
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	c.effortOverrides.Store(cp)
+}
+
+// effortOverridesSnapshot 返回当前强制档位表；nil 表示未配置（不覆写）。
+func (c *Client) effortOverridesSnapshot() map[string]string {
+	if c == nil {
+		return nil
+	}
+	m, _ := c.effortOverrides.Load().(map[string]string)
+	return m
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。

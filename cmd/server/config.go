@@ -22,6 +22,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // Config 顶层配置。
@@ -256,6 +257,17 @@ type Config struct {
 		// VSCodeProductVersion 同上，但它是 CodeBuddy 扩展自己的版本（X-Product-Version 与 UA 第二段）。
 		// 空 = 内置默认 4.12.39997873（Open VSX 上的版本）。
 		VSCodeProductVersion string `json:"vscode_product_version"`
+		// EffortOverrides 出站强制 reasoning_effort：键为模型名，值为档位
+		// （off/minimal/low/medium/high/xhigh/max）。用途：一部分客户端默认发 medium，
+		// 而模型只支持 low/high/max 时按「不超过请求档位的最高支持档」的规则会被降到 low
+		// （medium 在档位序里居中，向下取整先撞到 low），配成 high 可纠正这种降级。
+		//
+		// 键写裸模型名即可；顺手写成 cn:xxx / global:xxx 也认，加载时剥掉前缀——出站前
+		// body 的 model 已被换成裸名，带前缀的键永远匹配不上。剥完重复按冲突报错。
+		// 覆写发生在 thinking 注入之后、降级校验之前：配了模型不支持的档位仍会被降级到
+		// 合法值，不会把非法参数送到上游换 400；客户端显式 thinking.type=disabled
+		// （关思考）时不覆写。面板保存即热生效。
+		EffortOverrides map[string]string `json:"effort_overrides"`
 	} `json:"upstream"`
 
 	Features struct {
@@ -318,20 +330,35 @@ type Config struct {
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// PreferExpiring 快过期积分偏好总开关，默认 true。开启且 expiring_soon 窗口内
-		// 存在有效批次时，该账号在选号中被优待（硬分层见 expiring_first；关掉硬分层
-		// 时是权重 ×3 的软加权）。不按到期时间排序、与批次金额无关（issue #101）。
+		// 存在有效批次时，该账号的选号权重乘以到期紧迫度倍数（见 urgency_baseline /
+		// urgency_max_boost；硬分层见 expiring_first）。不是「按到期时间排序」，而是
+		// 「按烧得完吗加权」：剩余越少、额度越大的批次倍数越高（issue #101 / #138）。
 		// 关闭后完全不使用到期信息选号，expiring_first 一并失效。
 		PreferExpiring bool `json:"prefer_expiring"`
 		// ExpiringFirst 快过期硬分层开关，默认 true（prefer_expiring 关掉时一并失效）。
 		// 开启后：生效成本层内只要存在 expiring_soon 窗口内的快过期账号，候选就收窄到
-		// 这些账号——从「×3 软加权」升级为「先花快过期」。层内仍走加权随机 / top5 /
-		// 防撞号 / 在途上限，所以不会把流量全砸在一个号上，但整体会明显偏向快过期号。
-		// 关闭 → 退回纯粹的 ×3 软加权（引入本开关前的行为）。
+		// 这些账号——从「软加权」升级为「先花快过期」。层内仍走加权随机 / top5 /
+		// 防撞号 / 在途上限，谁多接由紧迫度倍数决定。
+		// 关闭 → 退回纯软加权（快过期号整体倍数 > 1，但不会独占候选）。
 		ExpiringFirst bool `json:"expiring_first"`
-		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
-		// 此窗口内的批次令账号算作「快过期」（硬分层选它们 / 软加权 ×3）；窗口开大 → 命中账号变多、
-		// 偏好被稀释。空/0 = 禁用到期信息。
+		// ExpiringSoon 快过期积分窗口（如 "24h"）：签到/余额刷新时，到期时间在此窗口
+		// 内的批次令账号算作「快过期」（硬分层选它们 / 紧迫度加权）；同时是紧迫度加权
+		// 的适用上限——窗口外的批次即使额度很大也不算急。窗口开大 → 命中账号变多、
+		// 偏好被稀释，6 天后到期的号会和 1 小时后到期的号一起排队（所以别用默认 168h
+		// 去救「只剩几小时」的场景）。空/0 = 禁用到期信息。
 		ExpiringSoon string `json:"expiring_soon"`
+		// UrgencyBaseline 紧迫度加权的参考消耗速率（分/小时），默认 3。
+		// 批次要在到期前烧完所需的速率 need = 剩余额度 / 剩余小时；倍数 =
+		// 1 + urgency_max_boost × need/(need+baseline)。baseline 越小，同样的 need
+		// 越容易顶到上限（加权越猛）。
+		UrgencyBaseline float64 `json:"urgency_baseline"`
+		// UrgencyMaxBoost 紧迫度加权倍数上限，默认 5（即最多 ×6）。
+		// 必须大到能压过余额差才能真的改变排序：weightOf 的 credits 项最高贡献 +10，
+		// 所以 max_boost 太小时，余额高的不急号仍会赢过余额低的最急号。
+		UrgencyMaxBoost float64 `json:"urgency_max_boost"`
+		// UrgencyMinCredits 参与紧迫度加权的最低单批额度，默认 30（分）。
+		// 低于此值的批次不参与——剩几分钱的尾款不值得为它调流量。
+		UrgencyMinCredits int64 `json:"urgency_min_credits"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
 		// tier 1-only（探索=搭车改道，零新增上游请求；成功即毕业，失败走既有
@@ -595,6 +622,11 @@ func Default() *Config {
 	c.Pool.PreferExpiring = true
 	c.Pool.ExpiringFirst = true  // 层内有快过期号就只分给它们（真·先花快过期）
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	// 紧迫度加权默认值（见 urgency.go）：baseline 3 分/小时、最多 ×6、30 分以下不计。
+	// 倍数上限必须能压过 weightOf 的 credits 项（最高 +10），否则余额高的不急号仍会赢。
+	c.Pool.UrgencyBaseline = 3
+	c.Pool.UrgencyMaxBoost = 5
+	c.Pool.UrgencyMinCredits = 30
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
 	c.Pool.RestrictionWaveThreshold = 2
@@ -811,6 +843,23 @@ func applyEnv(c *Config) {
 			c.Pool.ExpiringFirst = b
 		}
 	}
+	// 紧迫度加权参数（见 internal/pool/urgency.go）。解析失败静默忽略，与本函数其他
+	// 数值型环境变量同一约定。
+	if v := os.Getenv("WB2A_URGENCY_BASELINE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Pool.UrgencyBaseline = f
+		}
+	}
+	if v := os.Getenv("WB2A_URGENCY_MAX_BOOST"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Pool.UrgencyMaxBoost = f
+		}
+	}
+	if v := os.Getenv("WB2A_URGENCY_MIN_CREDITS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			c.Pool.UrgencyMinCredits = n
+		}
+	}
 	if v := os.Getenv("WB2A_DNS"); v != "" {
 		c.DNSServers = splitCSV(v)
 	}
@@ -840,6 +889,9 @@ func applyEnv(c *Config) {
 
 func (c *Config) normalize() error {
 	var err error
+	if c.Upstream.EffortOverrides, err = normalizeEffortOverrides(c.Upstream.EffortOverrides); err != nil {
+		return err
+	}
 	if c.Pool.Strategy, err = c.Pool.Strategy.Normalize(); err != nil {
 		return fmt.Errorf("pool.strategy: %w", err)
 	}
@@ -968,6 +1020,17 @@ func (c *Config) normalize() error {
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
+	}
+	// 紧迫度加权参数（见 urgency.go）：非正值回落默认（0 在这里不是关停开关，
+	// 关停用 prefer_expiring=false，语义与硬分层一致）。
+	if c.Pool.UrgencyBaseline <= 0 {
+		c.Pool.UrgencyBaseline = 3
+	}
+	if c.Pool.UrgencyMaxBoost <= 0 {
+		c.Pool.UrgencyMaxBoost = 5
+	}
+	if c.Pool.UrgencyMinCredits < 0 {
+		c.Pool.UrgencyMinCredits = 30 // 0 是合法的「不设下限」，负值才回落默认
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
@@ -1167,6 +1230,47 @@ func (c *Config) normalizeDNSServers() error {
 	}
 	c.DNSServers = out
 	return nil
+}
+
+// normalizeEffortOverrides 校验并归一 upstream.effort_overrides：剥掉 cn:/global:
+// 前缀、小写化档位、剥完重复按冲突报错。
+//
+// 为什么要剥前缀：出站前 rewriteModel 已把请求体的 model 换成裸名，带前缀的键永远
+// 匹配不上——不剥的话表现为「配了却没生效」且毫无日志线索。剥完两个前缀指向同一
+// 模型时按冲突报错而不是「后写赢」：这张表不区分域，写 cn: 会连 global 一起改，
+// 宁可让配置者显式选一个值。
+//
+// 档位合法性用 upstream.ValidEffort 判定（与出站降级共用同一张档位表），配错直接
+// fail fast：这是可选功能，静默不生效比启动/保存时报错更难查。
+func normalizeEffortOverrides(in map[string]string) (map[string]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		model := strings.TrimSpace(k)
+		if model == "" {
+			return nil, fmt.Errorf("upstream.effort_overrides: 模型名不能为空")
+		}
+		switch {
+		case strings.HasPrefix(model, "cn:"):
+			model = strings.TrimPrefix(model, "cn:")
+		case strings.HasPrefix(model, "global:"):
+			model = strings.TrimPrefix(model, "global:")
+		}
+		if model == "" {
+			return nil, fmt.Errorf("upstream.effort_overrides[%s]: 去掉域前缀后模型名为空", k)
+		}
+		eff := strings.ToLower(strings.TrimSpace(v))
+		if !upstream.ValidEffort(eff) {
+			return nil, fmt.Errorf("upstream.effort_overrides[%s]: %q 不是合法档位（off/minimal/low/medium/high/xhigh/max）", k, v)
+		}
+		if prev, dup := out[model]; dup && prev != eff {
+			return nil, fmt.Errorf("upstream.effort_overrides[%s]: 去掉 cn:/global: 前缀后与其它条目冲突（%s 同时配了 %s 和 %s）", k, model, prev, eff)
+		}
+		out[model] = eff
+	}
+	return out, nil
 }
 
 func (c *Config) normalizeModelRoutes() error {

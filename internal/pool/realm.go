@@ -12,9 +12,8 @@ import (
 	"time"
 )
 
-// expiringVirtualSlots 快过期账号在新会话候选集中的虚拟实例权重。
-// 3:1 是温和偏好，不是固定比例：账号组成变化会自然改变最终占比。
-const expiringVirtualSlots = 3
+// 到期紧迫度的虚拟实例换算见 urgency.go（urgencySlotsLocked）：旧实现是常数
+// expiringVirtualSlots=3，所有快过期号同权；现在按各号自己的「烧得完吗」取整。
 
 // CatalogUIDForRealm 拉该域目录用的账号：可用账号里按 UID 排序第一个个人号，没有个人号时
 // 才用企业号。域目录要的是个人号视角——企业号的名单因企业而异，由它们各自的目录单独记
@@ -104,9 +103,10 @@ func (p *Pool) ServableForModelRealm(model, realm string) int {
 
 // WeightedAvailableUIDsForModelRealm 返回带虚拟实例权重的可用账号列表。
 //
-// 普通账号出现 1 次；有效快过期账号出现 expiringVirtualSlots 次。调用方继续按
-// 原有序列表哈希，即可让新会话对快过期账号形成温和偏好。重复项按 UID 排序后
-// 展开，保证同一账号拓扑下不同进程得到一致列表。
+// 普通账号出现 1 次；到期紧迫的账号按紧迫度出现多次（urgencySlotsLocked，
+// 1~maxUrgencySlots，见 urgency.go）。调用方继续按原有序列表哈希，即可让新会话对
+// 快过期账号形成温和偏好。重复项按 UID 排序后展开，保证同一账号拓扑下不同进程
+// 得到一致列表。
 //
 // 该方法是现有 AvailableUIDsForModelRealm 的增量入口，不改变旧方法语义，也不
 // 修改配置、状态或 Redis schema。prefer_expiring=false 时退化为逐账号一次。
@@ -142,13 +142,14 @@ func (p *Pool) CheapestWeightedUIDsForModelRealm(model, realm string, skip map[s
 			log.Printf("[pool] cost explore model=%s realm=%q (新会话) window=%s", model, realm, p.costExploreInterval)
 		}
 	}
-	// 快过期硬分层（expiring_first）：与 pick 同一口径——当前候选层内若存在窗口内的
-	// 快过期账号，新会话只分给这些账号，保证「先分配快过期的号」。层内仍按虚拟实例
-	// 权重展开后哈希，多个快过期号之间保持均衡。model 为空（不分成本层）时同样生效。
+	// 快过期硬分层（expiring_first）：与 pick 同一口径——当前候选层内若存在窗口内、
+	// 且额度达到 urgency_min_credits 的快过期账号，新会话只分给这些账号，保证「先分
+	// 配快过期的号」。层内仍按紧迫度展开后哈希，多个快过期号之间按各自紧迫度均衡。
+	// model 为空（不分成本层）时同样生效。
 	if p.expiringFirstEnabled() {
 		exp := make([]*entry, 0, len(cands))
 		for _, e := range cands {
-			if expiringNow(e, now) {
+			if p.urgentNow(e, now) {
 				exp = append(exp, e)
 			}
 		}
@@ -189,15 +190,12 @@ func (p *Pool) InTopTier(uid, model, realm string, skip map[string]bool) bool {
 	return slices.ContainsFunc(p.servableEntriesLocked(model, realm, skip, time.Now()), func(e *entry) bool { return e.a.UID == uid })
 }
 
-// weightedUIDsLocked 把账号展开成带虚拟实例权重的 UID 列表（快过期账号出现
-// expiringVirtualSlots 次，见 WeightedAvailableUIDsForModelRealm）。调用方持 p.mu。
+// weightedUIDsLocked 把账号展开成带虚拟实例权重的 UID 列表（到期紧迫账号按
+// urgencySlotsLocked 重复，见 urgency.go）。调用方持 p.mu。
 func (p *Pool) weightedUIDsLocked(es []*entry, now time.Time) []string {
 	out := make([]string, 0, len(es))
 	for _, e := range es {
-		slots := 1
-		if p.preferExpiring && expiringNow(e, now) {
-			slots = expiringVirtualSlots
-		}
+		slots := p.urgencySlotsLocked(e, now)
 		for i := 0; i < slots; i++ {
 			out = append(out, e.a.UID)
 		}

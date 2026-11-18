@@ -75,6 +75,7 @@
     "tls_fingerprint": true,
     "cache_retention": "",
     "cache_retention_models": "",
+    "effort_overrides": {},
     "vscode_ide_version": "",
     "vscode_product_version": ""
   },
@@ -149,6 +150,9 @@
     "prefer_expiring": true,
     "expiring_first": true,
     "expiring_soon": "168h",
+    "urgency_baseline": 3,
+    "urgency_max_boost": 5,
+    "urgency_min_credits": 30,
     "cost_explore_interval": "30m",
     "credit_floor": 100,
     "cross_domain_fallback": false,

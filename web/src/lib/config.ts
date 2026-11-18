@@ -6,7 +6,7 @@
 // 按标签页分组。保存时只提交表单管理的键，后端深合并，未知键原样保留。
 import type { StoreKind } from './storage'
 
-export type FieldKind = 'text' | 'password' | 'number' | 'hours' | 'duration' | 'switch' | 'select'
+export type FieldKind = 'text' | 'password' | 'number' | 'hours' | 'duration' | 'switch' | 'select' | 'pairs'
 
 export interface FieldDef {
   name: string
@@ -158,8 +158,20 @@ export const CONFIG_TABS: ConfigTab[] = [
           duration('cost_explore_interval', ['pool', 'cost_explore_interval'], '成本探索窗口', '30m', '垄断破除：免费层垄断时定期搭车探索未知号；0 关停'),
           num('credit_floor', ['pool', 'credit_floor'], '积分保底', '100', { min: 0, hint: '余额低于此值不再接实测收费模型（保住免费模型可用）；0 关闭' }),
           toggle('prefer_expiring', ['pool', 'prefer_expiring'], '快过期积分优先', '总开关：关掉后完全不用到期时间选号'),
-          toggle('expiring_first', ['pool', 'expiring_first'], '快过期优先分配', '层内有快过期号就只分给它们；关掉退回 ×3 软加权'),
-          duration('expiring_soon', ['pool', 'expiring_soon'], '快过期路由窗口', '168h', '窗口内的批次算「快过期」；窗口越大命中号越多、偏好越稀；0 关闭'),
+          toggle('expiring_first', ['pool', 'expiring_first'], '快过期优先分配', '层内有快过期号就只分给它们；关掉退回纯软加权（快过期号倍数 > 1 但不独占候选）'),
+          duration('expiring_soon', ['pool', 'expiring_soon'], '快过期路由窗口', '168h', '窗口内的批次算「快过期」，同时是紧迫度加权的适用上限：窗口外的号即使额度大也不算急。想救「只剩几小时」的批次就别用 168h，否则 6 天后到期的号会和它一起排队；0 关闭'),
+          num('urgency_baseline', ['pool', 'urgency_baseline'], '紧迫度参考速率', '3', {
+            min: 0, step: 0.5,
+            hint: '单位 分/小时。倍数 = 1 + 上限 × need/(need+参考速率)，need = 批次剩余额度 ÷ 剩余小时；参考速率越小，同样的 need 加权越猛',
+          }),
+          num('urgency_max_boost', ['pool', 'urgency_max_boost'], '紧迫度最大加权倍数', '5', {
+            min: 0, step: 0.5,
+            hint: '权重最多乘 1+此值。必须大到能压过余额差——余额项最高贡献 +10 权重，倍数太小时「余额高的不急号」仍会赢过「余额低的最急号」',
+          }),
+          num('urgency_min_credits', ['pool', 'urgency_min_credits'], '紧迫度最低批次额度', '30', {
+            min: 0, step: 10,
+            hint: '单个到期批次剩余低于此值就不参与加权：只剩几分的尾款不值得为它调流量；0 = 不设下限',
+          }),
           duration('ttl', ['session_sticky', 'ttl'], '会话粘性 TTL', '30m', undefined, true),
           num('oneshot_shards', ['session_sticky', 'oneshot_shards'], '一次性请求亲和桶数', '4', {
             min: 0, max: 16, step: 1, restart: true,
@@ -212,6 +224,13 @@ export const CONFIG_TABS: ConfigTab[] = [
             name: 'cache_retention_models', path: ['upstream', 'cache_retention_models'], label: '缓存只给这些模型', kind: 'text',
             placeholder: '留空 = 所有模型；如 deepseek-, glm-', clearable: true,
             hint: '逗号分隔的模型名前缀，不区分大小写；留空时上面一开就所有模型都补',
+          },
+          {
+            name: 'effort_overrides', path: ['upstream', 'effort_overrides'], label: '强制思考档位', kind: 'pairs',
+            placeholder: '如 deepseek-v4.1-flash=high',
+            hint: '模型=档位，逗号分隔（off/minimal/low/medium/high/xhigh/max），模型名不用带 cn:/global:。'
+              + '用来盖掉客户端传的档位：有的客户端默认发 medium，而模型只支持 low/high/max 时按「向下取整」会被降到 low，配 high 即可纠正。'
+              + '模型本身不支持的档位仍会自动降级到合法值，不会让上游报 400；留空 = 不改任何请求',
           },
           toggle('session_sticky_enabled', ['session_sticky', 'enabled'], '会话粘性路由'),
         ],
@@ -291,8 +310,32 @@ export function toForm(cfg: Record<string, unknown>): FormValues {
   for (const f of ALL_FIELDS) {
     const v = dig(cfg, f.path)
     if (f.kind === 'switch') out[f.name] = !!v
+    else if (f.kind === 'pairs') out[f.name] = pairsToText(v)
     else if (Array.isArray(v)) out[f.name] = v.join(', ')
     else out[f.name] = typeof v === 'string' || typeof v === 'number' ? String(v) : ''
+  }
+  return out
+}
+
+/** 键值对字段的展示形态：`k=v, k2=v2`。按 key 排序，保证同一份配置每次渲染顺序一致 */
+function pairsToText(v: unknown): string {
+  if (v == null || typeof v !== 'object' || Array.isArray(v)) return ''
+  const m = v as Record<string, unknown>
+  return Object.keys(m)
+    .sort()
+    .map((k) => `${k}=${String(m[k])}`)
+    .join(', ')
+}
+
+/** `k=v, k2=v2` → 对象。忽略空段与缺少 `=` 的段（校验会先拦下，这里是兜底） */
+export function parsePairs(raw: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const part of raw.split(/[,，\n]+/)) {
+    const s = part.trim()
+    if (!s) continue
+    const i = s.indexOf('=')
+    if (i <= 0) continue
+    out[s.slice(0, i).trim()] = s.slice(i + 1).trim()
   }
   return out
 }
@@ -308,11 +351,14 @@ export function fromForm(values: FormValues): Record<string, unknown> {
     }
     const raw = String(v ?? '').trim()
     if (raw === '') {
-      if (f.clearable) put(out, f.path, '')
+      // 键值对字段清空要发 null：后端是逐键深合并，发 {} 等于什么都没改，删不掉已有条目
+      if (f.kind === 'pairs') put(out, f.path, null)
+      else if (f.clearable) put(out, f.path, '')
       continue
     }
     if (f.kind === 'number') put(out, f.path, Number(raw))
     else if (f.kind === 'hours') put(out, f.path, parseHours(raw))
+    else if (f.kind === 'pairs') put(out, f.path, parsePairs(raw))
     else put(out, f.path, raw)
   }
   return out
@@ -323,6 +369,9 @@ export const parseHours = (raw: string) => raw.split(/[,，\s]+/).filter(Boolean
 /** Go 时长语法（30m / 2h / 600s / 1h30m，可组合可带小数；单写 0 也合法），与后端 time.ParseDuration 同口径 */
 export const DURATION_RE = /^(0|(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+)$/
 
+/** 出站 reasoning_effort 的合法档位，与后端 upstream.effortRank 同一张表 */
+export const EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
 /** 字段校验：返回错误文案，合法返回 null。空值合法（= 沿用现值） */
 export function validateField(f: FieldDef, value: string | boolean): string | null {
   if (typeof value === 'boolean') return null
@@ -330,6 +379,16 @@ export function validateField(f: FieldDef, value: string | boolean): string | nu
   if (!v) return null
   if (f.kind === 'duration' && !DURATION_RE.test(v)) return '格式应为 Go 时长：30m / 2h / 600s / 1h30m'
   if (f.kind === 'hours' && parseHours(v).some((h) => !Number.isInteger(h) || h < 0 || h > 23)) return '填 0–23 的整点小时，逗号分隔，如 9, 21'
+  if (f.kind === 'pairs') {
+    for (const part of v.split(/[,，\n]+/)) {
+      const s = part.trim()
+      if (!s) continue
+      const i = s.indexOf('=')
+      if (i <= 0 || i === s.length - 1) return '格式应为 模型=档位，逗号分隔，如 deepseek-v4.1-flash=high'
+      const level = s.slice(i + 1).trim().toLowerCase()
+      if (!EFFORT_LEVELS.includes(level)) return '档位只能是 ' + EFFORT_LEVELS.join(' / ')
+    }
+  }
   if (f.kind === 'number') {
     const n = Number(v)
     if (!Number.isFinite(n)) return '请填数字'

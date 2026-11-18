@@ -851,3 +851,106 @@ func TestHardenToolSchemaPattern(t *testing.T) {
 		t.Errorf("patternProperties 应只剩 1 个键，得到 %d 个", len(pp))
 	}
 }
+
+// TestApplyEffortOverrides 验证 upstream.effort_overrides 的强制档位语义。
+//
+// 背景：deepseek-v4.1-flash 国内版只支持 low/high/max，客户端默认发 medium，
+// 按「不超过请求档位的最高支持档」的规则会落到 low（medium 在档位序里居中，
+// 向下取整先撞到 low）。override 正是用来把这种情况钉成 high。
+func TestApplyEffortOverrides(t *testing.T) {
+	cases := []struct {
+		name      string
+		body      string
+		overrides map[string]string
+		want      string // 期望的出站 reasoning_effort；"" 表示不该有这个字段
+		wantCamel bool   // camelCase 键是否应保留
+	}{
+		{
+			name:      "客户端发 medium 被覆写为 high",
+			body:      `{"model":"deepseek-v4.1-flash","reasoning_effort":"medium","messages":[]}`,
+			overrides: map[string]string{"deepseek-v4.1-flash": "high"},
+			want:      "high",
+		},
+		{
+			name:      "客户端没传档位时由覆写补上",
+			body:      `{"model":"deepseek-v4.1-flash","messages":[]}`,
+			overrides: map[string]string{"deepseek-v4.1-flash": "high"},
+			want:      "high",
+		},
+		{
+			name:      "camelCase 键被删、只留 snake 键",
+			body:      `{"model":"deepseek-v4.1-flash","reasoningEffort":"medium","messages":[]}`,
+			overrides: map[string]string{"deepseek-v4.1-flash": "high"},
+			want:      "high",
+			wantCamel: false,
+		},
+		{
+			name:      "未配置的模型不受影响",
+			body:      `{"model":"kimi-k2.6","reasoning_effort":"medium","messages":[]}`,
+			overrides: map[string]string{"deepseek-v4.1-flash": "high"},
+			want:      "medium",
+		},
+		{
+			name:      "空表等价于没有这个功能（medium 照旧被降到 low）",
+			body:      `{"model":"deepseek-v4.1-flash","reasoning_effort":"medium","messages":[]}`,
+			overrides: nil,
+			want:      "low",
+		},
+		{
+			name:      "配了非法档位时不写进请求体（该降级照旧降级）",
+			body:      `{"model":"deepseek-v4.1-flash","reasoning_effort":"medium","messages":[]}`,
+			overrides: map[string]string{"deepseek-v4.1-flash": "ultra"},
+			want:      "low",
+		},
+		{
+			name:      "客户端显式关思考时不覆写档位",
+			body:      `{"model":"deepseek-v4.1-flash","thinking":{"type":"disabled"},"messages":[]}`,
+			overrides: map[string]string{"deepseek-v4.1-flash": "high"},
+			want:      "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			efforts := map[string][]string{"deepseek-v4.1-flash": {"low", "high", "max"}}
+			out := PrepareBodyOptWithEffortOverride([]byte(c.body), false, efforts, nil, c.overrides)
+			m := decodePayload(t, out)
+			got, has := m["reasoning_effort"]
+			if c.want == "" {
+				if has {
+					t.Fatalf("不该有 reasoning_effort，得到 %#v（out=%s）", got, out)
+				}
+			} else if has {
+				if got != c.want {
+					t.Fatalf("reasoning_effort=%#v want %q（out=%s）", got, c.want, out)
+				}
+			} else {
+				t.Fatalf("缺少 reasoning_effort，want %q（out=%s）", c.want, out)
+			}
+			if _, hasCamel := m["reasoningEffort"]; hasCamel {
+				t.Fatalf("camelCase 键应被删除（out=%s）", out)
+			}
+		})
+	}
+}
+
+// TestApplyEffortOverridesGlobal 国际版只支持 high：覆写成 max 必须被降级回 high，
+// 不能把非法档位送到上游换 400。
+func TestApplyEffortOverridesGlobal(t *testing.T) {
+	efforts, defs := globalEffortMap(nil, nil)
+	out := PrepareBodyOptWithEffortOverride(
+		[]byte(`{"model":"deepseek-v4.1-flash","messages":[]}`), false,
+		efforts, defs, map[string]string{"deepseek-v4.1-flash": "max"})
+	if got := decodePayload(t, out)["reasoning_effort"]; got != "high" {
+		t.Fatalf("国际版覆写成 max 应被降级为 high，得到 %#v（out=%s）", got, out)
+	}
+}
+
+// decodePayload 解析出站请求体，失败即终止用例。
+func decodePayload(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("出站请求体不是合法 JSON: %v（%s）", err, b)
+	}
+	return m
+}

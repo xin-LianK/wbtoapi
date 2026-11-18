@@ -33,7 +33,29 @@ func PrepareBodyOptWithEfforts(src []byte, sanitize bool, efforts map[string][]s
 // PrepareBodyOptWithEffortsAndDefault 完整管线：efforts 降级 + thinking.go 按
 // defaultEfforts（模型声明默认档）补档。defaultEfforts 为 nil 时与旧行为一致
 // （deepseek 缺档回退硬编码 high）。
+//
+// 不带强制档位（overrides=nil），等价于 PrepareBodyOptWithEffortOverride。
 func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) []byte {
+	return PrepareBodyOptWithEffortOverride(src, sanitize, efforts, defaultEfforts, nil)
+}
+
+// PrepareBodyOptWithEffortOverride 完整管线 + 强制档位（upstream.effort_overrides）。
+//
+// overrides 键为**不带 cn:/global: 前缀的裸模型名**（出站前 body 的 model 已被
+// rewriteModel 换成裸名，见 handler.go），值为出站 reasoning_effort 档位。
+// 语义是「有值就覆盖」：客户端显式传的档位也不再尊重，因此可用来纠正「客户端默认发
+// medium、但模型只支持 low/high/max 于是被降到 low」这类降级（medium 在 effortRank 里
+// 居中，向下取整规则只会落到 low）。
+//
+// 覆写位置刻意选在 injectThinking 之后、normalizeReasoningEffort 之前：
+//   - 在 injectThinking 之后：盖掉客户端显式传入的档位（否则 ensureDeepSeekEffort
+//     的「已有 effort 不覆盖」会赢）；
+//   - 在 normalizeReasoningEffort 之前：配了模型不支持的档位时仍会被降级到合法值，
+//     不会把非法参数送到上游换 400。
+//
+// 客户端显式 thinking.type=disabled（关思考）时不覆写：此时档位无意义，
+// injectThinking 已按官方客户端行为删掉 effort，覆写回去等于违背客户端意图。
+func PrepareBodyOptWithEffortOverride(src []byte, sanitize bool, efforts map[string][]string, defaultEfforts, overrides map[string]string) []byte {
 	if len(src) == 0 {
 		return src
 	}
@@ -83,6 +105,8 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// 模型不支持默认档时自动落到 ≤ 默认档的最高支持档（不出站不合规档位）。
 	modelName, _ := obj["model"].(string)
 	injectThinking(obj, lookupDefaultEffort(defaultEfforts, modelName))
+	// 强制档位（upstream.effort_overrides）：见 PrepareBodyOptWithEffortOverride 注释。
+	applyEffortOverrides(obj, overrides)
 	normalizeReasoningEffort(obj, efforts)
 	// DeepSeek 多轮一致性：assistant 消息带 reasoning 痕迹时回填 reasoning_content
 	// （requiresReasoningContentOnAssistantMessages，见 thinking.go）。
@@ -166,6 +190,61 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 
 // effortRank 档位从低到高。
 var effortRank = map[string]int{"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
+
+// ValidEffort 报告 name（大小写与首尾空白不敏感）是否为出站可用的 reasoning_effort 档位。
+// 供配置层校验 upstream.effort_overrides 用，避免档位表在两处各维护一份后漂移。
+func ValidEffort(name string) bool {
+	_, ok := effortRank[strings.ToLower(strings.TrimSpace(name))]
+	return ok
+}
+
+// applyEffortOverrides 按配置强制写入出站 reasoning_effort（upstream.effort_overrides）。
+//
+// 与 ensureDeepSeekEffort 的「缺档才补」不同，这里是「有值就覆盖」；与
+// normalizeReasoningEffort 的「越界就降」也不同，它不做取舍，只负责表达配置意图。
+//
+// 忽略三种情形，一律不动请求体：
+//   - overrides 为空 / 请求没有 model / 该模型没配；
+//   - 配的值不在 effortRank 里（配置端已校验，这里再挡一次，避免手改 config 写出垃圾档位）；
+//   - 客户端显式 thinking.type=disabled（关思考时段位无意义，见调用方注释）。
+//
+// snake 键统一写，camel 键删掉：两个键并存时上游取哪个不确定，删掉才能保证意图唯一。
+func applyEffortOverrides(obj map[string]any, overrides map[string]string) {
+	if len(overrides) == 0 {
+		return
+	}
+	model, _ := obj["model"].(string)
+	if model == "" {
+		return
+	}
+	want, ok := overrides[model]
+	if !ok {
+		return
+	}
+	want = strings.TrimSpace(strings.ToLower(want))
+	if _, known := effortRank[want]; !known {
+		return
+	}
+	if th, ok := obj["thinking"].(map[string]any); ok {
+		if typ, _ := th["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "disabled") {
+			return
+		}
+	}
+	prev := ""
+	if v, ok := obj["reasoning_effort"].(string); ok {
+		prev = v
+	} else if v, ok := obj["reasoningEffort"].(string); ok {
+		prev = v
+	}
+	delete(obj, "reasoningEffort")
+	obj["reasoning_effort"] = want
+	if !strings.EqualFold(strings.TrimSpace(prev), want) {
+		if prev == "" {
+			prev = "(未传)"
+		}
+		log.Printf("reasoning_effort override model=%s %s -> %s", model, prev, want)
+	}
+}
 
 // normalizeReasoningEffort 按模型 supportedEfforts 降级 reasoning_effort（snake/camel 双字段兼容）。
 //   - 请求档位模型支持 → 原样透传

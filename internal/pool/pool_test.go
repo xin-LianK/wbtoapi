@@ -1778,6 +1778,8 @@ func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
 	p.Add(&auth.Auth{UID: "none"})
 
 	now := time.Now()
+	// 紧迫度加权以 expiring_soon 窗口为判据（见 urgency.go）；48h/2h 都在 168h 内。
+	p.SetExpiringWindow(168 * time.Hour)
 	p.SetCreditsDetailed("later", 100, 100, 100, now.Add(48*time.Hour), 100)
 	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(2*time.Hour), 100)
 	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
@@ -1808,6 +1810,8 @@ func TestPickExpiringFirstHardTier(t *testing.T) {
 	p.Add(&auth.Auth{UID: "rich"})
 	p.Add(&auth.Auth{UID: "poor"})
 	now := time.Now()
+	// 硬分层以紧迫度倍数 > 1 为判据（见 urgency.go），需要注入 expiring_soon 窗口。
+	p.SetExpiringWindow(168 * time.Hour)
 	p.SetCreditsDetailed("rich", 1000, 1000, 0, time.Time{}, 0)
 	p.SetCreditsDetailed("poor", 100, 100, 100, now.Add(time.Hour), 100)
 
@@ -1855,7 +1859,9 @@ func TestCheapestWeightedUIDsExpiringFirst(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "a"})
 	p.Add(&auth.Auth{UID: "b"})
-	p.SetCreditsDetailed("a", 100, 100, 100, time.Now().Add(time.Hour), 100)
+	// 100 分 / 50 小时 → need=2/h → 倍数 3（见 urgency.go），对应下面 3 次重复。
+	p.SetExpiringWindow(168 * time.Hour)
+	p.SetCreditsDetailed("a", 100, 100, 100, time.Now().Add(50*time.Hour), 100)
 
 	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "", nil); !reflect.DeepEqual(got, []string{"a", "a", "a"}) {
 		t.Fatalf("新会话应只分给快过期号，got %v", got)
@@ -1888,15 +1894,21 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.Add(&auth.Auth{UID: "a"})
 	p.Add(&auth.Auth{UID: "b"})
 	now := time.Now()
+	// 紧迫度加权以窗口为判据（见 urgency.go），不注入窗口时不加权。
+	p.SetExpiringWindow(24 * time.Hour)
 	p.SetCreditsDetailed("a", 100, 100, 50, now.Add(time.Hour), 50)
 	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
 
 	p.mu.Lock()
 	we := p.routingWeightOf(p.byUID["a"], 100, now)
 	wn := p.routingWeightOf(p.byUID["b"], 100, now)
+	boost := p.urgencyBoostOf(p.byUID["a"], now)
 	p.mu.Unlock()
-	if we != wn*expiringVirtualSlots {
-		t.Fatalf("enabled expiring weight=%v want %v", we, wn*expiringVirtualSlots)
+	if boost <= 1 {
+		t.Fatalf("窗口内 50 分 / 1 小时应触发紧迫度加权，boost=%v", boost)
+	}
+	if we != wn*boost {
+		t.Fatalf("enabled expiring weight=%v want %v (boost=%v)", we, wn*boost, boost)
 	}
 
 	p.SetPreferExpiring(false)

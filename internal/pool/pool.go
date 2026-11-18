@@ -68,9 +68,18 @@ type Pool struct {
 	idleWeightPerHour float64
 	idleWeightMax     float64
 	// preferExpiring 快过期积分偏好总开关（默认 true）。开启且快过期窗口内存在有效
-	// 批次时，该账号的选号权重 ×expiringVirtualSlots（见 routingWeightOf /
+	// 批次时，该账号的选号权重乘以到期紧迫度倍数（见 urgency.go / routingWeightOf /
 	// weightedUIDsLocked）；关闭后完全不使用到期信息选号。
 	preferExpiring bool
+	// urgencyBaseline / urgencyMaxBoost / urgencyMinCredits 到期紧迫度加权参数
+	// （SetUrgency 注入；默认值见 defaultUrgency*，算法见 urgency.go）。
+	// expiringWindow 是紧迫度的适用窗口（SetExpiringWindow 注入，取自 pool.expiring_soon）：
+	// 只有到期时间落在此窗口内的批次才算「急」，否则大额度远期批次会被算成高 need 而
+	// 垄断流量。0 = 关闭紧迫度加权（与「禁用到期信息」同一语义）。
+	urgencyBaseline   float64
+	urgencyMaxBoost   float64
+	urgencyMinCredits int64
+	expiringWindow    time.Duration
 	// expiringFirst 快过期硬分层开关（默认 true）。仅在 preferExpiring 同时开启时
 	// 生效：成本层定下来之后，若该层内存在窗口内的快过期账号，就把候选收窄到这些
 	// 账号——把 ×3 软加权升级为「先花快过期」。不按到期时间先后排序（层内仍是加权
@@ -138,6 +147,10 @@ func New(stateFp string) *Pool {
 		idleWeightMax:      defaultIdleWeightMax,
 		preferExpiring:     true,
 		expiringFirst:      true,
+		urgencyBaseline:    defaultUrgencyBaseline,
+		urgencyMaxBoost:    defaultUrgencyMaxBoost,
+		urgencyMinCredits:  defaultUrgencyMinCredits,
+		expiringWindow:     0, // 0 = 紧迫度加权关闭；生产由 main 按 pool.expiring_soon 注入
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
@@ -254,6 +267,35 @@ func (p *Pool) SetExpiringFirst(enabled bool) {
 // expiringFirstEnabled 报告硬分层是否真的生效（两个开关都为真）。调用方需持 p.mu。
 func (p *Pool) expiringFirstEnabled() bool {
 	return p.preferExpiring && p.expiringFirst
+}
+
+// SetUrgency 注入到期紧迫度加权参数（main 从 config 解析后调用，见 urgency.go）。
+// 非正值保留原值（与 SetWeights 同风格）；maxBoost 传 0 不是关停开关——关停用
+// prefer_expiring=false（那会一并关掉硬分层，语义一致）。
+func (p *Pool) SetUrgency(baseline, maxBoost float64, minCredits int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if baseline > 0 {
+		p.urgencyBaseline = baseline
+	}
+	if maxBoost > 0 {
+		p.urgencyMaxBoost = maxBoost
+	}
+	if minCredits > 0 {
+		p.urgencyMinCredits = minCredits
+	}
+}
+
+// SetExpiringWindow 注入紧迫度适用窗口（取自 pool.expiring_soon，与调度器的
+// 「快过期」口径同一个值）。0 = 关闭紧迫度加权（也不启用硬分层，因为调度器同样
+// 不会写入 creditsExpiring）；热改安全，下一个请求即生效。
+func (p *Pool) SetExpiringWindow(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	p.expiringWindow = d
 }
 
 // SetCrossDomainFallback 注入裸模型名跨域回退开关（issue #135；false = 零回归）。

@@ -1134,3 +1134,123 @@ func TestCrossRealmModes(t *testing.T) {
 		t.Errorf("序列化结果=%s，应含 \"cross_realm\":\"merge\"", b)
 	}
 }
+
+// TestNormalizeEffortOverrides 验证 upstream.effort_overrides 的配置归一：
+// 剥域前缀、档位小写化、冲突与非法档位 fail fast。
+func TestNormalizeEffortOverrides(t *testing.T) {
+	t.Run("剥掉域前缀", func(t *testing.T) {
+		got, err := normalizeEffortOverrides(map[string]string{"cn:deepseek-v4.1-flash": "high"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got["deepseek-v4.1-flash"] != "high" {
+			t.Fatalf("got=%v", got)
+		}
+	})
+	t.Run("大小写与空白归一", func(t *testing.T) {
+		got, err := normalizeEffortOverrides(map[string]string{" deepseek-v4.1-flash ": " HIGH "})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got["deepseek-v4.1-flash"] != "high" {
+			t.Fatalf("got=%v", got)
+		}
+	})
+	t.Run("剥前缀后不同值算冲突", func(t *testing.T) {
+		_, err := normalizeEffortOverrides(map[string]string{
+			"cn:deepseek-v4.1-flash":     "high",
+			"global:deepseek-v4.1-flash": "max",
+		})
+		if err == nil {
+			t.Fatal("同一模型配了两个不同档位应报冲突")
+		}
+	})
+	t.Run("剥前缀后同值不算冲突", func(t *testing.T) {
+		got, err := normalizeEffortOverrides(map[string]string{
+			"cn:deepseek-v4.1-flash":     "high",
+			"global:deepseek-v4.1-flash": "HIGH",
+		})
+		if err != nil {
+			t.Fatalf("同值重复不该报错: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got=%v", got)
+		}
+	})
+	t.Run("非法档位报错", func(t *testing.T) {
+		if _, err := normalizeEffortOverrides(map[string]string{"deepseek-v4.1-flash": "ultra"}); err == nil {
+			t.Fatal("非法档位应报错")
+		}
+	})
+	t.Run("空表返回 nil", func(t *testing.T) {
+		got, err := normalizeEffortOverrides(nil)
+		if err != nil || got != nil {
+			t.Fatalf("got=%v err=%v", got, err)
+		}
+	})
+}
+
+// TestConfigEffortOverridesRoundTrip 配置解析后字段存在、序列化不丢——面板保存会
+// 重写整个 config.json，字段一旦丢在结构体外，用户配的值会被静默抹掉。
+func TestConfigEffortOverridesRoundTrip(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"upstream":{"effort_overrides":{"deepseek-v4.1-flash":"high"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Upstream.EffortOverrides["deepseek-v4.1-flash"] != "high" {
+		t.Fatalf("解析后=%v", c.Upstream.EffortOverrides)
+	}
+	b, err := json.Marshal(c.Upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"effort_overrides"`) {
+		t.Errorf("序列化丢了字段: %s", b)
+	}
+}
+
+// 紧迫度加权参数（pool.urgency_*，见 internal/pool/urgency.go）：非法值回落默认，
+// 但 min_credits 的 0 是合法值（= 不设下限），不能被归一吃掉。
+func TestConfigUrgencyParams(t *testing.T) {
+	c, err := ParseConfig([]byte(`{"pool":{"urgency_baseline":2.5,"urgency_max_boost":8,"urgency_min_credits":50}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.UrgencyBaseline != 2.5 || c.Pool.UrgencyMaxBoost != 8 || c.Pool.UrgencyMinCredits != 50 {
+		t.Fatalf("解析后 = %v/%v/%v", c.Pool.UrgencyBaseline, c.Pool.UrgencyMaxBoost, c.Pool.UrgencyMinCredits)
+	}
+
+	c.Pool.UrgencyBaseline = -1
+	c.Pool.UrgencyMaxBoost = 0
+	c.Pool.UrgencyMinCredits = -5
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.UrgencyBaseline != 3 || c.Pool.UrgencyMaxBoost != 5 || c.Pool.UrgencyMinCredits != 30 {
+		t.Fatalf("非法值应回落默认，得到 %v/%v/%v",
+			c.Pool.UrgencyBaseline, c.Pool.UrgencyMaxBoost, c.Pool.UrgencyMinCredits)
+	}
+
+	c.Pool.UrgencyMinCredits = 0
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Pool.UrgencyMinCredits != 0 {
+		t.Fatalf("0 = 不设下限，不应被改写：%v", c.Pool.UrgencyMinCredits)
+	}
+
+	// 空配置必须落到默认值：默认开启加权，否则功能等于不存在。
+	d := Default()
+	if d.Pool.UrgencyBaseline != 3 || d.Pool.UrgencyMaxBoost != 5 || d.Pool.UrgencyMinCredits != 30 {
+		t.Fatalf("默认值 = %v/%v/%v", d.Pool.UrgencyBaseline, d.Pool.UrgencyMaxBoost, d.Pool.UrgencyMinCredits)
+	}
+	b, err := json.Marshal(d.Pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{`"urgency_baseline"`, `"urgency_max_boost"`, `"urgency_min_credits"`} {
+		if !strings.Contains(string(b), k) {
+			t.Errorf("序列化丢字段 %s: %s", k, b)
+		}
+	}
+}
