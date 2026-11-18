@@ -86,7 +86,14 @@ def find_const_table_var(src):
 # 5.8.3 时枚举实体在 main/dev-env-override.js（server.js 只 require 它），
 # 5.9.2 起搬到了 main/common3.js，而且块头的 `Events=` 名字没了——变成匿名导出的
 # IIFE。所以这里不认成员名、也不认块头名字：先找哨兵成员，再往前回溯 IIFE 头。
-EVENT_SOURCE_MEMBERS = ["main/common3.js", "main/server.js", "main/dev-env-override.js"]
+# 5.11.3 又拆了一次：common3.js 缩成 34 字节的转出壳（只 re-export），枚举实体
+# 落到 main/auth-loss-observer.js。新成员放最前（命中即返回），旧成员留着兜旧包。
+EVENT_SOURCE_MEMBERS = [
+    "main/auth-loss-observer.js",
+    "main/common3.js",
+    "main/server.js",
+    "main/dev-env-override.js",
+]
 
 # 事件枚举块内用来确认「找对了块」的哨兵成员：存在才能确定块边界没变。
 # 参数名（压缩后的 t / e / n）不写死，只锚成员名与码。
