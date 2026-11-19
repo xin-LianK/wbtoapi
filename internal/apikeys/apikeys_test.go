@@ -122,6 +122,9 @@ func TestCreateInvalid(t *testing.T) {
 		"带前缀":    {Input{Name: "e", Models: []string{"cn:glm-5.2"}}, "前缀"},
 		"白名单项太长": {Input{Name: "f", Models: []string{strings.Repeat("m", maxPattern+1)}}, "最长"},
 		"白名单太多":  {Input{Name: "g", Models: many}, "最多"},
+		"自填原文":   {Input{Name: "h", Secret: "custom-secret-0123456"}, "只能由网关生成"},
+		"前缀太长":   {Input{Name: "l", SecretPrefix: strings.Repeat("z", maxPrefix+1)}, "最多"},
+		"前缀有空格":  {Input{Name: "m", SecretPrefix: "zz  _"}, "只能用字母"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := s.Create(tc.in, t0); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -135,6 +138,52 @@ func TestCreateInvalid(t *testing.T) {
 	}
 	if n := len(readFile(t, path).Keys); n != 2 {
 		t.Fatalf("不合法的输入不该写盘：%d 个", n)
+	}
+}
+
+// TestCreateSecretShapes 原文只能由网关生成：默认 sk- + 32 位随机串，或自定义前缀 + 32 位随机串。
+// 前缀绕开 sk-，所以鉴权必须仍能按整串查到（不做前缀预筛）。
+func TestCreateSecretShapes(t *testing.T) {
+	s, _ := newStore(t)
+	// 自定义前缀：前缀 + 32 位随机串。
+	pre := mustCreate(t, s, Input{Name: "teamA", SecretPrefix: "teamA_"})
+	if !strings.HasPrefix(pre.Secret, "teamA_") || len(pre.Secret) != len("teamA_")+32 {
+		t.Fatalf("前缀形态不对: %q", pre.Secret)
+	}
+	if !secretCharsOK(pre.Secret) {
+		t.Fatalf("生成的原文落在字符集外: %q", pre.Secret)
+	}
+	if got, ok := s.Lookup(pre.Secret); !ok || got.ID != pre.ID {
+		t.Fatalf("前缀形态查不到: %+v %v", got, ok)
+	}
+	// 两把不同的号，原文不能重样。
+	other := mustCreate(t, s, Input{Name: "teamB", SecretPrefix: "teamA_"})
+	if other.Secret == pre.Secret {
+		t.Fatalf("同前缀两次生成撞了: %q", pre.Secret)
+	}
+	// 默认形态不变。
+	def := mustCreate(t, s, Input{Name: "默认"})
+	if !strings.HasPrefix(def.Secret, defaultSecretPrefix) || len(def.Secret) != len(defaultSecretPrefix)+32 {
+		t.Fatalf("默认形态不对: %q", def.Secret)
+	}
+	// 自填原文不再支持：拿到一句明确说明，而不是被静默换成随机串。
+	if _, err := s.Create(Input{Name: "自填", Secret: "homelab-2026-hs7k2p"}, t0); err == nil || !strings.Contains(err.Error(), "只能由网关生成") {
+		t.Fatalf("自填原文应报错: %v", err)
+	}
+	// 已建好的密钥不能改前缀，要换走重新生成。
+	if _, err := s.Update(pre.ID, Input{Name: "teamA", SecretPrefix: "zz_"}); err == nil || !strings.Contains(err.Error(), "新建时") {
+		t.Fatalf("Update 应拒绝改前缀: %v", err)
+	}
+	// 重新生成回到默认形态，旧原文立即失效。
+	re, err := s.Regenerate(pre.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(re.Secret, defaultSecretPrefix) {
+		t.Fatalf("重新生成应为默认形态: %q", re.Secret)
+	}
+	if _, ok := s.Lookup(pre.Secret); ok {
+		t.Fatal("旧原文应失效")
 	}
 }
 

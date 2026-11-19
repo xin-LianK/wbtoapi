@@ -178,6 +178,9 @@ type Handler struct {
 	wafIP wafIPGate
 	// turns 客户端没给会话 id 时的对话轮 ID 分配（session/turns.go）。进程内状态、重启清零。
 	turns *session.TurnIDs
+	// authGuard 鉴权失败限流（httpauth/guard.go）：同一来源连续猜错密钥就回 429 并留痕。
+	// 进程内状态、重启清零。
+	authGuard *httpauth.Guard
 }
 
 // NewHandler 构建 handler。
@@ -194,7 +197,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), turns: session.NewTurnIDs()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), turns: session.NewTurnIDs(), authGuard: httpauth.NewGuard()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/completions", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.completions))
 	h.registerBridgeRoutes()
@@ -243,10 +246,18 @@ func isSearchPath(path string) bool {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ip := httpauth.ClientIP(r)
+		if d := h.authBlocked(ip); d != nil {
+			denialHeaders(w, d)
+			writeOpenAIError(w, d.Status, d.Code, d.Message)
+			return
+		}
 		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+			h.noteAuthFailure(r, ip)
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
+		h.authGuard.Reset(ip)
 		next(w, r)
 	}
 }

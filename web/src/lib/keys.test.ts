@@ -4,7 +4,8 @@
 
 import { describe, expect, it } from 'vitest'
 import {
-  addModelPattern, allowedModels, bareModelIds, emptyKeyForm, keyFormFrom, keyInput, keyStatus, limitRows, maskSecret, validateKeyForm,
+  addModelPattern, allowedModels, bareModelIds, emptyKeyForm, keyFormFrom, keyInput, keyStatus, limitRows, maskSecret,
+  secretPreview, validateKeyForm,
 } from './keys'
 import type { ApiKey } from './types'
 
@@ -79,6 +80,48 @@ describe('表单与提交', () => {
     expect(validateKeyForm(f)).toBe('模型白名单最多 100 项')
     f.models = []
     expect(validateKeyForm(f)).toBeNull()
+  })
+})
+
+describe('密钥形态', () => {
+  it('默认形态不带任何原文字段', () => {
+    const f = emptyKeyForm()
+    expect(f.secretMode).toBe('random')
+    f.name = 'a'
+    expect(keyInput(f, true)).not.toHaveProperty('secret')
+    expect(keyInput(f, true)).not.toHaveProperty('secret_prefix')
+    expect(validateKeyForm(f, true)).toBeNull()
+    expect(secretPreview(f)).toBeNull()
+  })
+  it('自定义前缀：去掉首尾空白后提交，预览只到前缀', () => {
+    const f = emptyKeyForm()
+    f.name = 'a'
+    f.secretMode = 'prefix'
+    f.prefix = '  teamA_ '
+    expect(keyInput(f, true)).toMatchObject({ secret_prefix: 'teamA_' })
+    expect(keyInput(f, true)).not.toHaveProperty('secret')
+    expect(secretPreview(f)).toBe('teamA_••••••••')
+    expect(validateKeyForm(f, true)).toBeNull()
+  })
+  it('编辑已有密钥时不提交原文字段，改了形态也不带', () => {
+    const f = keyFormFrom(key())
+    f.secretMode = 'prefix'
+    f.prefix = 'zz_'
+    expect(keyInput(f)).not.toHaveProperty('secret')
+    expect(keyInput(f)).not.toHaveProperty('secret_prefix')
+    expect(validateKeyForm(f)).toBeNull()
+  })
+  it('前缀的本地校验与网关一致', () => {
+    const f = emptyKeyForm()
+    f.name = 'a'
+    f.secretMode = 'prefix'
+    expect(validateKeyForm(f, true)).toMatch(/填一下前缀/)
+    f.prefix = 'z'.repeat(33)
+    expect(validateKeyForm(f, true)).toBe('自定义前缀最多 32 个字符')
+    f.prefix = 'zz  _'
+    expect(validateKeyForm(f, true)).toBe('自定义前缀只能用字母、数字和 . _ -')
+    f.prefix = 'teamA_'
+    expect(validateKeyForm(f, true)).toBeNull()
   })
 })
 

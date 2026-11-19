@@ -114,6 +114,8 @@ func TestKeysAPI(t *testing.T) {
 		"改不存在的":      {"POST", "/panel/api/keys/k_none", `{"name":"a"}`, 404, "不存在"},
 		"重新生成不存在的":   {"POST", "/panel/api/keys/k_none/regenerate", "", 404, "不存在"},
 		"删不存在的":      {"POST", "/panel/api/keys/k_none/delete", "", 404, "不存在"},
+		"改已建好的前缀":    {"POST", "/panel/api/keys/" + id, `{"name":"张三2","secret_prefix":"zz_"}`, 400, "新建时"},
+		"自填原文已不支持":   {"POST", "/panel/api/keys", `{"name":"自填","secret":"homelab-2026-hs7k2p"}`, 400, "只能由网关生成"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := keyReq(p, tc.method, tc.path, tc.body)
@@ -123,14 +125,21 @@ func TestKeysAPI(t *testing.T) {
 		})
 	}
 
+	// 新建时可以给原文加自定义前缀（后面由网关补 32 位随机串）。
+	rec = keyReq(p, "POST", "/panel/api/keys", `{"name":"前缀","secret_prefix":"teamA_"}`)
+	pre := decodeKey(t, rec)
+	if rec.Code != 200 || !strings.HasPrefix(pre.Key.Secret, "teamA_") || len(pre.Key.Secret) != len("teamA_")+32 {
+		t.Fatalf("自定义前缀 code=%d body=%s", rec.Code, rec.Body)
+	}
+
 	rec = keyReq(p, "POST", "/panel/api/keys/"+id+"/delete", "")
 	if rec.Code != 200 || !decodeKey(t, rec).OK {
 		t.Fatalf("删除 code=%d body=%s", rec.Code, rec.Body)
 	}
 	rec = keyReq(p, "GET", "/panel/api/keys", "")
 	_ = json.Unmarshal(rec.Body.Bytes(), &list)
-	if len(list.Keys) != 0 {
-		t.Fatalf("删除后列表 = %+v", list.Keys)
+	if len(list.Keys) != 1 {
+		t.Fatalf("删除后应剩前缀那一把：%+v", list.Keys)
 	}
 }
 

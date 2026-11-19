@@ -63,6 +63,13 @@ export function limitRows(limit: KeyLimits, used: KeyUsage): LimitRow[] {
 /** 表单里的上限：null = 不限 */
 export type LimitForm = Record<LimitKind, number | null>
 
+/** 新建时选密钥形态：默认 sk- 随机、自定义前缀 + 随机串（原文始终由网关生成） */
+export type SecretMode = 'random' | 'prefix'
+
+export const PREFIX_MAX = 32
+/** 和网关 internal/apikeys 的字符集一致：空格、冒号、换行会破坏 Authorization 头和 .env 解析 */
+const SECRET_CHARS = /^[A-Za-z0-9._-]+$/
+
 export interface KeyForm {
   name: string
   note: string
@@ -74,11 +81,17 @@ export interface KeyForm {
   models: string[]
   /** 限定的账号分组 id，空 = 不限 */
   groups: string[]
+  /** 下面两项只在新建时用：编辑已有密钥时原文改不了，只能「重新生成」 */
+  secretMode: SecretMode
+  prefix: string
 }
 
 const noLimits = (): LimitForm => ({ requests: null, tokens: null, credits: null })
 
-export const emptyKeyForm = (): KeyForm => ({ name: '', note: '', enabled: true, expires: null, daily: noLimits(), total: noLimits(), models: [], groups: [] })
+export const emptyKeyForm = (): KeyForm => ({
+  name: '', note: '', enabled: true, expires: null, daily: noLimits(), total: noLimits(), models: [], groups: [],
+  secretMode: 'random', prefix: '',
+})
 
 function limitForm(l: KeyLimits): LimitForm {
   const f = noLimits()
@@ -96,6 +109,8 @@ export function keyFormFrom(k: ApiKey): KeyForm {
     total: limitForm(k.total_limit),
     models: [...(k.models || [])],
     groups: [...(k.groups || [])],
+    secretMode: 'random',
+    prefix: '',
   }
 }
 
@@ -108,9 +123,9 @@ function limitsOut(f: LimitForm): KeyLimits {
   return out
 }
 
-/** 提交给网关的整份设置（修改也是整份提交） */
-export function keyInput(f: KeyForm): KeyInput {
-  return {
+/** 提交给网关的整份设置（修改也是整份提交）；creating 时才带上新建的前缀 */
+export function keyInput(f: KeyForm, creating = false): KeyInput {
+  const out: KeyInput = {
     name: f.name.trim(),
     note: f.note.trim(),
     enabled: f.enabled,
@@ -120,10 +135,12 @@ export function keyInput(f: KeyForm): KeyInput {
     models: f.models,
     groups: f.groups,
   }
+  if (creating && f.secretMode === 'prefix' && f.prefix.trim()) out.secret_prefix = f.prefix.trim()
+  return out
 }
 
 /** 提交前先在本地挡住网关一定会拒的输入（文案和网关一致） */
-export function validateKeyForm(f: KeyForm): string | null {
+export function validateKeyForm(f: KeyForm, creating = false): string | null {
   const name = f.name.trim()
   if (!name) return '密钥名称不能为空'
   if ([...name].length > 64) return '密钥名称最多 64 个字'
@@ -132,6 +149,18 @@ export function validateKeyForm(f: KeyForm): string | null {
     if (Object.values(l).some((v) => v != null && v < 0)) return '用量上限不能是负数'
   }
   if (f.models.length > 100) return '模型白名单最多 100 项'
+  if (creating && f.secretMode === 'prefix') {
+    const prefix = f.prefix.trim()
+    if (!prefix) return '填一下前缀，或者改回默认形态'
+    if (prefix.length > PREFIX_MAX) return `自定义前缀最多 ${PREFIX_MAX} 个字符`
+    if (!SECRET_CHARS.test(prefix)) return '自定义前缀只能用字母、数字和 . _ -'
+  }
+  return null
+}
+
+/** 新建时给人看的原文预览：前缀形态显示前缀 + 随机位（真正随机串由网关生成） */
+export function secretPreview(f: KeyForm): string | null {
+  if (f.secretMode === 'prefix') return f.prefix.trim() ? f.prefix.trim() + '••••••••' : null
   return null
 }
 

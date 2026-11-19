@@ -139,6 +139,9 @@ type Panel struct {
 	mux     *http.ServeMux
 	started time.Time
 	logs    *Ring
+	// authGuard 面板接口的鉴权失败限流（httpauth/guard.go）：和网关同一套口径与参数。
+	// 进程内状态、重启清零。
+	authGuard *httpauth.Guard
 
 	// logins 进行中的 OAuth 设备授权会话（state → 会话信息）。
 	// poll 成功或超时（loginTTL）后剔除；面板常驻进程，容量天然有界。
@@ -211,13 +214,14 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:      cfg,
-		mux:      http.NewServeMux(),
-		started:  time.Now(),
-		logs:     NewRing(500),
-		logins:   map[string]loginSession{},
-		assets:   embeddedDist(),
-		releases: changelog.Parse(cfg.Changelog),
+		cfg:       cfg,
+		mux:       http.NewServeMux(),
+		started:   time.Now(),
+		logs:      NewRing(500),
+		logins:    map[string]loginSession{},
+		assets:    embeddedDist(),
+		releases:  changelog.Parse(cfg.Changelog),
+		authGuard: httpauth.NewGuard(),
 	}
 	if cfg.TaskLog != nil || cfg.SystemLog != nil {
 		p.logs.SetSink(p.archiveLogLine)
@@ -346,14 +350,38 @@ func (p *Panel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // withAuth 与 server 包同口径的 Bearer 鉴权（经 httpauth 常量时间比较）；
 // api_key 为空时放行。密钥经 livecfg 快照读取：面板里改了 api_key，下一个请求
-// 即用新值（无需重启）。
+// 即用新值（无需重启）。连续猜错会被 authGuard 拦一段时间，并留一行日志。
 func (p *Panel) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		ip := httpauth.ClientIP(r)
+		if wait, ok := p.authGuard.Blocked(ip); ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Round(time.Second).Seconds())+1))
+			writeErr(w, http.StatusTooManyRequests, "too many failed authentication attempts, retry later")
+			return
+		}
 		if !httpauth.VerifyBearer(r, p.apiKey()) {
+			p.noteAuthFailure(r, ip)
 			writeErr(w, http.StatusUnauthorized, "invalid_api_key")
 			return
 		}
+		p.authGuard.Reset(ip)
 		next(w, r)
+	}
+}
+
+// noteAuthFailure 面板接口的密钥猜错：留一行带来源与前缀的日志；连续失败到阈值时再推一条告警。
+// 只记前缀，不记原文（与网关同一口径，见 httpauth.MaskPrefix）。
+func (p *Panel) noteAuthFailure(r *http.Request, ip string) {
+	log.Printf("[panel] auth failed ip=%s key=%s path=%s ua=%q",
+		ip, httpauth.MaskPrefix(httpauth.Token(r, true)), r.URL.Path, r.UserAgent())
+	blocked, fails := p.authGuard.Fail(ip)
+	if !blocked {
+		return
+	}
+	log.Printf("[panel] auth blocked ip=%s fails=%d path=%s", ip, fails, r.URL.Path)
+	if p.cfg.Notify != nil {
+		p.cfg.Notify.Send(notify.LevelWarn, "面板鉴权失败过多",
+			fmt.Sprintf("%s 在短时间内连续 %d 次面板密钥校验失败（最后一次 %s），已暂停受理该来源的请求", ip, fails, r.URL.Path))
 	}
 }
 

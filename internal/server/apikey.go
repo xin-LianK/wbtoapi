@@ -15,6 +15,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/apikeys"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 )
 
 // adminUsageKey 用量统计里管理员密钥的密钥维度。客户端密钥的 id 以 k 开头，不会撞上。
@@ -84,15 +86,58 @@ func (h *Handler) authenticate(r *http.Request, xAPIKey bool) (principal, *apike
 	return principal{}, &apikeys.Denied{Status: http.StatusUnauthorized, Code: "invalid_api_key", Message: "missing or invalid API key"}
 }
 
+// authBlocked 来源还在封禁期就直接回 429：连摘要求都不做，不拿算力陪跑。
+func (h *Handler) authBlocked(ip string) *apikeys.Denied {
+	wait, ok := h.authGuard.Blocked(ip)
+	if !ok {
+		return nil
+	}
+	return &apikeys.Denied{
+		Status:     http.StatusTooManyRequests,
+		Code:       "auth_rate_limited",
+		Message:    "too many failed authentication attempts, retry later",
+		RetryAfter: wait,
+	}
+}
+
+// noteAuthFailure 记一次「密钥猜错」并留痕：来源、路径、UA 和猜的前缀（最多 6 个字符）。
+// 不记原文——日志会被备份、被转发、被贴进 issue，密钥不能出现在里面。
+// 连续失败到阈值时再推一条告警；正常用户偶尔敲错一两次，会在成功时由 Reset 清掉。
+func (h *Handler) noteAuthFailure(r *http.Request, ip string) {
+	log.Printf("auth failed ip=%s key=%s path=%s ua=%q",
+		ip, httpauth.MaskPrefix(httpauth.Token(r, true)), r.URL.Path, r.UserAgent())
+	blocked, fails := h.authGuard.Fail(ip)
+	if !blocked {
+		return
+	}
+	log.Printf("auth blocked ip=%s fails=%d path=%s", ip, fails, r.URL.Path)
+	if h.cfg.Notify != nil {
+		h.cfg.Notify.Send(notify.LevelWarn, "鉴权失败过多",
+			fmt.Sprintf("%s 在短时间内连续 %d 次密钥校验失败（最后一次 %s），已暂停受理该来源的请求", ip, fails, r.URL.Path))
+	}
+}
+
 // withKeyAuth 对话和模型列表接口的鉴权，管理员密钥和客户端密钥都认；报错按入口协议的格式写。
 // 认出的密钥放进请求上下文，请求日志记下它的名字。
 func (h *Handler) withKeyAuth(format sdktranslator.Format, xAPIKey bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, d := h.authenticate(r, xAPIKey)
-		if d != nil {
+		ip := httpauth.ClientIP(r)
+		if d := h.authBlocked(ip); d != nil {
+			denialHeaders(w, d)
 			writeBridgeError(w, format, d.Status, d.Code, d.Message)
 			return
 		}
+		p, d := h.authenticate(r, xAPIKey)
+		if d != nil {
+			// 只把「密钥不存在 / 没带密钥」算进限流。停用、过期、超额是已知密钥的状态问题，
+			// 客户端重试只会拿到同一句说明，不该因此把整个来源拦掉、把真正的错误盖住。
+			if d.Code == "invalid_api_key" {
+				h.noteAuthFailure(r, ip)
+			}
+			writeBridgeError(w, format, d.Status, d.Code, d.Message)
+			return
+		}
+		h.authGuard.Reset(ip)
 		if tr := requestTraceFrom(r); tr != nil {
 			tr.apiKey = p.label()
 		}

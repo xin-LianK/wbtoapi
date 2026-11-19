@@ -6,15 +6,15 @@
 import { useMemo, useState } from 'react'
 import { Copy } from '@gravity-ui/icons'
 import {
-  Button, Checkbox, CheckboxGroup, Description, Input, Label, Modal, NumberField, Surface, Switch, Tag, TagGroup, TextArea, TextField, toast,
+  Button, Checkbox, CheckboxGroup, Description, Input, Label, Modal, NumberField, Radio, RadioGroup, Surface, Switch, Tag, TagGroup, TextArea, TextField, toast,
 } from '@heroui/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { post } from '../../lib/api'
 import { copyText } from '../../lib/clipboard'
 import { toastError, useLast } from '../../lib/hooks'
 import {
-  LIMIT_KINDS, allowedModels, bareModelIds, emptyKeyForm, keyFormFrom, keyInput, validateKeyForm,
-  type KeyForm, type LimitForm,
+  LIMIT_KINDS, PREFIX_MAX, allowedModels, bareModelIds, emptyKeyForm, keyFormFrom, keyInput,
+  secretPreview, validateKeyForm, type KeyForm, type LimitForm, type SecretMode,
 } from '../../lib/keys'
 import { qk, useGroups, useModels } from '../../lib/queries'
 import type { ApiKey } from '../../lib/types'
@@ -52,7 +52,7 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
   const [form, setForm] = useState<KeyForm>(() => (editing ? keyFormFrom(editing) : emptyKeyForm()))
   const [saving, setSaving] = useState(false)
   const set = (patch: Partial<KeyForm>) => setForm((f) => ({ ...f, ...patch }))
-  const error = validateKeyForm(form)
+  const error = validateKeyForm(form, !editing)
 
   const save = async () => {
     if (error) {
@@ -62,7 +62,7 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
     setSaving(true)
     try {
       const path = editing ? 'keys/' + encodeURIComponent(editing.id) : 'keys'
-      const r = await post<{ ok: boolean; key: ApiKey }>(path, keyInput(form))
+      const r = await post<{ ok: boolean; key: ApiKey }>(path, keyInput(form, !editing))
       void qc.invalidateQueries({ queryKey: qk.keys })
       void qc.invalidateQueries({ queryKey: qk.groups })
       if (editing) {
@@ -98,6 +98,9 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
           <TextArea rows={2} placeholder="可选：给谁用、什么时候给的" />
         </TextField>
 
+        {/* 原文只在新建时定：编辑已有密钥时这块不出现，换原文走「重新生成」 */}
+        {!editing && <SecretField form={form} onChange={set} />}
+
         <ExpiryField
           value={form.expires}
           onChange={(expires) => set({ expires })}
@@ -123,6 +126,36 @@ function EditorBody({ editing, onClose, onCreated }: { editing: ApiKey | null; o
         <BusyButton busy={saving} isDisabled={!!error} onPress={() => void save()}>{editing ? '保存' : '创建'}</BusyButton>
       </Modal.Footer>
     </>
+  )
+}
+
+/** 新建时选密钥形态：默认 sk- 随机 / 自定义前缀 + 随机串（原文始终由网关生成） */
+function SecretField({ form, onChange }: { form: KeyForm; onChange: (p: Partial<KeyForm>) => void }) {
+  const preview = secretPreview(form)
+  return (
+    <fieldset className="flex flex-col gap-2">
+      <legend className="mb-1 text-sm font-medium">密钥形态</legend>
+      <p className="-mt-1 text-xs text-muted">只决定新建时的原文，建好之后改不了；要换原文用「重新生成」。原文一律由网关生成，不接受自填。</p>
+      <RadioGroup
+        value={form.secretMode}
+        onChange={(v) => onChange({ secretMode: v as SecretMode })}
+        orientation="horizontal"
+        className="flex-col flex-nowrap gap-1"
+      >
+        <Radio value="random"><Radio.Content><Radio.Control><Radio.Indicator /></Radio.Control>默认（sk- 随机）</Radio.Content></Radio>
+        <Radio value="prefix"><Radio.Content><Radio.Control><Radio.Indicator /></Radio.Control>自定义前缀</Radio.Content></Radio>
+      </RadioGroup>
+      {form.secretMode === 'prefix' && (
+        <TextField value={form.prefix} onChange={(prefix) => onChange({ prefix })} autoComplete="off">
+          <Label>前缀</Label>
+          <Input placeholder="比如 zz_" className="font-mono" />
+          <Description>后面自动补 32 位随机串，最多 {PREFIX_MAX} 个字符，只认字母、数字和 . _ -。</Description>
+        </TextField>
+      )}
+      {preview && (
+        <p className="text-xs text-muted">建出来是 <span className="font-mono">{preview}</span></p>
+      )}
+    </fieldset>
   )
 }
 

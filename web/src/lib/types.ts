@@ -777,6 +777,8 @@ export interface KeyInput {
   total_limit: KeyLimits
   models: string[]
   groups: string[]
+  /** 新建时自拟的前缀，后面自动补 32 位随机串，只在新建时生效 */
+  secret_prefix?: string
 }
 
 // ---------------------------------------------------------------------------

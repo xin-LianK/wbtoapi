@@ -3,7 +3,9 @@
 // 复制或改写本文件须保留以上声明，并按 NOTICE 的署名条款注明出处：https://github.com/linguo2625469/workbuddy2api-panel
 
 // Package apikeys 客户端密钥：管理员在面板里新建、发给别人调 /v1/* 的密钥。每个密钥带启用开关、
-// 到期时间、每天和总量的用量上限（请求数、token、积分）和模型白名单，用量按密钥计数。
+// 到期时间、每天和总量的用量上限（请求数、token、积分）和模型白名单，用量按密钥计数。新建时可以
+// 给原文加一段自定义前缀（比如 teamA_），后面始终是网关生成的 32 位随机串；不接受自填原文——原文的
+// 强度只能由网关保证，一个弱口令就等于把账号池敞开。建好之后原文只能重新生成。
 //
 // 管理员密钥（config.json 的 api_key）不在这里：它照旧能登面板、调接口，不受上限约束。客户端密钥
 // 登不了面板。只要建过一个客户端密钥，/v1/* 就必须带有效密钥，管理员密钥为空也一样（见 server）。
@@ -50,6 +52,11 @@ const (
 	maxNote     = 500
 	maxModels   = 100
 	maxPattern  = 128
+
+	// 默认形态的密钥前缀。自定义前缀也绕开它，所以鉴权不按前缀预筛（整串摘要查表）。
+	defaultSecretPrefix = "sk-"
+	maxSecret           = 96 // 前缀 + 随机串的上限
+	maxPrefix           = 32
 )
 
 // Limits 一组上限，0 表示这一项不限。
@@ -117,6 +124,13 @@ type Input struct {
 	TotalLimit Limits    `json:"total_limit"`
 	Models     []string  `json:"models"`
 	Groups     []string  `json:"groups"`
+	// Secret 旧版「自填原文」的字段，现在只用来报错：原文只能由网关生成（32 位随机串）。
+	// 保留字段是为了让还带着 secret 的老调用拿到一句明确说明，而不是被静默忽略后换了一把随机钥匙。
+	Secret string `json:"secret,omitempty"`
+	// SecretPrefix 新建时自拟的前缀（最多 maxPrefix 个字符，同一字符集），后面自动补 32 位随机串。
+	// 空 = 默认的 sk- + 随机串。原文只能由网关生成：自填原文的强度没法保证，一个弱口令就等于
+	// 把账号池敞开，所以不提供这条路径。
+	SecretPrefix string `json:"secret_prefix,omitempty"`
 }
 
 // Denied 密钥这次不能用：停用、过期、删了，或者用量到了上限。
@@ -286,7 +300,7 @@ func (s *Store) Create(in Input, now time.Time) (Key, error) {
 	if err != nil {
 		return Key{}, err
 	}
-	secret, err := newSecret()
+	secret, err := s.pickSecretLocked(in.SecretPrefix)
 	if err != nil {
 		return Key{}, err
 	}
@@ -307,6 +321,11 @@ func (s *Store) Update(id string, in Input) (Key, error) {
 	in, err := normalize(in)
 	if err != nil {
 		return Key{}, err
+	}
+	// 原文只在新建时定：老密钥要换原文走 Regenerate（旧的立即失效），免得「编辑」把别人的
+	// 客户端悄悄改成另一把钥匙、还绕过了一次显式的换钥动作。
+	if in.Secret != "" || in.SecretPrefix != "" {
+		return Key{}, errors.New("原文和前缀只能在新建时指定，已建好的密钥要换原文请用「重新生成」")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -497,6 +516,7 @@ func (s *Store) newIDLocked() (string, error) {
 func normalize(in Input) (Input, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Note = strings.TrimSpace(in.Note)
+	in.SecretPrefix = strings.TrimSpace(in.SecretPrefix)
 	switch {
 	case in.Name == "":
 		return in, errors.New("密钥名称不能为空")
@@ -504,6 +524,9 @@ func normalize(in Input) (Input, error) {
 		return in, fmt.Errorf("密钥名称最多 %d 个字", maxName)
 	case utf8.RuneCountInString(in.Note) > maxNote:
 		return in, fmt.Errorf("备注最多 %d 个字", maxNote)
+	}
+	if err := checkSecretIn(in.Secret, in.SecretPrefix); err != nil {
+		return in, err
 	}
 	for _, l := range []Limits{in.DailyLimit, in.TotalLimit} {
 		if l.Requests < 0 || l.Tokens < 0 || l.Credits < 0 || math.IsNaN(l.Credits) || math.IsInf(l.Credits, 0) {
@@ -621,13 +644,74 @@ func (s *Store) UsingGroup(id string) []string {
 	return names
 }
 
-// newSecret sk- 开头的 32 字节随机串，和首次运行生成的管理员密钥同一格式。
+// checkSecretIn 校验新建时的密钥形态：只认自定义前缀，不再接受自填原文。
+// 前缀的字符集只许 ASCII 字母、数字和 . _ -：空格、冒号、换行会破坏 Authorization 头和 .env 的解析。
+func checkSecretIn(secret, prefix string) error {
+	if secret != "" {
+		return errors.New("原文只能由网关生成（前缀 + 32 位随机串），不再支持自填原文")
+	}
+	if prefix == "" {
+		return nil
+	}
+	if len(prefix) > maxPrefix {
+		return fmt.Errorf("自定义前缀最多 %d 个字符", maxPrefix)
+	}
+	if !secretCharsOK(prefix) {
+		return errors.New("自定义前缀只能用字母、数字和 . _ -（不能有空格、冒号、换行）")
+	}
+	return nil
+}
+
+// secretCharsOK 是否只含 ASCII 字母、数字和 . _ -。
+func secretCharsOK(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// pickSecretLocked 定下新密钥的原文：前缀 + 32 位随机串，前缀不给就用默认的 sk-。
+// 前缀只影响观感和辨认，熵全在那 32 个随机字符里（24 字节，192 位）。
+func (s *Store) pickSecretLocked(prefix string) (string, error) {
+	body, err := newSecretBody()
+	if err != nil {
+		return "", err
+	}
+	if prefix == "" {
+		prefix = defaultSecretPrefix
+	}
+	secret := prefix + body
+	if len(secret) > maxSecret {
+		return "", fmt.Errorf("前缀加随机串超过 %d 个字符，把前缀写短一点", maxSecret)
+	}
+	// 192 位随机撞车概率可以忽略，留着只是兜底：真撞上就报错，绝不让两把钥匙共用一个原文
+	// （那会把用量记到先查到的那一个上）。
+	if s.bySecret[digest(secret)] != nil {
+		return "", errors.New("生成的密钥原文和已有的撞了，再建一次")
+	}
+	return secret, nil
+}
+
+// newSecret 默认形态的密钥原文：sk- 开头的 32 字节随机串，和首次运行生成的管理员密钥同一格式。
 func newSecret() (string, error) {
+	body, err := newSecretBody()
+	if err != nil {
+		return "", err
+	}
+	return defaultSecretPrefix + body, nil
+}
+
+// newSecretBody 24 字节随机数的 base64url 形态（32 个字符，只含字母、数字和 _ -）。
+func newSecretBody() (string, error) {
 	raw := make([]byte, 24)
 	if _, err := randRead(raw); err != nil {
 		return "", fmt.Errorf("生成密钥: %w", err)
 	}
-	return "sk-" + base64.RawURLEncoding.EncodeToString(raw), nil
+	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
 func digest(s string) string {
