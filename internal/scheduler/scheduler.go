@@ -62,6 +62,12 @@ type Config struct {
 	// 选号**——pool.pick 侧的 disabled 过滤与本开关无关。
 	IncludeDisabledInTasks bool
 
+	// AccountGap 批量任务（签到 / 保活）里账号之间的间隔。上游对同一出口的维护类
+	// 接口有频率限制：整点把整池号连着打，排在前面的会吃 429（实测 6 个号 7 秒内
+	// 连打，第 2 个就被拒；同一轮里前一个、后一个都正常，说明是连发太快而非某个号
+	// 坏了）。串行加一点间隔即可错峰。0 = 不间隔（测试默认，避免拖慢用例）。
+	AccountGap time.Duration
+
 	// GrowthHook 成长任务队列执行回调（panel.RunGrowthQueueOnce：扫描全部账号
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
@@ -493,7 +499,9 @@ func (s *Scheduler) RunCheckinNow() {
 	includeDisabled := s.includeDisabledInTasks()
 	// 本轮统计（告警用）：只有出现失败才推送，全成功不打扰。
 	var okN, alreadyN, failN, balanceFailN, skipN int
-	var failDetail []string
+	// 失败分两类记：签到本身失败（上游拒绝/网络）和余额查询失败，汇总行和告警都要能区分——
+	// 以前合成一份只进告警，日志里只剩「失败 1」一个数，看不出是签到被拒还是查不到余额。
+	var checkinFails, balanceFails []string
 	// skipDetail 被本轮跳过（一个上游请求都没发）的号与原因：以前这四处 continue 全静默，
 	// 面板上「这个号今天怎么没有签到流水」只能靠翻代码猜（issue #403 同源的排查成本）。
 	var skipDetail []string
@@ -501,7 +509,8 @@ func (s *Scheduler) RunCheckinNow() {
 		skipN++
 		skipDetail = append(skipDetail, logfmt.Label(st.UID, st.Nickname)+"："+why)
 	}
-	for _, st := range s.cfg.Pool.List() {
+	for i, st := range s.cfg.Pool.List() {
+		s.gapWait(i)
 		if st.Disabled && !includeDisabled {
 			skip(st, "已禁用（schedule.include_disabled_in_tasks 未开）")
 			continue
@@ -535,7 +544,7 @@ func (s *Scheduler) RunCheckinNow() {
 					log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
 				} else {
 					failN++
-					failDetail = append(failDetail, st.Nickname+"："+err.Error())
+					checkinFails = append(checkinFails, logfmt.Label(st.UID, st.Nickname)+"："+err.Error())
 					log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 				}
 				// 其余业务错误也继续走余额查询
@@ -552,7 +561,7 @@ func (s *Scheduler) RunCheckinNow() {
 		remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 		if err != nil {
 			balanceFailN++
-			failDetail = append(failDetail, st.Nickname+"：余额查询失败")
+			balanceFails = append(balanceFails, logfmt.Label(st.UID, st.Nickname)+"：余额查询失败（"+err.Error()+"）")
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			continue
 		}
@@ -567,14 +576,17 @@ func (s *Scheduler) RunCheckinNow() {
 		})
 	}
 	// 每轮都留一行汇总（不是只在失败时）：面板「这个号今天怎么没签到流水」看这一行就够——
-	// 跳过 N 个会把号与原因一起带上，避免只能靠代码猜。
+	// 跳过和失败的号都把原因带上。失败以前只进告警，日志里只剩「失败 1」一个数，看不出
+	// 是上游拒了签到、还是只查不到余额（号没到期没限流却报失败，多半要看这一行）。
 	summary := "checkin 汇总：成功 " + itoa(okN) + " / 已签到 " + itoa(alreadyN) +
 		" / 失败 " + itoa(failN) + " / 跳过 " + itoa(skipN)
-	if len(skipDetail) > 0 {
-		d := skipDetail
-		if len(d) > 6 {
-			d = d[:6]
-		}
+	if d := head(checkinFails, 10); len(d) > 0 {
+		summary += "；失败明细 " + strings.Join(d, "；")
+	}
+	if d := head(balanceFails, 10); len(d) > 0 {
+		summary += "；余额查询失败 " + strings.Join(d, "；")
+	}
+	if d := head(skipDetail, 10); len(d) > 0 {
 		summary += "；跳过明细 " + strings.Join(d, "；")
 	}
 	log.Printf("%s", summary)
@@ -582,14 +594,28 @@ func (s *Scheduler) RunCheckinNow() {
 	// 失败才告警：全成功是常态，每天推两条「一切正常」会让通知变成噪音，
 	// 真正出事时反而被忽略。明细带昵称与错误原文，手机上看一条就知道该修哪个号。
 	if failN > 0 || balanceFailN > 0 {
-		detail := failDetail
-		if len(detail) > 6 {
-			detail = detail[:6]
-		}
+		detail := head(append(append([]string{}, checkinFails...), balanceFails...), 6)
 		s.notifier.Send(notify.LevelWarn, "签到异常",
 			"成功 "+itoa(okN)+" / 已签到 "+itoa(alreadyN)+" / 失败 "+itoa(failN)+
 				" / 余额查询失败 "+itoa(balanceFailN)+"\n"+strings.Join(detail, "\n"))
 	}
+}
+
+// gapWait 批量任务在账号之间等一小段：不是限速而是错峰（见 Config.AccountGap）。
+// i==0 不等，第一个号仍按整点出发；抖动按序错开，避免每轮节奏完全一致。
+func (s *Scheduler) gapWait(i int) {
+	if i == 0 || s.cfg.AccountGap <= 0 {
+		return
+	}
+	time.Sleep(s.cfg.AccountGap + time.Duration(i%3)*s.cfg.AccountGap/5)
+}
+
+// head 取前 n 项：日志一行、推送一条，多的靠面板明细看。
+func head(list []string, n int) []string {
+	if len(list) > n {
+		return list[:n]
+	}
+	return list
 }
 
 // itoa 小整数转字符串（告警文案用，避免为此引入 strconv 的重复 import 语义）。
@@ -701,18 +727,31 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
 func (s *Scheduler) RunKeepaliveNow() {
 	includeDisabled := s.includeDisabledInTasks()
-	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled && !includeDisabled {
+	// 每轮汇总：以前只有失败才打一行，成功是静默的——「今天到底刷没刷」只能翻
+	// auths 文件的 mtime 猜。汇总行带成功/失败数与失败明细（含 uid 短码）。
+	var okN, failN, skipN int
+	var fails, skips []string
+	for i, st := range s.cfg.Pool.List() {
+		s.gapWait(i)
+		switch {
+		case st.Disabled && !includeDisabled:
+			skipN++
+			skips = append(skips, logfmt.Label(st.UID, st.Nickname)+"：已禁用")
 			continue
-		}
-		if st.ProxyBlocked != "" {
-			continue // 代理池拦着（代理不通、在等代理、没绑代理）：请求出不去
+		case st.ProxyBlocked != "":
+			skipN++
+			skips = append(skips, logfmt.Label(st.UID, st.Nickname)+"：代理池拦住")
+			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			skipN++
+			skips = append(skips, logfmt.Label(st.UID, st.Nickname)+"：没有 refresh token")
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+			failN++
+			fails = append(fails, logfmt.Label(st.UID, st.Nickname)+"："+err.Error())
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
@@ -728,10 +767,19 @@ func (s *Scheduler) RunKeepaliveNow() {
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
+		okN++
 		if err := a.SaveAtomic(); err != nil {
 			log.Printf("keepalive %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
 		}
 	}
+	summary := "keepalive 汇总：成功 " + itoa(okN) + " / 失败 " + itoa(failN) + " / 跳过 " + itoa(skipN)
+	if d := head(fails, 10); len(d) > 0 {
+		summary += "；失败明细 " + strings.Join(d, "；")
+	}
+	if d := head(skips, 10); len(d) > 0 {
+		summary += "；跳过明细 " + strings.Join(d, "；")
+	}
+	log.Printf("%s", summary)
 }
 
 // poolExpiryBuckets 把 upstream 的按日到期批次转换为 pool 结构。两个包字段同构，

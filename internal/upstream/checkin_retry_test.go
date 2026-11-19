@@ -17,12 +17,13 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-// shortBillingRetry 测试用重试间隔（生产 2s 会让单测秒级膨胀）。
+// shortBillingRetry 测试用重试间隔（生产 2s/20s 会让单测秒级膨胀）。
 func shortBillingRetry(t *testing.T) {
 	t.Helper()
-	old := billingRetryDelay
+	old, oldSoft := billingRetryDelay, softRateRetryDelay
 	billingRetryDelay = time.Millisecond
-	t.Cleanup(func() { billingRetryDelay = old })
+	softRateRetryDelay = time.Millisecond
+	t.Cleanup(func() { billingRetryDelay, softRateRetryDelay = old, oldSoft })
 }
 
 // checkinClient 签到状态固定回「活动进行中、今天未签」，其余请求交给 fn（只数签到本身）。
@@ -85,6 +86,48 @@ func TestDailyCheckinNoRetryOnBusinessError(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&calls); n != 1 {
 		t.Fatalf("calls=%d want 1（业务错误不重试）", n)
+	}
+}
+
+// 429 软限流等长间隔后补打一次：整池号在整点连发时排前面的号常吃 429，
+// 但隔几十秒单发是成功的（实测同一出口 6 个号 7 秒内连打，第 2 个被拒）。
+func TestDailyCheckinRetriesSoftRate(t *testing.T) {
+	shortBillingRetry(t)
+	var calls int32
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != dailyCheckinPath {
+			return nil, errors.New("wrong path")
+		}
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return jsonResp(429, `{"code":14003,"msg":"too many requests"}`), nil
+		}
+		return jsonResp(200, `{"code":0,"data":{}}`), nil
+	})
+	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err != nil {
+		t.Fatalf("首次 429 应补打成功，err=%v", err)
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("calls=%d want 2（1 次 429 + 1 次补打）", n)
+	}
+}
+
+// 429 只补打一次：限流窗口没退就继续等下去只会把整轮拖长（签到后面还有一串号），
+// 失败留给 21:00 那轮，不在一个号上死磕。
+func TestDailyCheckinSoftRateRetriedOnlyOnce(t *testing.T) {
+	shortBillingRetry(t)
+	var calls int32
+	c := checkinClient(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != dailyCheckinPath {
+			return nil, errors.New("wrong path")
+		}
+		atomic.AddInt32(&calls, 1)
+		return jsonResp(429, `{"code":14003,"msg":"too many requests"}`), nil
+	})
+	if err := c.DailyCheckin(&auth.Auth{AccessToken: "at"}); err == nil {
+		t.Fatal("持续 429 应返回错误")
+	}
+	if n := atomic.LoadInt32(&calls); n != 2 {
+		t.Fatalf("calls=%d want 2（1 次 + 1 次补打，不再继续）", n)
 	}
 }
 

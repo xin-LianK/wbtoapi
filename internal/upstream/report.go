@@ -84,10 +84,26 @@ func (c *Client) withDeviceToken(a *auth.Auth) func(*http.Request) {
 // 独立变量供测试缩短（生产固定 2s：第 1 次重试等 2s、第 2 次等 4s）。
 var billingRetryDelay = 2 * time.Second
 
+// softRateRetryDelay 429 软限流后的单独补打间隔。
+//
+// 为什么和 5xx 的 2s/4s 分开：429 是「这一秒/这一分钟打太多」，立刻重试只会
+// 再被拒一次，还可能把限流窗口续上。签到/余额一天只跑几次，等得起——错过这一轮
+// 就只剩 21:00 那次（checkin_hours），代价远高于多等几十秒。
+// 实测：整池 6 个号 7 秒内连打，第 2 个就吃 429，隔几十秒后单发是成功的。
+var softRateRetryDelay = 20 * time.Second
+
+// isSoftRateErr 报告 err 是否为上游 429 软限流（ErrSoftRate）。只有限流值得等长间隔
+// 再补一次；余额不足（ErrHardCredit）、凭证失效（ErrSessionDead）等重试没有意义。
+func isSoftRateErr(err error) bool {
+	var ue *Error
+	return errors.As(err, &ue) && ue.Kind == ErrSoftRate
+}
+
 // isTransientBillingErr 报告 err 是否值得对计费维护类调用做有界重试：
 // 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
 // code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
-// 已签到/参数错、4xx、限流）不重试——重试只会原样再失败一次。
+// 已签到/参数错、4xx）不重试——重试只会原样再失败一次；429 单独走
+// softRateRetryDelay 的长间隔补打，不在这里。
 func isTransientBillingErr(err error) bool {
 	if err == nil {
 		return false
@@ -100,11 +116,19 @@ func isTransientBillingErr(err error) bool {
 }
 
 // retryBillingTransient 对签到/余额这类低频维护调用做瞬时错误有界重试：
-// 最多补打 2 次（间隔 2s、4s），首次成功或非瞬时错误立即返回。chat 热路径
-// 不用本策略——它有自己的换号轮转语义，重试会放大在途请求。
+// 429 软限流等 softRateRetryDelay 后补打一次；5xx/网络错误最多补打 2 次
+// （间隔 2s、4s）；首次成功或非瞬时错误立即返回。chat 热路径不用本策略——
+// 它有自己的换号轮转语义，重试会放大在途请求。
 func (c *Client) retryBillingTransient(fn func() error) error {
 	err := fn()
-	if err == nil || !isTransientBillingErr(err) {
+	if err == nil {
+		return err
+	}
+	if isSoftRateErr(err) {
+		time.Sleep(softRateRetryDelay)
+		return fn()
+	}
+	if !isTransientBillingErr(err) {
 		return err
 	}
 	for i := 1; i <= 2; i++ {

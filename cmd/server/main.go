@@ -299,6 +299,10 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 		// 保号类四任务是否覆盖禁用账号（缺省 false = 禁用即跳过，保持既有行为）。
 		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
+		// 签到/保活里号与号之间错开 1.5 秒：上游对同一出口的维护类接口有频率限制，
+		// 整点把整池号连着打会让排在前面的号吃 429（实测 6 个号 7 秒内连打，第 2 个
+		// 就被拒）。串行加一点间隔即可，池子大时整轮会相应变长（每号 1.5s）。
+		AccountGap: 1500 * time.Millisecond,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
