@@ -71,8 +71,12 @@ var sanitizeRewrites = [][2]string{
 		"Default branch (you will usually use this for PRs)",
 	},
 	{
+		// 2026-11-23（issue #479 实测）：只把 "CLI" 改成 "CLI tool" 已不够——上游现在
+		// 盯的是 "terminal-based" 这个词，改写版本（"…CLI tool, a terminal-based…"）
+		// 同样被 400/11128 拦；把 terminal-based 换成 terminal 才放行。两处一起改，
+		// 保留原来对整句的破坏，语义不变（都是「终端里的编程助手」）。
 		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-		"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
+		"You are a coding agent running in the Codex CLI tool, a terminal coding assistant.",
 	},
 	{
 		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，

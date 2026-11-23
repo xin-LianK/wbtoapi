@@ -127,8 +127,13 @@ func TestCodexInstructionsRewritten(t *testing.T) {
 	if strings.Contains(out, codexInstructions) {
 		t.Errorf("codex fingerprint still present: %q", out)
 	}
-	if !strings.Contains(out, "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.") {
+	if !strings.Contains(out, "You are a coding agent running in the Codex CLI tool, a terminal coding assistant.") {
 		t.Errorf("codex first sentence not rewritten: %q", out)
+	}
+	// issue #479：改写版本里留着 "terminal-based" 仍会被上游拦（400/11128），
+	// 这一词必须被换掉，否则等于没改。
+	if strings.Contains(out, "terminal-based") {
+		t.Errorf("terminal-based 残留，上游仍会拦: %q", out)
 	}
 	// 其余两句原样保留，语义不变。
 	if !strings.Contains(out, "Codex CLI is an open source project led by OpenAI.") ||
@@ -333,8 +338,12 @@ func TestChatStreamWireBodyCodexInstructionsSanitized(t *testing.T) {
 		strings.Contains(sys, "in the Codex CLI, a terminal-based coding assistant.") {
 		t.Errorf("wire body still contains codex fingerprint: %q", sys)
 	}
-	if !strings.Contains(sys, "running in the Codex CLI tool, a terminal-based") {
+	if !strings.Contains(sys, "running in the Codex CLI tool, a terminal coding assistant") {
 		t.Errorf("codex rewrite missing on wire: %q", sys)
+	}
+	// issue #479：wire body 里留下 "terminal-based" 等于没改，上游照拦。
+	if strings.Contains(sys, "terminal-based") {
+		t.Errorf("wire body still has terminal-based: %q", sys)
 	}
 	user, _ := obj["messages"].([]any)[1].(map[string]any)["content"].(string)
 	if user != "say ok" {
