@@ -1328,8 +1328,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
-			h.cfg.Pool.NoteFailures(acct.UID)
 			fail(acct.UID)
+			// 入站 ctx 已取消＝客户端先走了（它断连才让 reqCtx 连带取消，本请求的
+			// transport error 只是结果）。这不是号的失败，也不是网络抖动：既不能喂
+			// 连败计数，也没必要换号一一试过（issue #481——反复重启的客户端每断一次
+			// 就给健康号记一次连败，攒够阈值把整池号临时打进出池态，下一轮请求于是
+			// 真的没号可用）。上面的 isUpstreamTimeout 已排除这条路径，落到这里的是
+			// 「客户端断连」而非「空闲看门狗掐流」。
+			if r.Context().Err() != nil {
+				log.Printf("INFO: [server] client gone, rotation stopped (account not penalized) acct=%s",
+					logfmt.Label(acct.UID, acct.Nickname))
+				break
+			}
+			h.cfg.Pool.NoteFailures(acct.UID)
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（传输层错误换号退避）
 			}

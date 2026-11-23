@@ -6,6 +6,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1073,6 +1074,35 @@ func TestChatTransportErrorDoesNotPenalize(t *testing.T) {
 	st, _ := p.Status("u1")
 	if st.Cooling || st.ErrTotal != 0 {
 		t.Fatalf("transport error should not penalize account: %+v", st)
+	}
+}
+
+// 客户端断连不是号的失败（issue #481）：入站 ctx 取消导致出站请求报
+// "context canceled" 时，此前走的是「网络抖动」分支——NoteFailures 给这个健康号
+// 记一次连败，反复重启的客户端能把整池号攒够阈值临时打出池，下一轮请求真的
+// 没号可用。这里把降权阈值压到 1，一次断连即能让 ServableNow 变 false。
+func TestChatClientGoneDoesNotPenalize(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.SetDegrade(1, time.Minute, time.Hour)
+	ctx, cancelInbound := context.WithCancel(context.Background())
+	defer cancelInbound()
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			cancelInbound()               // 客户端此刻断开
+			return nil, r.Context().Err() // 出站请求随之取消
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)).WithContext(ctx))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if !p.ServableNow() {
+		t.Fatalf("客户端断连不应给号记连败（账号被临时打出池）")
 	}
 }
 
