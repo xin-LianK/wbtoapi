@@ -51,7 +51,7 @@ import (
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
 // 1.25.0-panel：密钥可自定义前缀（原文仍由网关生成）；鉴权失败限流与留痕。
-const appVersion = "1.25.1-panel"
+const appVersion = "1.26.0-panel"
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
