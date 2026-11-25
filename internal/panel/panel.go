@@ -316,6 +316,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/compensation_all", p.withAuth(p.compensationClaimAll))
 	// 告警通知（测试投递）与本地备份。
 	p.mux.HandleFunc("POST /panel/api/notify/test", p.withAuth(p.notifyTest))
+	p.mux.HandleFunc("POST /panel/api/notify/report", p.withAuth(p.notifyReport))
 	p.mux.HandleFunc("GET /panel/api/notify/status", p.withAuth(p.notifyStatus))
 	p.mux.HandleFunc("GET /panel/api/backups", p.withAuth(p.backups))
 	p.mux.HandleFunc("POST /panel/api/backups", p.withAuth(p.backupCreate))

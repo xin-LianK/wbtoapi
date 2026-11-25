@@ -63,6 +63,29 @@ func (p *Panel) notifyTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "format": p.cfg.Notify.Format()})
 }
 
+// notifyReport 立刻发一次积分到期日报（同步投递，把通道真实错误回给调用方）。
+// 作用是让「每天早上一条」不必等到明早才知道长什么样：改完通知通道先点一次。
+func (p *Panel) notifyReport(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Notify == nil {
+		writeErr(w, http.StatusNotImplemented, "notify disabled")
+		return
+	}
+	if p.cfg.Scheduler == nil {
+		writeErr(w, http.StatusNotImplemented, "scheduler unavailable")
+		return
+	}
+	title, body := p.cfg.Scheduler.ExpiryDigest()
+	if title == "" {
+		writeErr(w, http.StatusNotImplemented, "account pool unavailable")
+		return
+	}
+	if err := p.cfg.Notify.SendSync(notify.LevelInfo, title, body); err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "title": title, "text": body})
+}
+
 // backups 列出已有备份（未启用时返回空集，前端按「未启用」展示）。
 func (p *Panel) backups(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Backup == nil {

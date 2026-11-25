@@ -17,21 +17,21 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
-// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy 5.11.3、国际版 5.9.4，国内版内置 CLI
-// @tencent-ai/codebuddy-code 2.176.0、国际版仍是 2.165.0）。对话、刷新令牌、模型目录由内置
+// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy 5.11.3、国际版 5.11.4，两域内置 CLI
+// 都是 @tencent-ai/codebuddy-code 2.176.0）。对话、刷新令牌、模型目录由内置
 // CLI 发；积分、签到、成长任务、旅行、上报由桌面端后台服务发。两者用同一套请求框架，UA 段序不同。
 const (
-	// defaultClientVersionCN / defaultClientVersionGlobal 两域桌面端版本（UA 与 X-IDE-Version）。
+	// defaultClientVersionCN / defaultClientVersionGlobal 两域桌面端版本（UA、X-IDE-Version 与 X-Client-Version）。
 	// config upstream.client_version 可覆盖（两域共用一个值，空 = 内置默认）。
 	// 国内版 5.11.3 是 2026-11-12 构建（Windows 包，11-16 读 app.asar 的 package.json 核对）；
-	// 国际版 5.9.4 之后没有新包可读，仍按 5.9.4（未确认是否有更新）。
+	// 国际版 5.11.4（macOS 包 5.11.4.44121853，2026-11-24 上游核对）。
 	defaultClientVersionCN     = "5.11.3"
-	defaultClientVersionGlobal = "5.9.4"
-	// defaultCliVersionCN / defaultCliVersionGlobal 两域桌面端内置 CLI 的版本（UA 的 `CLI/<ver>` 段）。
-	// config upstream.cli_version 可覆盖（两域共用一个值，空 = 内置默认）。
-	// 国内版 5.11.3 内置 2.176.0；国际版 5.9.4 内置 2.165.0，没有更新的国际版包可核对。
+	defaultClientVersionGlobal = "5.11.4"
+	// defaultCliVersionCN / defaultCliVersionGlobal 两域桌面端内置 CLI 的版本（UA 的 `CLI/<ver>` 段与
+	// extra_vars.harnessMetadata.harnessVersion）。config upstream.cli_version 可覆盖（两域共用一个值，空 = 内置默认）。
+	// 两域 5.11.3 / 5.11.4 内置的都是 2.176.0。
 	defaultCliVersionCN     = "2.176.0"
-	defaultCliVersionGlobal = "2.165.0"
+	defaultCliVersionGlobal = "2.176.0"
 	// deploymentType 两域 product.json 的 deploymentType。官方请求框架的 ProductEndpointHttpInterceptor
 	// 把它作为 X-Product 加到经过框架的每个请求上（对话、刷新令牌、模型目录、积分等都在内）。
 	deploymentType = "SaaS"
@@ -87,7 +87,7 @@ func applicationNameFor(a *auth.Auth) string {
 
 // defaultCLIUA 内置 CLI 的 UA（UserAgentHttpInterceptor）：
 // `<platform>/<ver> <applicationName>/<ver> CLI/<cli>`，platform 由桌面端固定传 "WorkBuddy"。
-// 国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。
+// 国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0`。
 func (c *Client) defaultCLIUA(a *auth.Auth) string {
 	v := c.clientVersion(a)
 	return "WorkBuddy/" + v + " " + applicationNameFor(a) + "/" + v + " CLI/" + c.cliVersion(a)
@@ -98,7 +98,8 @@ func (c *Client) defaultCLIUA(a *auth.Auth) string {
 // applicationName（WorkbuddyClientInfoProvider.initClientInfo）：桌面端只给内置 CLI 的进程设
 // CLIENT_INFO_PLATFORM=WorkBuddy，后台服务的子进程环境里没有（buildDaemonProcessEnv），所以两段都是
 // 应用名。国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，和 CLI 的 UA 一样；国际版
-// `workbuddy-ai/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`。2026-10-31 读 5.8.3、5.9.4 安装包核对，同类项目
+// `workbuddy-ai/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0`。2026-10-31 读 5.8.3、5.9.4 安装包核对，
+// 11-24 随国际版 5.11.4 复读，同类项目
 // misakano7545/workbuddy2api-panel 的真机抓包也是这样；1.8.0 及以前国际版第二段发的是 WorkBuddy。
 func (c *Client) defaultDaemonUA(a *auth.Auth) string {
 	app, v := applicationNameFor(a), c.clientVersion(a)
@@ -201,6 +202,7 @@ func (c *Client) frameworkHeaders(req *http.Request, a *auth.Auth, ua string) {
 	if d := chatDomain(a); d != "" {
 		req.Header.Set("X-Domain", d)
 	}
+	c.injectClientIdentity(req, a)
 }
 
 // injectDepartment 账号有部门全名（企业号）时带 X-Department-Info，值原样（官方
@@ -226,14 +228,19 @@ func billingAcceptLanguage(a *auth.Auth) string {
 // 聚合请求，官方客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID）。
 // handler 在轮转循环外生成 conversationID / conversationRequestID，循环内每次出站
 // 复用同值；TraceID 透传入站值（空 = 回落 conversationRequestID）。
-// messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
+// messageID（消息级）由 ChatHeaders 内部生成；handler 需要与 harnessMetadata 同源时经
+// MessageID 预先指定，同轮的重试与换号因此复用同一个消息 id。
 type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：入站对话由 handler 定好（session.OutboundConversationID）；空则新生成
 	ConversationRequestID string // X-Conversation-Request-ID：聚合主键，必发
-	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
-	ExpertID              string // X-Expert-Id：专家对话的专家 id；空 = 普通对话，不发
-	ExpertTeamTask        bool   // X-Expert-Team-Task：专家团（市场 expert_type=team）为 true，只和 ExpertID 一起发
-	Protected             bool   // X-Moderation-Type: ["protected"]：云端 / 付费专家的对话才发（见 MarketExpert.Protected）
+	MessageID             string // X-Conversation-Message-ID / X-Request-ID：空则 ChatHeaders 内部新生成；指定时与 harnessMetadata 同源
+	// HarnessStep 当前对话轮内的步骤位置（extra_vars.harnessMetadata 的 stepIndex 与上一步消息 id）；
+	// nil 按首步（stepIndex=0，无 previous）处理。见 session.HarnessTracker。
+	HarnessStep    *session.HarnessStep
+	TraceID        string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+	ExpertID       string // X-Expert-Id：专家对话的专家 id；空 = 普通对话，不发
+	ExpertTeamTask bool   // X-Expert-Team-Task：专家团（市场 expert_type=team）为 true，只和 ExpertID 一起发
+	Protected      bool   // X-Moderation-Type: ["protected"]：云端 / 付费专家的对话才发（见 MarketExpert.Protected）
 	// Model 本次请求的模型名。只有 VSCode 身份用到（X-Model-ID 与两个 monitor 时间戳），
 	// 其余身份不发这些头。
 	Model string
@@ -291,9 +298,10 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	req.Header.Set("X-Agent-Runtime", agentRuntime)
 	req.Header.Set("X-Private-Data", c.privateDataValue(a))
 	req.Header.Set("X-Product", deploymentType)
-	// 用量归属头（X-Agent-Purpose / X-IDE-*）与 OpenAI SDK 的对话头（Accept、X-Stainless-*）：
-	// 默认都伪装官方桌面端；client_name="SaaS" 还原旧行为（见各自函数注释）。
+	// 用量归属头（X-Agent-Purpose / X-IDE-*）、客户端身份头（X-Client-*）与 OpenAI SDK 的对话头
+	// （Accept、X-Stainless-*）：默认都伪装官方桌面端；client_name="SaaS" 还原旧行为（见各自函数注释）。
 	c.injectAttribution(req, a)
+	c.injectClientIdentity(req, a)
 	c.injectSDKHeaders(req, a)
 	// X-Device-Token：官方后台服务每次提问前现取图灵盾设备令牌加在模型请求上；网关在 Linux
 	// 做不出真令牌，只在使用者填了 device_token（账号 / config / 文件）时照发，没填就不发——
@@ -349,7 +357,7 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	}
 }
 
-// desktopProfile 当前用桌面端（5.11.3 / 5.9.4）形态；显式 "legacy" 回到旧形态（回滚对照用）。
+// desktopProfile 当前用桌面端（5.11.3 / 5.11.4）形态；显式 "legacy" 回到旧形态（回滚对照用）。
 func (c *Client) desktopProfile() bool {
 	return !strings.EqualFold(strings.TrimSpace(c.Profile), "legacy")
 }
@@ -470,8 +478,12 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	// 时间戳，截它当 span id 会让同一毫秒的两条消息撞上）。
 	// 官方 withModelMessageCorrelation 把同一个消息 id 同时写进 X-Conversation-Message-ID
 	// 与 X-Request-ID（docs/official-client.md「对话请求另有这些头和字段」），两者同值是
-	// 官方形态，不是偷懒复用。
-	messageID := session.NewUUIDv7Hex()
+	// 官方形态，不是偷懒复用。调用方已预生成（meta.MessageID）时直接复用，确保与
+	// extra_vars.harnessMetadata 的 previous 同源、同轮重试换号也不改。
+	messageID := meta.MessageID
+	if messageID == "" {
+		messageID = session.NewUUIDv7Hex()
+	}
 	if meta.ConversationID != "" {
 		req.Header.Set("X-Conversation-ID", meta.ConversationID)
 	}
@@ -541,6 +553,51 @@ func (c *Client) injectAttribution(req *http.Request, a *auth.Auth) {
 	req.Header.Set("X-IDE-Name", name)
 	req.Header.Set("X-IDE-Type", name)
 	req.Header.Set("X-IDE-Version", c.clientVersion(a))
+}
+
+// clientPlatform 复刻官方桌面端 5.11.x（app/main/client-identity.js 的 toWorkbuddyClientPlatform）：
+// 把设备平台映射为 X-Client-Platform（darwin → macos，与 deviceOS 同源）。
+func clientPlatform(platform string) string {
+	p := strings.ToLower(platform)
+	switch {
+	case strings.Contains(p, "mac") || strings.Contains(p, "darwin"):
+		return "macos"
+	case strings.Contains(p, "win"):
+		return "windows"
+	case strings.Contains(p, "linux"):
+		return "linux"
+	default:
+		return ""
+	}
+}
+
+// injectClientIdentity 注入官方桌面端 5.11.3（国内版）/ 5.11.4（国际版）起对第一方来源统一追加的
+// 客户端身份头：X-Client-Version、X-Client-Platform、X-Client-Product。
+// 依据（实包核对 app/main/client-identity.js、index.js、server.js、proxy-env2.js、sidecar-manager.js）：
+//   - X-Client-Version：桌面端版本（c.clientVersion(a)）；
+//   - X-Client-Platform：设备平台（darwin → macos）；
+//   - X-Client-Product：product.json 的 applicationName（国内版 WorkBuddy、国际版 workbuddy-ai），
+//     不是 productName，也不是缺配置时的回退值 workbuddy-desktop。
+//
+// 仅在目标头为空时写入（对齐官方 proxy-env2.js 与 CLI CustomHeadersProvider 的不覆盖语义），
+// 不覆盖小程序与官网网页自身的身份头；client_name="SaaS"（旧行为）不伪装桌面端，不注入。
+func (c *Client) injectClientIdentity(req *http.Request, a *auth.Auth) {
+	if c.attributionClientName() == "SaaS" {
+		return
+	}
+	if req.Header.Get("X-Client-Version") == "" {
+		if v := c.clientVersion(a); v != "" {
+			req.Header.Set("X-Client-Version", v)
+		}
+	}
+	if req.Header.Get("X-Client-Platform") == "" {
+		if p := clientPlatform(deviceOS); p != "" {
+			req.Header.Set("X-Client-Platform", p)
+		}
+	}
+	if req.Header.Get("X-Client-Product") == "" {
+		req.Header.Set("X-Client-Product", applicationNameFor(a))
+	}
 }
 
 // injectSDKHeaders 注入官方对话经 OpenAI SDK 发出时 SDK 自带的头：Accept 与 8 个 X-Stainless-*。

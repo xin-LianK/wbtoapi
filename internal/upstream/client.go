@@ -904,7 +904,8 @@ type Client struct {
 
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
 	HeaderTimeout time.Duration
-	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
+	// IdleTimeout 聊天 SSE 流中**无内容帧**的上限（保活/心跳帧不续命，见 idle.go）；
+	// <=0 表示禁用空闲监控。
 	IdleTimeout time.Duration
 
 	// effortsMu/efforts 缓存各模型 supportedEfforts（FetchModels 刷新），供请求体 effort 降级。
@@ -1180,7 +1181,12 @@ func (c *Client) chatBase(a *auth.Auth) string {
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
+// 首步 harnessMetadata（stepIndex=0、无 previous）：调用方带对话轮步骤时用 prepareBodyWithOpts。
 func (c *Client) prepareBody(body []byte, realm string) []byte {
+	return c.prepareBodyWithOpts(body, realm, OfficialBodyOpts{})
+}
+
+func (c *Client) prepareBodyWithOpts(body []byte, realm string, opts OfficialBodyOpts) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
@@ -1192,8 +1198,9 @@ func (c *Client) prepareBody(body []byte, realm string) []byte {
 	// 不再自动补 prompt_cache_key（客户端自己带的照转）：官方客户端不发它；10-19 生产实测
 	// deepseek、glm、kimi 两域带不带都不多命中，glm 会话 id 每轮换新时带它反而更少命中。
 	// 前缀缓存靠稳定的 X-Conversation-ID，见 ChatHeaders。
-	// reasoning_summary / cache_retention 对齐官方 CLI，见 InjectOfficialBodyFields。
-	body = InjectOfficialBodyFields(body, c.cacheRetentionPolicy())
+	// reasoning_summary / cache_retention / harnessMetadata / initiator 对齐官方 CLI，
+	// 见 InjectOfficialBodyFieldsWithOpts。
+	body = InjectOfficialBodyFieldsWithOpts(body, c.cacheRetentionPolicy(), opts)
 	return body
 }
 
@@ -1775,7 +1782,10 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm())
+	prepared := c.prepareBodyWithOpts(body, a.Realm(), OfficialBodyOpts{
+		CliVersion:  c.cliVersion(a),
+		HarnessStep: meta.HarnessStep,
+	})
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}

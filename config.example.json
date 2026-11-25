@@ -38,12 +38,14 @@
     "activity_hours": [10],
     "keepalive_hours": [22],
     "blackcat_hours": [23],
+    "report_hours": [8],
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
     "keepalive_enabled": true,
     "blackcat_enabled": true,
+    "report_enabled": true,
     "balance_refresh_enabled": true,
     "balance_refresh_minutes": 5,
     "include_disabled_in_tasks": false
@@ -88,7 +90,7 @@
     "alias": {}
   },
   "notify": {
-    "_comment": "出站告警，缺省 enabled=true 且 format 缺省 bark（个人自用最顺手），配好 url 前静默（不发任何请求）。format: bark(iOS，url 填 https://api.day.app/<你的device_key>) / wecom(企业微信群机器人) / telegram(token+chat_id) / generic(裸 JSON POST)。只为失败告警（签到异常、账号被禁用），全成功不打扰。alerts 是状态类阈值巡检：各项阈值 <=0 = 不检查该项，默认全部关闭（升级后不会突然开始发消息）。key_quota_percent 填百分数（80 = 80%），日限比今日用量、总量限比累计用量。",
+    "_comment": "出站告警，缺省 enabled=true 且 format 缺省 bark（个人自用最顺手），配好 url 前静默（不发任何请求）。format: bark(iOS，url 填 https://api.day.app/<你的device_key>) / wecom(企业微信群机器人) / telegram(token+chat_id) / generic(裸 JSON POST)。失败告警（签到异常、账号被禁用）全成功不打扰；另有每天早上的「积分到期日报」（schedule.report_hours，默认 8 点，每个号最近到期多少积分），只在 notify.enabled=true 且配好 url 时发。alerts 是状态类阈值巡检：各项阈值 <=0 = 不检查该项，默认全部关闭（升级后不会突然开始发消息）。key_quota_percent 填百分数（80 = 80%），日限比今日用量、总量限比累计用量。",
     "enabled": true,
     "url": "",
     "format": "bark",
@@ -139,6 +141,8 @@
     "in_flight_wait": "30s",
     "max_rpm": 0,
     "max_rpm_global": 0,
+    "max_tpm": 0,
+    "max_tpm_global": 0,
     "breaker_threshold": 3,
     "breaker_cooldown": "30m",
     "breaker_cooldown_max": "6h",

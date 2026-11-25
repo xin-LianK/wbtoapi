@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 // TestInjectOfficialBodyFields 带了思考档位才补 reasoning_summary="auto"；cache_retention 只在策略开了
@@ -50,6 +52,93 @@ func TestInjectOfficialBodyFields(t *testing.T) {
 		if got := string(InjectOfficialBodyFields([]byte(in), long)); got != in {
 			t.Fatalf("%q 应原样返回: %q", in, got)
 		}
+	}
+}
+
+// TestInjectHarnessMetadata harnessMetadata / initiator 按 CLI 2.176.0 补：首步不带 previous，
+// 后续步带 previous，extra_vars 其他键保留，客户端带了的字段不覆盖，末尾不是 user 时不写 initiator。
+func TestInjectHarnessMetadata(t *testing.T) {
+	decode := func(b []byte) map[string]any {
+		t.Helper()
+		var obj map[string]any
+		if err := json.Unmarshal(b, &obj); err != nil {
+			t.Fatalf("unmarshal %s: %v", b, err)
+		}
+		return obj
+	}
+	extra := func(obj map[string]any) map[string]any {
+		t.Helper()
+		ev, _ := obj["extra_vars"].(map[string]any)
+		return ev
+	}
+	harness := func(t *testing.T, obj map[string]any) map[string]any {
+		t.Helper()
+		raw, _ := extra(obj)["harnessMetadata"].(string)
+		if raw == "" {
+			return nil
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("harnessMetadata 不是 JSON 字符串: %q", raw)
+		}
+		return m
+	}
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	obj := decode(InjectOfficialBodyFieldsWithOpts([]byte(body), CacheRetentionPolicy{}, OfficialBodyOpts{}))
+	meta := harness(t, obj)
+	if meta == nil {
+		t.Fatalf("应补 harnessMetadata: %v", obj)
+	}
+	if meta["schemaVersion"] != float64(1) || meta["harnessVersion"] != defaultCliVersionCN || meta["stepIndex"] != float64(0) {
+		t.Errorf("首步字段不对: %v", meta)
+	}
+	if _, ok := meta["previous"]; ok {
+		t.Errorf("首步不该带 previous: %v", meta)
+	}
+	if agent, _ := meta["agent"].(map[string]any); agent["depth"] != float64(0) {
+		t.Errorf("agent.depth 应为 0: %v", meta)
+	}
+	if extra(obj)["initiator"] != "user" {
+		t.Errorf("末尾是 user 应补 initiator=user: %v", obj)
+	}
+
+	// 后续步：stepIndex 与 previous 同源；CLI 版本可指定（国际版）。
+	obj = decode(InjectOfficialBodyFieldsWithOpts([]byte(body), CacheRetentionPolicy{}, OfficialBodyOpts{
+		CliVersion:  "9.9.9",
+		HarnessStep: &session.HarnessStep{Index: 2, PreviousMessageID: "prev-id"},
+	}))
+	meta = harness(t, obj)
+	if meta["stepIndex"] != float64(2) || meta["harnessVersion"] != "9.9.9" {
+		t.Errorf("后续步字段不对: %v", meta)
+	}
+	if prev, _ := meta["previous"].(map[string]any); prev["conversationMessageId"] != "prev-id" {
+		t.Errorf("previous 应指向上一步消息 id: %v", meta)
+	}
+
+	// 客户端带了 extra_vars 的其他键：保留；已带 harnessMetadata / initiator：不覆盖。
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],"extra_vars":{"a":1,"harnessMetadata":"{}","initiator":"tool"}}`
+	obj = decode(InjectOfficialBodyFieldsWithOpts([]byte(in), CacheRetentionPolicy{}, OfficialBodyOpts{}))
+	if extra(obj)["a"] != float64(1) || extra(obj)["harnessMetadata"] != "{}" || extra(obj)["initiator"] != "tool" {
+		t.Errorf("客户端已带的字段应原样保留: %v", obj)
+	}
+
+	// 末尾是 tool（工具回传）：不写 initiator，但仍补 harnessMetadata。
+	in = `{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"tool","content":"r"}]}`
+	obj = decode(InjectOfficialBodyFieldsWithOpts([]byte(in), CacheRetentionPolicy{}, OfficialBodyOpts{}))
+	if _, ok := extra(obj)["initiator"]; ok {
+		t.Errorf("末尾不是 user 不该写 initiator: %v", obj)
+	}
+	if harness(t, obj) == nil {
+		t.Errorf("仍应补 harnessMetadata: %v", obj)
+	}
+}
+
+// TestInjectHarnessMetadataSkipsNonChat 没有 messages 数组的 body（模型目录之类的非对话请求）不补。
+func TestInjectHarnessMetadataSkipsNonChat(t *testing.T) {
+	in := `{"model":"m"}`
+	if got := string(InjectOfficialBodyFields([]byte(in), CacheRetentionPolicy{})); got != in {
+		t.Fatalf("没有 messages 时不应改字节: %s", got)
 	}
 }
 

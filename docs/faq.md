@@ -55,7 +55,7 @@ docker run --user 0:0 ...
 
 ## 503「all accounts are busy」是什么
 
-能接这个请求的号都健康，只是在途请求都满了（国内版每个号默认 3 个、国际版 2 个，见 `pool.max_in_flight`、`pool.max_in_flight_global`），或者设了每号每分钟请求数上限（`pool.max_rpm`、`pool.max_rpm_global`）并且到了上限。网关先让请求排队，等有号放出名额再转发，最多等 `pool.in_flight_wait`（默认 30 秒）；等满还没有空位才回这个 503。有号是因为每分钟请求数到上限时，错误信息里写的是 `requests-per-minute`，`gateway_hint` 以 `rpm_full` 开头。
+能接这个请求的号都健康，只是在途请求都满了（国内版每个号默认 3 个、国际版 2 个，见 `pool.max_in_flight`、`pool.max_in_flight_global`），或者设了每号每分钟请求数 / Token 数上限（`pool.max_rpm`、`pool.max_rpm_global`、`pool.max_tpm`、`pool.max_tpm_global`）并且到了上限。网关先让请求排队，等有号放出名额再转发，最多等 `pool.in_flight_wait`（默认 30 秒）；等满还没有空位才回这个 503。有号是因为每分钟请求数到上限时，错误信息里写的是 `requests-per-minute`，`gateway_hint` 以 `rpm_full` 开头；是 Token 数到上限时写的是 `tokens-per-minute`，hint 以 `tpm_full` 开头。
 
 - 偶尔出现：并发的高峰，稍等重试即可；
 - 经常出现：同时发的请求比号能接的多，加号，或者调大在途上限（国际版风控更紧，调大前先小幅试）；`rpm_full` 时调大每分钟请求数上限；
@@ -74,6 +74,12 @@ Claude Code、Codex 等客户端的系统提示词里有固定模板句，可能
 - 如果换了提示词仍被拦，说明是对话内容本身触发了审核。
 
 详见[网关与选号 · 系统提示词与内容审核](gateway.md#系统提示词与内容审核)。
+
+## 流式回复中途断掉，或非流式报 504 `upstream_idle`
+
+上游连着、也还在发保活帧，但 `upstream.idle_timeout_seconds`（默认 300 秒）内没有一帧正文：网关的空闲看门狗会掐掉这条流，把名额放回号池。流式请求的 HTTP 头早已是 200，客户端看到的是流中断；非流式回 504，`error.code` 是 `upstream_idle`。只有**内容帧**续命——SSE 注释行、`{"type":"ping"}` 这类心跳帧不算，否则保活帧会把计时器一直刷新、空闲上限等于没有。
+
+对照检查：网关日志 `WARN: [server] stream … upstream stalled, no content frame within idle window`；请求记录里这一跳是错误（不是「客户端断连」的成功记账）。偶发就是上游那一刻卡住，重试即可；频繁出现说明该模型/号确实吐不出字，`idle_timeout_seconds` 调大只是让等待更久。
 
 ## 大上下文请求报 read body: i/o timeout
 
@@ -116,4 +122,8 @@ checkin 汇总：成功 2 / 已签到 3 / 失败 1 / 跳过 1；失败明细 193
 
 ## 官网积分记录的「使用端」显示什么
 
-官网按出站请求的 User-Agent 归因。默认 UA 按账号所在域对齐官方桌面端：国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0`；需要时可用 `upstream.user_agent` 整体覆盖，或用 `upstream.client_version` / `upstream.cli_version` 只改版本号。改完需要重启。
+官网按出站请求的 User-Agent 归因。默认 UA 按账号所在域对齐官方桌面端：国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0`；需要时可用 `upstream.user_agent` 整体覆盖，或用 `upstream.client_version` / `upstream.cli_version` 只改版本号。改完需要重启。
+
+## 每天早上的积分到期日报没收到
+
+日报走的是「告警」通道（`notify.format`，默认 Bark），所以三处都要开着：`notify.enabled=true` 且 `notify.url` 填好（Bark 是 `https://api.day.app/<device_key>`）、`schedule.report_enabled=true`、`schedule.report_hours` 落在一个整点上（默认 `[8]`，按进程时区；Docker 里记得 `TZ=Asia/Shanghai`）。想知道是通道问题还是时点问题，直接 `curl -X POST -H "Authorization: Bearer <面板密钥>" http://<面板地址>/panel/api/notify/report`：能收到，说明通道没问题、只是还没到点；回 501 说明通道或调度器没起来；回 502 附带的是通道真实错误。正文首行是余额快照时刻——如果它离现在很远，把 `schedule.balance_refresh_enabled` 打开。

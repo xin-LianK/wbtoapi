@@ -92,6 +92,9 @@ func (c *Client) applyVSCodeChatHeaders(req *http.Request, a *auth.Auth, meta Ch
 		"X-Stainless-Retry-Count", "X-Stainless-Timeout", "X-Stainless-Lang", "X-Stainless-Package-Version",
 		"X-Stainless-OS", "X-Stainless-Arch", "X-Stainless-Runtime", "X-Stainless-Runtime-Version",
 		"X-Agent-Runtime", "X-Agent-Purpose", "acp-connection-id",
+		// X-Client-* 是桌面端 5.11.x 经 sidecar-manager 透传给内置 CLI 的身份头，扩展不发
+		// （见 headers.go 的 injectClientIdentity；桌面端形态先写过，这里按扩展实际形态删掉）。
+		"X-Client-Version", "X-Client-Platform", "X-Client-Product",
 	} {
 		req.Header.Del(h)
 	}

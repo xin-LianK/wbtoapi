@@ -14,7 +14,7 @@ import (
 
 // TestChatHeadersOfficialShape chat 出站头对齐官方 CLI 的对话请求（10-19 生产逐项实测）：
 // 该带的都带，官方对话请求里没有的一个都不带；企业号加 X-Enterprise-Id 与同值的 X-Tenant-Id；
-// 两域（国内版 5.11.3 内置 2.176.0、国际版 5.9.4 内置 2.165.0）都带 X-Agent-Runtime: local-agent。
+// 两域（国内版 5.11.3、国际版 5.11.4，内置 CLI 都是 2.176.0）都带 X-Agent-Runtime: local-agent。
 func TestChatHeadersOfficialShape(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
@@ -53,6 +53,10 @@ func TestChatHeadersOfficialShape(t *testing.T) {
 				"X-Agent-Purpose":  "conversation",
 				"X-Private-Data":   "true",
 				"X-Product":        "SaaS",
+				// 客户端身份头（5.11.x 起第一方请求统一带）：版本、平台、产品名。
+				"X-Client-Version":  (&Client{}).clientVersion(tc.a),
+				"X-Client-Platform": "macos",
+				"X-Client-Product":  applicationNameFor(tc.a),
 				// OpenAI SDK 的 8 个 X-Stainless-*（见 injectSDKHeaders）：两域内置 CLI 同一份 SDK，
 				// 设备指纹是 Mac arm64、Electron 内置 v22.21.1，取值与域无关。
 				"X-Stainless-Retry-Count":     "0",
@@ -83,6 +87,37 @@ func TestChatHeadersOfficialShape(t *testing.T) {
 				t.Error("User-Agent 必发")
 			}
 		})
+	}
+}
+
+// TestChatHeadersClientIdentity X-Client-*：只在为空时写（不覆盖调用方/小程序已设的值）；
+// client_name="SaaS"（旧行为）不伪装桌面端，一个都不发；meta.MessageID 指定时消息 id 两端同值。
+func TestChatHeadersClientIdentity(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodPost, "https://x/v2/chat/completions", nil)
+	req.Header.Set("X-Client-Platform", "miniprogram")
+	(&Client{}).ChatHeaders(req, cnAuth(), "", ChatMeta{MessageID: "msg-1"})
+	if got := req.Header.Get("X-Client-Platform"); got != "miniprogram" {
+		t.Errorf("已设的 X-Client-Platform 不应被覆盖，实际 %q", got)
+	}
+	if got := req.Header.Get("X-Client-Version"); got != defaultClientVersionCN {
+		t.Errorf("X-Client-Version = %q，want %q", got, defaultClientVersionCN)
+	}
+	if got := req.Header.Get("X-Client-Product"); got != "WorkBuddy" {
+		t.Errorf("X-Client-Product = %q，want WorkBuddy", got)
+	}
+	if got := req.Header.Get("X-Conversation-Message-ID"); got != "msg-1" {
+		t.Errorf("X-Conversation-Message-ID = %q，want msg-1（应复用 meta.MessageID）", got)
+	}
+	if got := req.Header.Get("X-Request-ID"); got != "msg-1" {
+		t.Errorf("X-Request-ID = %q，want msg-1（与消息 id 同值）", got)
+	}
+
+	req, _ = http.NewRequest(http.MethodPost, "https://x/v2/chat/completions", nil)
+	(&Client{ClientName: "SaaS"}).ChatHeaders(req, cnAuth(), "", ChatMeta{})
+	for _, k := range []string{"X-Client-Version", "X-Client-Platform", "X-Client-Product"} {
+		if v := req.Header.Values(k); len(v) > 0 {
+			t.Errorf("client_name=SaaS 不该发 %s，实际 %q", k, v)
+		}
 	}
 }
 

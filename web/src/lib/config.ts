@@ -94,6 +94,14 @@ export const CONFIG_TABS: ConfigTab[] = [
         ],
       },
       {
+        title: '积分到期日报',
+        fields: [
+          toggle('report_enabled', ['schedule', 'report_enabled'], '积分到期日报',
+            '每天到点把「每个号最近到期多少积分」发一条通知（走「告警」页配的通道，默认 Bark）；数据取余额刷新留下的快照，不发上游请求'),
+          hours('report_hours', 'report_hours', '发送时点', '8', '每天早上一条：每个号的余额、最近到期批次与 7 天内到期合计'),
+        ],
+      },
+      {
         title: '成长任务自动执行',
         fields: [
           toggle('growth_enabled', ['schedule', 'growth_enabled'], '成长任务自动执行'),
@@ -121,7 +129,11 @@ export const CONFIG_TABS: ConfigTab[] = [
           num('max_rpm', ['pool', 'max_rpm'], '国内版每号每分钟请求数', '0',
             { min: 0, hint: '最近 60 秒内一个号最多接几个请求，到了就换别的号或排队，同在途满；0 = 不限制' }),
           num('max_rpm_global', ['pool', 'max_rpm_global'], '国际版每号每分钟请求数', '0', { min: 0, hint: '同上，只管国际版的号；0 = 不限制' }),
-          duration('in_flight_wait', ['pool', 'in_flight_wait'], '号都满时排队上限', '30s', '能接的号在途都满或每分钟请求数到上限时，请求最多等多久空位；0 = 不等，直接 503'),
+          num('max_tpm', ['pool', 'max_tpm'], '国内版每号每分钟 Token 数', '0',
+            { min: 0, hint: '最近 60 秒内一个号最多消耗多少 token（按上游返回的真实用量记账），到了就换别的号或排队，同在途满；0 = 不限制' }),
+          num('max_tpm_global', ['pool', 'max_tpm_global'], '国际版每号每分钟 Token 数', '0',
+            { min: 0, hint: '同上，只管国际版的号，不回落到国内版的值；0 = 不限制' }),
+          duration('in_flight_wait', ['pool', 'in_flight_wait'], '号都满时排队上限', '30s', '能接的号在途都满或每分钟请求数/Token 数到上限时，请求最多等多久空位；0 = 不等，直接 503'),
           num('breaker_threshold', ['pool', 'breaker_threshold'], '连续失败熔断阈值', '3', { min: 1 }),
           duration('breaker_cooldown', ['pool', 'breaker_cooldown'], '熔断基础时长', '30m'),
           duration('breaker_cooldown_max', ['pool', 'breaker_cooldown_max'], '熔断退避上限', '6h'),
@@ -192,7 +204,7 @@ export const CONFIG_TABS: ConfigTab[] = [
             '含请求体上传；大上下文经反代转发超时会报 400 read body: i/o timeout，调大即可；0 = 不限制', true),
           num('timeout_seconds', ['upstream', 'timeout_seconds'], '短请求超时（秒）', '120', { min: 1, restart: true }),
           num('header_timeout_seconds', ['upstream', 'header_timeout_seconds'], '聊天首字节超时（秒）', '120', { min: 1, restart: true }),
-          num('idle_timeout_seconds', ['upstream', 'idle_timeout_seconds'], '流空闲超时（秒）', '300', { min: 1, restart: true }),
+          num('idle_timeout_seconds', ['upstream', 'idle_timeout_seconds'], '流空闲超时（秒）', '300', { min: 1, restart: true, hint: '只认正文帧：上游只发保活/心跳帧时照样按静默断流' }),
         ],
       },
       {

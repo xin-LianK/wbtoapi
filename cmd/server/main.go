@@ -174,6 +174,8 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 	p.SetInFlightWait(cfg.InFlightWaitDur)             // 号都在途占满时排队等空位（默认 30s；0 不等）
 	p.SetMaxRPM(cfg.Pool.MaxRPM)                       // 每号每分钟请求数上限（0 不限），超了同在途满
 	p.SetMaxRPMGlobal(cfg.Pool.MaxRPMGlobal)
+	p.SetMaxTPM(cfg.Pool.MaxTPM) // 每号每分钟 Token 数上限（0 不限），超了同在途满
+	p.SetMaxTPMGlobal(cfg.Pool.MaxTPMGlobal)
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
@@ -289,6 +291,7 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 		KeepaliveHours: cfg.Schedule.KeepaliveHours,
 		BlackcatHours:  cfg.Schedule.BlackcatHours,
 		GrowthHours:    cfg.Schedule.GrowthHours,
+		ReportHours:    cfg.Schedule.ReportHours,
 		// 快过期积分优先消耗：签到/余额刷新按此窗口分桶（issue:积分过期）。
 		ExpiringSoonWindow: cfg.ExpiringSoonDur,
 		CheckinDisabled:    !cfg.Schedule.CheckinEnabled,
@@ -297,6 +300,7 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 		KeepaliveDisabled:  !cfg.Schedule.KeepaliveEnabled,
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
+		ReportDisabled:     !cfg.Schedule.ReportEnabled,
 		// 保号类四任务是否覆盖禁用账号（缺省 false = 禁用即跳过，保持既有行为）。
 		IncludeDisabledInTasks: cfg.Schedule.IncludeDisabledInTasks,
 		// 签到/保活里号与号之间错开 1.5 秒：上游对同一出口的维护类接口有频率限制，
@@ -332,6 +336,12 @@ func run(ctx context.Context, cfg *Config, cfgPath string, upd *selfupdate.Updat
 		log.Printf("夜猫子已禁用（schedule.blackcat_enabled=false）")
 	default:
 		log.Printf("夜猫子已启用：%v 点（23:00–08:00 窗口 glm-5.2 对话补足）", cfg.Schedule.BlackcatHours)
+	}
+	switch {
+	case !cfg.Schedule.ReportEnabled:
+		log.Printf("积分到期日报已禁用（schedule.report_enabled=false）")
+	default:
+		log.Printf("积分到期日报已启用：%v 点（每天早上一条通知：每个号最近到期的积分）", cfg.Schedule.ReportHours)
 	}
 	switch {
 	case !cfg.Schedule.BalanceRefreshEnabled:
@@ -888,7 +898,7 @@ var renameConfig = os.Rename
 // 热生效范围（设计取舍）：
 //   - api_key / cooldown.soft_rate / features.sanitize_blacklist_fingerprints / pool.cross_realm / panel.update_check / model_routes / models.hidden → livecfg 快照
 //   - features.sanitize_blacklist_fingerprints / upstream.model_optimization → upstream.Client 的 atomic 开关
-//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetMaxRPM/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor/SetRestrictionWave
+//   - pool.* → pool.SetBreaker/SetMaxInFlight/SetMaxRPM/SetMaxTPM/SetSoftRateMax/SetWeights/SetCostExploreInterval/SetPreferExpiring/SetCreditFloor/SetRestrictionWave
 //   - schedule.* → scheduler.Reconfigure/SetBalanceInterval/SetExpiringSoonWindow
 //   - logging.*（日志留存的开关、保留天数、容量上限）→ logStores.apply
 //
@@ -979,6 +989,8 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetInFlightWait(newCfg.InFlightWaitDur)
 	p.SetMaxRPM(newCfg.Pool.MaxRPM)
 	p.SetMaxRPMGlobal(newCfg.Pool.MaxRPMGlobal)
+	p.SetMaxTPM(newCfg.Pool.MaxTPM)
+	p.SetMaxTPMGlobal(newCfg.Pool.MaxTPMGlobal)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
@@ -1004,6 +1016,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	sch.SetReportSchedule(newCfg.Schedule.ReportHours, !newCfg.Schedule.ReportEnabled)
 	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
 	// 自动跑开关立即生效（发现间隔本身要重启，见 scheduler.StartTaskDiscover 注释）。
 	panel.SetTaskDiscoverAutoRun(newCfg.Schedule.TaskDiscoverAutoRun)

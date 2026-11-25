@@ -116,6 +116,9 @@ type Config struct {
 		KeepaliveHours []int `json:"keepalive_hours"` // [22]
 		BlackcatHours  []int `json:"blackcat_hours"`  // [23] 夜猫子窗口（23:00–08:00 计数）
 		GrowthHours    []int `json:"growth_hours"`    // [1] 成长任务队列（Sequential 族每日零点解锁，01:00 自动扫描执行）
+		// ReportHours 积分到期日报时点（默认 [8]：每天早上一条通知，走 notify 通道）。
+		// 内容取池内余额快照，不发上游请求；号多时正文长，但每天只有一条。
+		ReportHours []int `json:"report_hours"`
 		// CheckinEnabled/TravelEnabled/ActivityEnabled/KeepaliveEnabled/BlackcatEnabled 显式禁用开关（缺省 true）。
 		//
 		// 为什么用独立 bool 而不是空数组/哨兵值表意"禁用"：
@@ -131,6 +134,9 @@ type Config struct {
 		KeepaliveEnabled bool `json:"keepalive_enabled"` // 缺省 true；false = 关 token 保活
 		BlackcatEnabled  bool `json:"blackcat_enabled"`  // 缺省 true；false = 关夜猫子
 		GrowthEnabled    bool `json:"growth_enabled"`    // 缺省 true；false = 关成长任务自动排程
+		// ReportEnabled 积分到期日报开关（缺省 true：配好通知通道就每天早上一封）。
+		// 日报只读池内快照，不发上游请求，所以默认开着不会增加任何上游负担。
+		ReportEnabled bool `json:"report_enabled"`
 
 		// IncludeDisabledInTasks 让「保号类」定时任务（签到 / 活跃上报 / token 保活 /
 		// 余额刷新）对**已禁用（disabled）**的账号也执行。
@@ -319,6 +325,8 @@ type Config struct {
 		InFlightWait       string                  `json:"in_flight_wait"`       // 能接的号在途都满时请求最多等多久空位，默认 "30s"，"0" = 不等直接 503
 		MaxRPM             int                     `json:"max_rpm"`              // 国内版单号每分钟请求数上限（最近 60 秒），0 = 不限
 		MaxRPMGlobal       int                     `json:"max_rpm_global"`       // 国际版单号每分钟请求数上限，0 = 不限；两档各管各的域
+		MaxTPM             int64                   `json:"max_tpm"`              // 国内版单号每分钟 Token 数上限（最近 60 秒），0 = 不限
+		MaxTPMGlobal       int64                   `json:"max_tpm_global"`       // 国际版单号每分钟 Token 数上限，0 = 不限；两档各管各的域
 		BreakerThreshold   int                     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string                  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string                  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
@@ -557,6 +565,7 @@ func Default() *Config {
 	c.Schedule.KeepaliveHours = []int{22}
 	c.Schedule.BlackcatHours = []int{23}
 	c.Schedule.GrowthHours = []int{1}
+	c.Schedule.ReportHours = []int{8}
 	// 开关「缺省 true」靠这几行实现：Load 先取 Default() 再 json.Unmarshal 覆盖，
 	// 键缺席（或为 null）时字段原样保留 true，只有显式 false 才关。
 	c.Schedule.CheckinEnabled = true
@@ -565,6 +574,7 @@ func Default() *Config {
 	c.Schedule.ActivityEnabled = true
 	c.Schedule.KeepaliveEnabled = true
 	c.Schedule.BlackcatEnabled = true
+	c.Schedule.ReportEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
 	// 运营三件套缺省开启：三者都不需要额外基础设施——通知在配好 url 前静默
@@ -1017,6 +1027,8 @@ func (c *Config) normalize() error {
 	}
 	// 每号每分钟请求数上限：0 是合法默认（不限），负值钳 0。
 	c.Pool.MaxRPM, c.Pool.MaxRPMGlobal = max(c.Pool.MaxRPM, 0), max(c.Pool.MaxRPMGlobal, 0)
+	// 每号每分钟 Token 数上限：同上，0 = 不限，负值钳 0。
+	c.Pool.MaxTPM, c.Pool.MaxTPMGlobal = max(c.Pool.MaxTPM, 0), max(c.Pool.MaxTPMGlobal, 0)
 	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
 	if c.Pool.CreditFloor < 0 {
 		c.Pool.CreditFloor = 0
@@ -1104,6 +1116,9 @@ func (c *Config) normalize() error {
 	}
 	if len(c.Schedule.GrowthHours) == 0 {
 		c.Schedule.GrowthHours = []int{1}
+	}
+	if len(c.Schedule.ReportHours) == 0 {
+		c.Schedule.ReportHours = []int{8}
 	}
 	// 余额后台刷新：启用时 minutes<=0 回落默认 5；关闭时 interval 保持 0（不启动）。
 	if c.Schedule.BalanceRefreshEnabled {
@@ -1335,7 +1350,10 @@ func (c *Config) validateScheduleHours() error {
 	if err := checkHourRange("schedule.blackcat_hours", "blackcat_enabled", c.Schedule.BlackcatHours); err != nil {
 		return err
 	}
-	return checkHourRange("schedule.growth_hours", "growth_enabled", c.Schedule.GrowthHours)
+	if err := checkHourRange("schedule.growth_hours", "growth_enabled", c.Schedule.GrowthHours); err != nil {
+		return err
+	}
+	return checkHourRange("schedule.report_hours", "report_enabled", c.Schedule.ReportHours)
 }
 
 func checkHourRange(field, switchKey string, hours []int) error {

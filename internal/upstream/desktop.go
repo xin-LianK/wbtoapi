@@ -62,16 +62,16 @@ const (
 // 不受 user_agent 覆盖影响（同以前）。
 func (c *Client) desktopUA(a *auth.Auth) string { return c.defaultDaemonUA(a) }
 
-// 两域桌面端安装包 cli/product.json 的 commit 与 date（毫秒）：国内版 5.11.3、国际版 5.9.4。
-// 上报事件按账号所在的域取：任务中心只对国内版个人号开放，每日活跃上报两域都发。配了
-// client_version 时版本号跟着变，这两项不变。国内版这两项 2026-11-16 读 5.11.3 的 Windows 包
-// （app.asar.unpacked/cli/product.json）得到；官方 mac 包的 date 通常比 Windows 早几十秒
-// （5.9.3 时早 27 秒），这次没有 mac 包可读，差多少未确认。
+// 两域桌面端（macOS arm64）安装包 cli/product.json 的 commit 与 date（毫秒）：国内版 5.11.3、国际版
+// 5.11.4。上报事件按账号所在的域取：任务中心只对国内版个人号开放，每日活跃上报两域都发。配了
+// client_version 时版本号跟着变，这两项不变。两域 2026-11-24 读 macOS 包
+// （国内版 5.11.3.43806934、国际版 5.11.4.44121853）得到；此前国内版这两项是从 Windows 包读的，
+// 比 mac 包晚几十秒，已按 mac 包更正。
 const (
 	desktopCommitCN          = "ecace0f7028166695994300182295329b8b95449"
-	desktopReleaseDateCN     = int64(1794502169764) // 2026-11-12T16:49:29.764Z
-	desktopCommitGlobal      = "fa0a0901906addaa1a4259f6df347388a5563ded"
-	desktopReleaseDateGlobal = int64(1793290653510) // 2026-10-29T16:17:33.510Z
+	desktopReleaseDateCN     = int64(1794501984587) // 2026-11-12T16:46:24.587Z
+	desktopCommitGlobal      = "0026dff06ce8414140e6f2fa731049855c3ecc6f"
+	desktopReleaseDateGlobal = int64(1794817062759) // 2026-11-16T08:17:42.759Z
 )
 
 // desktopBuild 账号所在域的桌面端 commit 与发布时间。

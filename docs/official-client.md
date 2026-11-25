@@ -6,8 +6,8 @@
 
 | 项 | 国内版 | 国际版 |
 |---|---|---|
-| 桌面端安装包 | WorkBuddy 5.11.3（Windows x64） | WorkBuddy AI 5.9.4（macOS arm64） |
-| 内置 CLI（`@tencent-ai/codebuddy-code`） | 2.176.0 | 2.165.0 |
+| 桌面端安装包 | WorkBuddy 5.11.3（macOS arm64；Windows 包同为 5.11.3） | WorkBuddy AI 5.11.4（macOS arm64） |
+| 内置 CLI（`@tencent-ai/codebuddy-code`） | 2.176.0 | 2.176.0 |
 | `applicationName`（product.json） | `WorkBuddy` | `workbuddy-ai` |
 
 2026-10-20 从官网下载两个安装包（当时国内版是 5.8.3、国际版是 5.8.4），只解包阅读，没有运行；国内版 5.9.3（2026-10-28）、国际版 5.9.4（2026-10-31）出来后照同样的做法重新对过，见[与桌面端 5.9.3 的对照](#与桌面端-593-的对照)和[与国际版桌面端 5.9.4 的对照](#与国际版桌面端-594-的对照)；国内版 5.11.3 是 11-16 从本机安装目录读的，见[与桌面端 5.11.3 的对照](#与桌面端-5113-的对照)。要看的文件有三处：
@@ -129,6 +129,17 @@ npm 上更新的 CLI 只作对照，取值以安装包内置的版本为准：�
 - 变化、网关没跟的：内置 CLI 2.169.0 起对非自定义模型补 `cache_retention`（默认 `long`），2.176.0 也一样，网关默认仍不补（`upstream.cache_retention` 留空），见[配置](configuration.md)里的说明——这是刻意偏差，因为 1 小时缓存写入在部分模型上更贵。
 - 未确认：国际版有没有比 5.9.4 更新的包（本机只有国内版）；国内版这两项取的是 Windows 包的 `product.json`，官方 mac 包的 `date` 过去比 Windows 早几十秒，这次没有 mac 包可读。
 
+### 与国内版桌面端 5.11.3 及国际版 5.11.4 的对照
+
+2026-11-24 按上游（yreidev/workbuddy2api-panel）实包核验记录对齐，本仓库没有重新解包；解包对象是国内版 `5.11.3.43806934`（macOS arm64）与国际版 `5.11.4.44121853`（macOS arm64）：
+
+- 版本与构建信息：国内版 `5.11.3` / 内置 CLI `2.176.0`，上报 `commit` `ecace0f7028166695994300182295329b8b95449`、`releaseDate` `1794501984587`（`2026-11-12T16:46:24.587Z`）；国际版 `5.11.4` / 内置 CLI `2.176.0`，上报 `commit` `0026dff06ce8414140e6f2fa731049855c3ecc6f`、`releaseDate` `1794817062759`（`2026-11-16T08:17:42.759Z`）。两域内置 CLI 都是 2.176.0，`applicationName` 仍分别为 `WorkBuddy` 与 `workbuddy-ai`。原来国内版这两项是从 Windows 包读的（`16:49:29.764Z`），比 mac 包晚约 3 分钟，已按 mac 包更正（`internal/upstream/desktop.go`）。
+- 客户端身份头 `X-Client-Version` / `X-Client-Platform` / `X-Client-Product`：5.11.x 新增 `app/main/client-identity.js` 与统一出站头注册表 `app/main/proxy-env2.js`，在 `index.js`、`server.js` 注册第一方来源，并由 `sidecar-manager.js` 经 `CODEBUDDY_CUSTOM_HEADERS` 透传给内置 CLI 子进程。取值：版本号、平台映射（`darwin` → `macos`）、`applicationName`（不是 `productName`，也不是缺配置回退值 `workbuddy-desktop`）。网关在请求框架（登录、刷新、积分、签到、上报、模型目录等）与对话两条链路上都补（`injectClientIdentity`），目标头已有值时（小程序、官网网页）不覆盖，`client_name="SaaS"` 旧行为不发。
+- 请求体 `extra_vars.harnessMetadata` 与 `extra_vars.initiator`：内置 CLI 2.176.0 对带 `messages` 数组的官方对话请求合并写入 `extra_vars`（保留其他已有键）：
+  - `harnessMetadata` 是 JSON 字符串（`buildHarnessMetadata`）：`{"schemaVersion":1,"harnessVersion":"<cli>","stepIndex":<n>[,"previous":{"conversationMessageId":"<上一步 X-Conversation-Message-ID>"}],"agent":{"depth":0}}`。同一对话轮（同 `X-Conversation-Request-ID`）首步 `stepIndex=0` 不带 `previous`；工具调用续步递增并串联上一步消息 id；失败重试（`startRetriedModelAttempt`）复用同一消息 id、不推进步数。网关由 `internal/session/harness.go`（Peek/Commit）与 `ChatMeta.MessageID` / `HarnessStep` 对齐。
+  - `initiator`（`MessageInitiatorRequestProcessor`）：末尾消息是普通 `role: "user"` 时写 `"user"`，末尾是 `tool` 等非 `user` 角色时不写。
+- 未确认：以上三条都只做了读包与离线单测，没有在真实账号上在线回归；`cache_retention: "long"` 在各模型上的实际计费与缓存命中影响也未实测（网关仍按 `upstream.cache_retention` 配置决定，默认不补）。
+
 ## 几类请求
 
 | | 对话 | 上报、外观、专家列表、登录、刷新令牌 | 积分、签到 | 成长中心、积分补偿、新手礼包、试用、账号资料 | 联网搜索 |
@@ -165,6 +176,7 @@ npm 上更新的 CLI 只作对照，取值以安装包内置的版本为准：�
 - `X-Agent-Intent: craft`、`X-Agent-Type: main`、`X-Agent-Purpose: conversation`；
 - `X-Agent-Runtime: local-agent`：2.165.0 起才有（国内版 5.9.3 起、国际版 5.9.4 起；国内版 5.11.3 内置的 2.176.0 也带），取会话元数据的 `agentRuntime`，桌面端给本机的会话设 `local-agent`；国际版 5.8.4 内置的 2.161.0 不发。网关两域都发（国际版 2026-10-31 起）；
 - `X-IDE-Name` / `X-IDE-Type: WorkBuddy`，`X-IDE-Version` 为桌面端版本；
+- `X-Client-Version` / `X-Client-Platform: macos` / `X-Client-Product`：5.11.x 起桌面端对第一方来源统一注入（`app/main/client-identity.js` + `proxy-env2.js`，经 `CODEBUDDY_CUSTOM_HEADERS` 透传给内置 CLI），网关于请求框架与对话两条链路都补（`injectClientIdentity`），已有值不覆盖，`client_name="SaaS"` 不发，见[与国内版桌面端 5.11.3 及国际版 5.11.4 的对照](#与国内版桌面端-5113-及国际版桌面端-5114-的对照)；
 - `X-Private-Data`：告诉上游能不能拿这段对话做模型优化，`"true"` 是不允许。2.161.0（国际版 5.8.4，以及国内版 5.8.3）：设置里的 `enableModelOptimization` 设过就照设置；没设过、且产品开关 `DisableYuanbaoChannel` 为真（两个域的安装包都是）时发 `"true"`。2.165.0（国内版 5.9.3、国际版 5.9.4）改了（2.176.0 与它逐字相同，11-16 核对）：设过照设置；没设过时先看产品开关 `DefaultModelOptimizationOff`（国内版包里是 `false`、国际版是 `true`，为真时直接发 `"true"`；经 `abTestService` 读，远端配置会不会改它未确认），再看是不是企业版（`isEnterpriseEditionAccount`：有企业 id，或账号类型是 `ultimate`、`exclusive`），结果国内版个人号发 `"false"`、企业号发 `"true"`，国际版都发 `"true"`。网关默认一律发 `"true"`，国际版和官方没动过开关时一样，对国内版等于用户在桌面端手动关了这个开关（2026-10-28 定）；打开 `upstream.model_optimization` 时个人号发 `"false"`、企业号仍发 `"true"`，和 5.9.3 没动过开关时一样（5.9.3 手动打开的话企业号也发 `"false"`，网关取保守的一边）；
 - 后台服务每次提问前另加的头（`createWorkbuddyAppServerBeforePromptExpertActivation`）：经 `switchExpertPluginForSession` 设成内置 CLI 的 `internalModelRequestHeaders`，内置 CLI 只加在官方模型的请求上（`shouldApplyInternalModelRequestHeaders`，自定义模型不加）。5.8.3、5.9.3、国内版 5.11.3 和国际版 5.9.4 的这段代码相同：
   - `X-Device-Token`：腾讯图灵盾（TuringShield）原生 SDK 给的设备令牌（`getTuringDeviceToken`；mac 包里是 arm64 的 `native/turing-sdk/build/Release/turing_sdk.node`，SDK 只支持 macOS 和 Windows）。令牌缓存着用，到了刷新间隔就在后台换新；没有令牌而有错误码时改发 `X-Device-Token-Error`（错误码只留 ASCII 可见字符、截到 64 个），两样都没有时都不发。远端产品开关 `TuringDeviceToken` 为 `false` 时停用；
@@ -177,6 +189,7 @@ npm 上更新的 CLI 只作对照，取值以安装包内置的版本为准：�
 - `X-Conversation-Message-ID`、`X-Request-ID`：同一个模型消息 id，每次调模型新生成，同样是 `uuidv7()` 去掉连字符（`withModelMessageCorrelation`）。上报事件里的会话 id、轮次 id、消息 id 也是这三种形状。网关客户端没给会话 id 时的做法见[会话粘性](gateway.md#会话粘性)；
 - 链路头 `traceparent`、`b3` 与 `X-B3-*`；
 - 请求体带了思考档位（`reasoning_effort` 或 `reasoning.effort`）时补 `reasoning_summary: "auto"`（`injectReasoningSummaryIfNeeded`）。2.161.0、2.165.0 都不发 `cache_retention`（2.169.0 起才补，国内版 5.11.3 内置的 2.176.0 已补，网关默认仍不补，见[与桌面端 5.11.3 的对照](#与桌面端-5113-的对照)），也都不发 `prompt_cache_key`；
+- 2.176.0（国内版 5.11.3、国际版 5.11.4）另对带 `messages` 的对话请求合并写 `extra_vars.harnessMetadata`（JSON 字符串，含 `stepIndex` 与续步的 `previous.conversationMessageId`）与 `extra_vars.initiator`（末尾消息是 `user` 时写 `"user"`），网关于 `internal/session/harness.go` 与 `InjectOfficialBodyFieldsWithOpts` 对齐，见[与国内版桌面端 5.11.3 及国际版桌面端 5.11.4 的对照](#与国内版桌面端-5113-及国际版桌面端-5114-的对照)；
 - 任务中心的专家对话就是一次普通对话，只多带 `X-Expert-Id`（专家插件激活时追加）；团队专家（专家列表里 `expertType` 为 `team`）另带 `X-Expert-Team-Task: true`（后台服务的 `applyPreparedExpertSettings`），网关按专家列表里的类型带。
 
 模型目录：网关用对话的 UA，按 GET 拉 `/v3/config`，带 `Connection: close`。官方后台服务也拉（`CloudProductProvider`，另带查询参数 `repos`），UA 跟时机有关，未确认，见[与国际版桌面端 5.9.4 的对照](#与国际版桌面端-594-的对照)。企业号另拉企业模型，见[企业号模型目录](#企业号模型目录)。

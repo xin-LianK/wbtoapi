@@ -428,7 +428,7 @@ func TestFull7HeaderVersionHelpers(t *testing.T) {
 		want string
 	}{
 		{"国内版", cnAuth(), "2.176.0"},
-		{"国际版", globalAuth(), "2.165.0"},
+		{"国际版", globalAuth(), "2.176.0"},
 		{"没有账号", nil, "2.176.0"},
 	} {
 		if got := (&Client{}).cliVersion(tc.a); got != tc.want {

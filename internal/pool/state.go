@@ -348,7 +348,8 @@ func (p *Pool) deductExpiryLocked(e *entry, d int64) {
 }
 
 // RecordTokenUsage 记录一次实际发起的聊天账号尝试及上游返回的 usage 增量。
-// usage 字段缺失时仍累计请求次数，但只累计明确存在的 token 字段。
+// usage 字段缺失时仍累计请求次数，但只累计明确存在的 token 字段；若开着每号 TPM 上限，
+// 同时把本次真实消耗的 token 数写入该号最近 60 秒滑动窗（见 tpm.go）。
 func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -356,9 +357,10 @@ func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
 	if !ok {
 		return
 	}
+	now := time.Now()
 	usage := &e.tokenUsage
 	usage.RequestCount++
-	usage.LastUsedAt = time.Now()
+	usage.LastUsedAt = now
 	if delta.Model != "" {
 		usage.LastModel = delta.Model
 	}
@@ -377,6 +379,9 @@ func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
 	}
 	if known {
 		usage.UsageCount++
+	}
+	if tokens := deltaTokens(delta); tokens > 0 {
+		e.tpm.add(p.tpmLimit(e), tokens, now)
 	}
 	if delta.HasLatencyMs && delta.LatencyMs >= 0 {
 		usage.LastLatencyMs = delta.LatencyMs

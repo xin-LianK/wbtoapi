@@ -85,7 +85,8 @@
 | `schedule.activity_hours` | `[10]` | 对话活跃上报（点亮连登、解锁领养） |
 | `schedule.keepalive_hours` | `[22]` | 刷新 token 保活 |
 | `schedule.blackcat_hours` | `[23]` | 夜猫子任务补足 |
-| `schedule.<任务>_enabled` | `true` | 每类任务各自的开关：`checkin` / `growth` / `travel` / `activity` / `keepalive` / `blackcat` |
+| `schedule.report_hours` | `[8]` | 积分到期日报：每天早上把「每个号的余额、最近到期批次、7 天内到期合计」发一条通知（走 `notify` 的通道，默认 Bark）。数据取后台余额刷新的快照，不发上游请求 |
+| `schedule.<任务>_enabled` | `true` | 每类任务各自的开关：`checkin` / `growth` / `travel` / `activity` / `keepalive` / `blackcat` / `report` |
 | `schedule.balance_refresh_enabled` | `true` | 后台周期刷新全部账号余额 |
 | `schedule.balance_refresh_minutes` | `5` | 余额刷新间隔（分钟） |
 | `schedule.liveness_enabled` | `true` | 定时测活：给整个号在限流冷却、熔断中的号发一条最短的真实对话，测通就提前恢复（见[测活](panel.md#测活)） |
@@ -107,10 +108,10 @@
 |---|---|---|
 | `upstream.timeout_seconds` | `120` | 短请求总时长上限，见[上游超时](#上游超时) |
 | `upstream.header_timeout_seconds` | 同 `timeout_seconds` | 聊天请求等到首字节的上限 |
-| `upstream.idle_timeout_seconds` | `300` | 聊天流中途无数据的上限 |
+| `upstream.idle_timeout_seconds` | `300` | 聊天流中途没有**内容帧**的上限（只发保活帧也算静默，见下表） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 整体覆盖（任务中心的桌面端上报、外观设置、专家列表除外）。空 = 按请求的来源取官方的 UA：对话、模型目录由桌面端内置的 CLI 发，形如 `WorkBuddy/<client_version> <应用名>/<client_version> CLI/<cli_version>`；联网搜索也由内置 CLI 发，但不经它的请求框架，是 `CLI/<client_version>`；登录、刷新令牌、上报由桌面端后台服务发，两段都是应用名：`<应用名>/<client_version> <应用名>/<client_version> CLI/<cli_version>`；积分、签到由后台服务另用 axios 发，是 `axios/1.16.1`；成长中心、积分补偿、新手礼包、试用只在官网网页上调，用 Mac 上 Chrome 的 UA。应用名国内版是 `WorkBuddy`，国际版是 `workbuddy-ai` |
-| `upstream.client_version` | 空（国内版 `5.11.3`，国际版 `5.9.4`） | UA 与 `X-IDE-Version` 里的桌面端版本；填了就两个域都用这个值 |
-| `upstream.cli_version` | 空（国内版 `2.176.0`，国际版 `2.165.0`） | UA 里 `CLI/` 段的版本，是各域桌面端内置 CLI 的版本；填了就两个域都用这个值。联网搜索的 UA 例外：官方在那里写的是桌面端版本（`client_version`） |
+| `upstream.client_version` | 空（国内版 `5.11.3`，国际版 `5.11.4`） | UA 与 `X-IDE-Version` 里的桌面端版本；填了就两个域都用这个值 |
+| `upstream.cli_version` | 空（两域都是 `2.176.0`） | UA 里 `CLI/` 段的版本，是各域桌面端内置 CLI 的版本（也写进 `extra_vars.harnessMetadata.harnessVersion`）；填了就两个域都用这个值。联网搜索的 UA 例外：官方在那里写的是桌面端版本（`client_version`） |
 | `upstream.client_name` | 空（= `WorkBuddy`） | 对话请求的归属头。空或 `WorkBuddy` 时按官方桌面端发送 `X-Agent-Purpose`、`X-IDE-Name`、`X-IDE-Type`、`X-IDE-Version`；配 `SaaS` 是旧行为，对话不带这几个头（联网搜索同样不带 `X-IDE-*`），积分、签到这类请求不带 UA。`X-Product` 不受这项影响，带它的请求和官方一样固定为 `SaaS` |
 | `upstream.device_token` | 空 | 设备风控头 `X-Device-Token` 的全局兜底值；单个凭证文件里的 `device_token` 优先。签到、登录的发起授权，以及对话都带（对话只在填了才带——网关在 Linux 做不出真令牌，没填就不发），见[官方客户端对照](official-client.md#几类请求) |
 | `upstream.device_token_file` | 空 | 从文件读取 device token（5 分钟缓存），优先级低于前两者 |
@@ -138,6 +139,8 @@
 | `pool.max_in_flight_global` | `2` | 国际版单账号在途上限（国际版风控更紧） |
 | `pool.max_rpm` | `0` | 国内版单账号每分钟最多接几个请求（按最近 60 秒算），到了就当这个号忙，换号或排队；`0` = 不限，见[网关与选号](gateway.md#选号策略) |
 | `pool.max_rpm_global` | `0` | 国际版单账号每分钟请求数上限，只管国际版的号，不回落到 `pool.max_rpm`；`0` = 不限 |
+| `pool.max_tpm` | `0` | 国内版单账号每分钟最多消耗多少 token（按上游返回的真实用量、最近 60 秒算），到了就当这个号忙，换号或排队；`0` = 不限，见[网关与选号](gateway.md#选号策略) |
+| `pool.max_tpm_global` | `0` | 国际版单账号每分钟 Token 数上限，只管国际版的号，不回落到 `pool.max_tpm`；`0` = 不限 |
 | `pool.in_flight_wait` | `30s` | 能接请求的号在途都满或每分钟请求数到上限时，请求最多排队等多久空位，等满才回 503，见[网关与选号](gateway.md#选号策略)；`0` = 不等 |
 | `pool.cross_realm` | `off` | 跨域负载均衡：`off` 关闭、`merge` 合池、`cn_first` 国内版优先；老配置的 `true` 读成 `merge`、`false` 读成 `off`，见[网关与选号](gateway.md#跨域负载均衡) |
 | `pool.credit_floor` | `0` | 积分保底：余额低于该值的账号不再接实测收费的模型；`0` = 关闭 |
@@ -191,7 +194,7 @@
 | `notify.format` | `bark` | `bark`（iOS，`url` 填 `https://api.day.app/<device_key>`）/ `wecom`（企业微信群机器人）/ `telegram` / `generic`（裸 JSON POST） |
 | `notify.min_interval_minutes` | `10` | 同一条消息的去重窗口。定时任务每轮都会重跑，没有去重会刷屏 |
 
-事件类告警（签到异常、账号被禁用）在各自的失败分支当场发。**状态类**告警靠 `notify.alerts` 周期巡检——可用号快没了、积分快见底这类事情没有哪个请求会触发，不巡检就没人知道：
+事件类告警（签到异常、账号被禁用）在各自的失败分支当场发。每天早上的「积分到期日报」（`schedule.report_hours`，默认 8 点）也走这条通道：每个号的剩余积分、最近到期批次与 7 天内到期合计，一条消息看完。**状态类**告警靠 `notify.alerts` 周期巡检——可用号快没了、积分快见底这类事情没有哪个请求会触发，不巡检就没人知道：
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
@@ -222,7 +225,7 @@
 |---|---|---|---|
 | `timeout_seconds` | 短请求：token 刷新、签到、余额、模型列表 | `120` | 总时长硬上限，到期报错并按规则换号或熔断 |
 | `header_timeout_seconds` | 聊天请求的**首字节前** | `120` | 超时即换号重发；国内版照官方先在备用入口重发一次（也按这个超时），仍超时再换号 |
-| `idle_timeout_seconds` | 聊天流**中途**无数据 | `300` | 只要还在吐数据就不掐；静默超时才断流 |
+| `idle_timeout_seconds` | 聊天流**中途**无内容帧 | `300` | 只认正文帧（`data:` 里的 choices 等）：上游只在发保活/心跳帧（注释行、`ping`）时照样按静默断流；有正文就不掐 |
 
 聊天流（流式和非流式都一样）**没有总时长上限**，长思考、长输出不会被掐断。
 

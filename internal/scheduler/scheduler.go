@@ -36,6 +36,7 @@ type Config struct {
 	BlackcatHours  []int // 默认 [23]：夜猫子（23:00–08:00 计数窗口）
 	GrowthHours    []int // 默认 [1]：成长任务队列（Sequential 族每日零点解锁一环，
 	// 01:00 自动扫描+执行；避开零点整防解锁竞态）
+	ReportHours []int // 默认 [8]：积分到期日报（每天早上一条通知，见 report.go）
 
 	// ExpiringSoonWindow 快过期积分窗口：签到/余额刷新查余额时，把到期时间
 	// <= now+window 的套餐余额标记为"快过期"（pool 据此做最早到期优先，见
@@ -55,6 +56,9 @@ type Config struct {
 	BlackcatDisabled bool
 	// GrowthDisabled 显式关闭成长任务自动排程（schedule.growth_enabled=false）。
 	GrowthDisabled bool
+	// ReportDisabled 显式关闭积分到期日报（schedule.report_enabled=false）。日报只读
+	// 池内快照发通知，不碰上游；关掉就是不再每天推这一条。
+	ReportDisabled bool
 
 	// IncludeDisabledInTasks 让「保号类」四任务（签到 / 活跃上报 / token 保活 / 余额刷新）
 	// 对已禁用（disabled）的账号也执行（schedule.include_disabled_in_tasks）。
@@ -234,6 +238,18 @@ func (s *Scheduler) Reconfigure(checkinHours, travelHours, activityHours, keepal
 	poke(s.rearmBalance)
 }
 
+// SetReportSchedule 热改积分到期日报的时点与开关（面板保存配置后调用）。
+// 单独一个方法而不并进 Reconfigure：它的参数表已经够长，日报也只跟这两个值有关。
+func (s *Scheduler) SetReportSchedule(hours []int, disabled bool) {
+	s.schedMu.Lock()
+	if len(hours) > 0 {
+		s.cfg.ReportHours = hours
+	}
+	s.cfg.ReportDisabled = disabled
+	s.schedMu.Unlock()
+	poke(s.rearmSchedule)
+}
+
 // poke 非阻塞发一次唤醒信号（已有待处理信号则忽略，语义等价）。
 func poke(ch chan struct{}) {
 	select {
@@ -267,6 +283,7 @@ const (
 	taskKeepalive
 	taskBlackcat
 	taskGrowth
+	taskReport
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
@@ -279,6 +296,7 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	travelHours, activityHours := s.cfg.TravelHours, s.cfg.ActivityHours
 	checkinOff, keepaliveOff, blackcatOff := s.cfg.CheckinDisabled, s.cfg.KeepaliveDisabled, s.cfg.BlackcatDisabled
 	growthHours, growthOff := s.cfg.GrowthHours, s.cfg.GrowthDisabled
+	reportHours, reportOff := s.cfg.ReportHours, s.cfg.ReportDisabled
 	travelOff, activityOff := s.cfg.TravelDisabled, s.cfg.ActivityDisabled
 	s.schedMu.Unlock()
 
@@ -304,6 +322,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 	}
 	if !growthOff {
 		slots = append(slots, slot{nextFire(now, growthHours), taskGrowth})
+	}
+	if !reportOff {
+		slots = append(slots, slot{nextFire(now, reportHours), taskReport})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -466,6 +487,9 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 				if hook != nil {
 					hook()
 				}
+			case taskReport:
+				// 积分到期日报：只读池内快照，不发上游请求。
+				s.SendExpiryDigest()
 			}
 		}(k)
 	}

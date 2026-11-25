@@ -178,6 +178,9 @@ type Handler struct {
 	wafIP wafIPGate
 	// turns 客户端没给会话 id 时的对话轮 ID 分配（session/turns.go）。进程内状态、重启清零。
 	turns *session.TurnIDs
+	// harness 对话轮内的 CLI 步骤跟踪（session/harness.go）：给 extra_vars.harnessMetadata
+	// 供 stepIndex 与上一步消息 id，同轮的重试/换号复用同一步。进程内状态、重启清零。
+	harness *session.HarnessTracker
 	// authGuard 鉴权失败限流（httpauth/guard.go）：同一来源连续猜错密钥就回 429 并留痕。
 	// 进程内状态、重启清零。
 	authGuard *httpauth.Guard
@@ -197,7 +200,7 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), turns: session.NewTurnIDs(), authGuard: httpauth.NewGuard()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), turns: session.NewTurnIDs(), harness: session.NewHarnessTracker(), authGuard: httpauth.NewGuard()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.chatCompletions))
 	h.mux.HandleFunc("POST /v1/completions", h.withKeyAuth(sdktranslator.FormatOpenAI, false, h.completions))
 	h.registerBridgeRoutes()
@@ -1065,6 +1068,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		chatMeta.ConversationRequestID = session.TurnRequestID("")
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
+	// 消息 id 在轮转循环外生成一次：同轮的重试、换号、入口切换复用同一个（官方
+	// startRetriedModelAttempt 语义），也让它与 extra_vars.harnessMetadata 的 previous 同源。
+	chatMeta.MessageID = session.NewUUIDv7Hex()
+	// CLI 步骤：同一对话轮内第 1 次模型调用 stepIndex=0，后续步递增并指向上一步消息 id。
+	// Peek 不推进状态，成功后才 Commit（见下方流式/非流式分支）。
+	step := h.harness.Peek(chatMeta.ConversationRequestID)
+	chatMeta.HarnessStep = &step
 	// noteCache 把这一跳的前缀缓存观测交给未命中告警，按对话对照上一轮（见 cacheMissSignal）。
 	noteCache := func(acct *auth.Auth) {
 		if !st.hasCache {
@@ -1139,7 +1149,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusServiceUnavailable
 			if slot.timedOut {
 				why := "在途都满"
-				if slot.rpm {
+				switch {
+				case slot.tpm && slot.rpm:
+					why = "在途满、每分钟请求数或 Token 数到上限"
+				case slot.tpm:
+					why = "在途满或每分钟 Token 数到上限"
+				case slot.rpm:
 					why = "在途满或每分钟请求数到上限"
 				}
 				log.Printf("WARN: [server] in-flight full: model=%s 能接的号%s，等了 %.1fs 仍没有空位，回 503",
@@ -1554,6 +1569,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				if banKind(kind, errFrame) {
 					h.banAlert(acct, kind, errFrame, "该请求的回包已开始，无法再切换账号")
 				}
+			case errors.Is(sErr, upstream.ErrStreamIdle) && r.Context().Err() == nil:
+				// 上游停滞（issue #485）：连接还在、保活帧照发，但 idle 窗口内没有内容帧，
+				// 看门狗掐断了流。HTTP 头早已是 200，客户端会看到流中断；日志/记录必须收敛到
+				// 「上游停滞」而不是「客户端断连」——后者按成功记账，会把挂着不吐字的号记成健康号。
+				st.status = http.StatusGatewayTimeout
+				st.outcome = reqlog.OutcomeStreamError
+				st.errMsg = "upstream stream stalled: no content frame within idle_timeout_seconds"
+				log.Printf("WARN: [server] stream acct=%s model=%s: upstream stalled, no content frame within idle window (stream cut)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel)
 			case sErr != nil:
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
@@ -1567,6 +1591,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 				st.outcome = reqlog.OutcomeSuccess
 				h.cfg.Pool.NoteSuccess(acct.UID)
+				// 同轮步骤推进（CLI harnessMetadata）：下一次同轮的模型调用 stepIndex+1、
+				// previous 指向本次消息 id。
+				h.harness.Commit(chatMeta.ConversationRequestID, chatMeta.MessageID)
 				// 11102/11158 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 				// BlockModelClear 按 reason 前缀识别，只清这两类条目、不碰 6004 独立冷却。
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -1617,6 +1644,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
+			// 上游停滞（issue #485）：idle 窗口内没有内容帧，看门狗掐流，不是解析问题。
+			if errors.Is(err, upstream.ErrStreamIdle) && r.Context().Err() == nil {
+				writeOpenAIError(w, http.StatusGatewayTimeout, "upstream_idle",
+					"upstream stream stalled: no content frame within idle_timeout_seconds, please retry")
+				st.status = http.StatusGatewayTimeout
+				st.outcome = reqlog.OutcomeHTTPError
+				log.Printf("WARN: [server] acct=%s model=%s: upstream stalled, no content frame within idle window (non-stream)",
+					logfmt.Label(acct.UID, acct.Nickname), bareModel)
+				return
+			}
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
@@ -1651,6 +1688,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 非流式同理：聚合成功（无 error 帧、非空流）才算这一跳成功，事后才记成功/绑粘性。
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		h.harness.Commit(chatMeta.ConversationRequestID, chatMeta.MessageID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		if sessKey != "" && h.cfg.Session != nil {
 			h.cfg.Session.Bind(bindKey, acct.UID)
@@ -1841,6 +1879,7 @@ type slotWait struct {
 	woke     bool      // 这次选号是刚等完醒来的
 	timedOut bool      // 等到上限仍没有空位，末端错误据此说明是号都在忙
 	rpm      bool      // 等满时有号是因为每分钟请求数到上限才忙（pool.max_rpm），末端错误据此说明
+	tpm      bool      // 等满时有号是因为每分钟 Token 数到上限才忙（pool.max_tpm），末端错误据此说明
 	logged   bool      // 「等到空位」的日志已经记过
 }
 
@@ -1879,16 +1918,24 @@ func (h *Handler) waitSlot(ctx context.Context, freed <-chan struct{}, sw *slotW
 	return true
 }
 
-// giveUp 等满上限：记下等满了，以及是不是有号因为每分钟请求数到上限而忙。
+// giveUp 等满上限：记下等满了，以及是不是有号因为每分钟请求数 / Token 数到上限而忙。
 func (sw *slotWait) giveUp(p *pool.Pool, tried map[string]bool, model, realm string) {
 	sw.timedOut = true
 	sw.rpm = p.RPMBusy(tried, model, realm)
+	sw.tpm = p.TPMBusy(tried, model, realm)
 }
 
 // busyError 号都在忙、等满仍没空位时回给客户端的说明与 gateway_hint（对话与搜索共用）。
 func (h *Handler) busyError(sw *slotWait) (msg, hint string) {
 	wait := h.cfg.Pool.InFlightWait()
-	if sw.rpm {
+	switch {
+	case sw.tpm && sw.rpm:
+		return fmt.Sprintf("all accounts are busy: every account that can serve this request is at its tokens-per-minute, requests-per-minute, or in-flight limit, no free slot after waiting %s, please retry later", wait),
+			"tpm_full: raise pool.max_tpm / pool.max_tpm_global or pool.max_rpm / pool.max_rpm_global, add accounts, or retry later"
+	case sw.tpm:
+		return fmt.Sprintf("all accounts are busy: every account that can serve this request is at its tokens-per-minute or in-flight limit, no free slot after waiting %s, please retry later", wait),
+			"tpm_full: raise pool.max_tpm / pool.max_tpm_global, add accounts, or retry later"
+	case sw.rpm:
 		return fmt.Sprintf("all accounts are busy: every account that can serve this request is at its requests-per-minute or in-flight limit, no free slot after waiting %s, please retry later", wait),
 			"rpm_full: raise pool.max_rpm / pool.max_rpm_global, add accounts, or retry later"
 	}

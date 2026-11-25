@@ -87,12 +87,20 @@ type autoUpstream struct {
 }
 
 func autoRouteKey(method, host, path, platform string) string {
+	// 桌面端 5.11.x 起每条第一方请求都带 X-Client-Platform: macos（upstream.injectClientIdentity）。
+	// 历史用例按「空 = 桌面端」登记路由，这里归一，好在断言里仍能按 web / miniprogram 区分。
+	if platform == "macos" {
+		platform = ""
+	}
 	k := method + " " + host + path
 	if platform != "" {
 		k += " platform=" + platform
 	}
 	return k
 }
+
+// desktopPlatform 桌面端请求 5.11.x 起带的 X-Client-Platform 值（断言用）。
+const desktopPlatform = "macos"
 
 // RoundTrip 实现 http.RoundTripper：记录请求 → 查表 → 回预设响应。
 func (f *autoUpstream) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -218,11 +226,15 @@ func (f *autoUpstream) requests() []autoReq {
 	return append([]autoReq(nil), f.reqs...)
 }
 
-// requestsTo 过滤指定端点（platform 为空表示不带该头）。
+// requestsTo 过滤指定端点（platform 为空表示桌面端：不带该头或带 5.11.x 的 macos）。
 func (f *autoUpstream) requestsTo(method, host, path, platform string) []autoReq {
 	var out []autoReq
 	for _, r := range f.requests() {
-		if r.Method == method && r.Host == host && r.Path == path && r.Header.Get("X-Client-Platform") == platform {
+		got := r.Header.Get("X-Client-Platform")
+		if platform == "" && got == desktopPlatform {
+			got = ""
+		}
+		if r.Method == method && r.Host == host && r.Path == path && got == platform {
 			out = append(out, r)
 		}
 	}
@@ -2986,10 +2998,14 @@ func TestRunSequentialEventTask(t *testing.T) {
 		mpIdx, pcIdx := -1, -1
 		for i, r := range all {
 			if r.Host == autoBillingHost && r.Path == autoReportPath {
-				if r.Header.Get("X-Client-Platform") == "mp-weixin" && mpIdx < 0 {
+				plat := r.Header.Get("X-Client-Platform")
+				if plat == desktopPlatform {
+					plat = ""
+				}
+				if plat == "mp-weixin" && mpIdx < 0 {
 					mpIdx = i
 				}
-				if r.Header.Get("X-Client-Platform") == "" && pcIdx < 0 {
+				if plat == "" && pcIdx < 0 {
 					pcIdx = i
 				}
 			}

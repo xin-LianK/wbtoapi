@@ -10,7 +10,7 @@
 
 | 身份 | 凭证里的 `product` | 依据 | 可信度 |
 | ---- | --------------- | ---- | ---- |
-| 桌面端 | `desktop`（缺省） | WorkBuddy 桌面端安装包（国内版 5.11.3、国际版 5.9.4）内置的 CLI，就是 `headers.go` 一直在对齐的那套 | 2026-10 生产实测 |
+| 桌面端 | `desktop`（缺省） | WorkBuddy 桌面端安装包（国内版 5.11.3、国际版 5.11.4）内置的 CLI，就是 `headers.go` 一直在对齐的那套 | 2026-10 生产实测 |
 | VSCode 扩展 | `vscode` | Open VSX 上 `Tencent-Cloud.coding-copilot` 4.12.39997873 解包源码里的 `UserAgentHttpInterceptor` / `buildModelRequestHeaders` | **未用真扩展抓包核对**，默认不启用 |
 | CLI | `cli` | 与桌面端同源（网关本来发的就是桌面端内置 CLI 的形状） | 只差一个 `acp-connection-id` |
 | 自动换线 | `auto` | 桌面端起步，429 时往下换 | 见下 |
@@ -23,11 +23,12 @@
 | -- | ----- | ---------- | --- |
 | `User-Agent` | `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<cli>` | `VSCode/<宿主版本> CodeBuddy/<扩展版本>` | 同桌面端 |
 | `X-IDE-Type` / `X-IDE-Name` | `WorkBuddy` | `VSCode` | `WorkBuddy` |
-| `X-IDE-Version` | 桌面端版本（国内版 5.11.3、国际版 5.9.4） | 宿主 VSCode 版本（`upstream.vscode_ide_version`） | 桌面端版本 |
+| `X-IDE-Version` | 桌面端版本（国内版 5.11.3、国际版 5.11.4） | 宿主 VSCode 版本（`upstream.vscode_ide_version`） | 桌面端版本 |
 | `X-Product-Version` | 不发 | 扩展版本（`upstream.vscode_product_version`） | 不发 |
 | `X-Env-ID` | 不发 | `production` | 不发 |
 | `X-Stainless-*`（8 个） | 发（对话经 OpenAI SDK） | **不发**（扩展不走 SDK） | 发 |
 | `X-Agent-Runtime` / `X-Agent-Purpose` | 发 | **不发** | 发 |
+| `X-Client-Version` / `X-Client-Platform` / `X-Client-Product` | 发（桌面端 5.11.x 起，`darwin` → `macos`） | **不发**（扩展没有这套头） | 发 |
 | `acp-connection-id` | 发（按账号稳定派生） | **不发** | **不发**（纯 CLI 进程没有 ACP 连接） |
 | 会话 id 形态 | 带连字符的 UUID v7 | 32 位无连字符 hex；`X-Request-ID` 与轮级 id 同值 | 同桌面端 |
 | `X-Request-Trace-Id` | 不发 | 每个请求一个带连字符的 UUID | 不发 |
