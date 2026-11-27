@@ -17,19 +17,19 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
-// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy 5.11.3、国际版 5.11.4，两域内置 CLI
+// 官方取值依据：WorkBuddy 桌面端安装包（国内版 WorkBuddy 5.11.3、国际版 5.11.7，两域内置 CLI
 // 都是 @tencent-ai/codebuddy-code 2.176.0）。对话、刷新令牌、模型目录由内置
 // CLI 发；积分、签到、成长任务、旅行、上报由桌面端后台服务发。两者用同一套请求框架，UA 段序不同。
 const (
 	// defaultClientVersionCN / defaultClientVersionGlobal 两域桌面端版本（UA、X-IDE-Version 与 X-Client-Version）。
 	// config upstream.client_version 可覆盖（两域共用一个值，空 = 内置默认）。
 	// 国内版 5.11.3 是 2026-11-12 构建（Windows 包，11-16 读 app.asar 的 package.json 核对）；
-	// 国际版 5.11.4（macOS 包 5.11.4.44121853，2026-11-24 上游核对）。
+	// 国际版 5.11.7（macOS arm64 包 5.11.7.44923190，2026-11-26 发布，上游核对）。
 	defaultClientVersionCN     = "5.11.3"
-	defaultClientVersionGlobal = "5.11.4"
+	defaultClientVersionGlobal = "5.11.7"
 	// defaultCliVersionCN / defaultCliVersionGlobal 两域桌面端内置 CLI 的版本（UA 的 `CLI/<ver>` 段与
 	// extra_vars.harnessMetadata.harnessVersion）。config upstream.cli_version 可覆盖（两域共用一个值，空 = 内置默认）。
-	// 两域 5.11.3 / 5.11.4 内置的都是 2.176.0。
+	// 两域 5.11.3 / 5.11.7 内置的都是 2.176.0。
 	defaultCliVersionCN     = "2.176.0"
 	defaultCliVersionGlobal = "2.176.0"
 	// deploymentType 两域 product.json 的 deploymentType。官方请求框架的 ProductEndpointHttpInterceptor
@@ -87,7 +87,7 @@ func applicationNameFor(a *auth.Auth) string {
 
 // defaultCLIUA 内置 CLI 的 UA（UserAgentHttpInterceptor）：
 // `<platform>/<ver> <applicationName>/<ver> CLI/<cli>`，platform 由桌面端固定传 "WorkBuddy"。
-// 国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0`。
+// 国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.11.7 workbuddy-ai/5.11.7 CLI/2.176.0`。
 func (c *Client) defaultCLIUA(a *auth.Auth) string {
 	v := c.clientVersion(a)
 	return "WorkBuddy/" + v + " " + applicationNameFor(a) + "/" + v + " CLI/" + c.cliVersion(a)
@@ -98,8 +98,8 @@ func (c *Client) defaultCLIUA(a *auth.Auth) string {
 // applicationName（WorkbuddyClientInfoProvider.initClientInfo）：桌面端只给内置 CLI 的进程设
 // CLIENT_INFO_PLATFORM=WorkBuddy，后台服务的子进程环境里没有（buildDaemonProcessEnv），所以两段都是
 // 应用名。国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，和 CLI 的 UA 一样；国际版
-// `workbuddy-ai/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0`。2026-10-31 读 5.8.3、5.9.4 安装包核对，
-// 11-24 随国际版 5.11.4 复读，同类项目
+// `workbuddy-ai/5.11.7 workbuddy-ai/5.11.7 CLI/2.176.0`。2026-10-31 读 5.8.3、5.9.4 安装包核对，
+// 11-26 随国际版 5.11.7 复读（UA 段序未变），同类项目
 // misakano7545/workbuddy2api-panel 的真机抓包也是这样；1.8.0 及以前国际版第二段发的是 WorkBuddy。
 func (c *Client) defaultDaemonUA(a *auth.Auth) string {
 	app, v := applicationNameFor(a), c.clientVersion(a)
