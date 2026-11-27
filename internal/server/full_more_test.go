@@ -640,7 +640,7 @@ func TestFull8LoggingEdges(t *testing.T) {
 		{500, ""},
 	}
 	for _, tc := range toksRows {
-		logChatRowEx(0, 0, "m", "sync", "uid12345", "昵称", tc.status, 10, "rid-1", tc.outcome, 1, 0, false, "", "")
+		logChatRowEx(0, 0, "m", "sync", "uid12345", "昵称", tc.status, 10, "rid-1", tc.outcome, 1, 0, false, "", "", "")
 	}
 	if out := buf.String(); !strings.Contains(out, "0.0tok/s") || !strings.Contains(out, "out=success") || !strings.Contains(out, "out=http_error") {
 		t.Fatalf("日志行 = %q", out)

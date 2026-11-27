@@ -83,6 +83,10 @@ type chatStat struct {
 	clientIP  string
 	userAgent string
 
+	// upstreamModel 上游响应里回报的 model id（流式取首个 data 帧的 model 字段）。
+	// 与请求的模型不同 = 上游改写了路由（issue #494：逐单行看不出到底谁接的单）。
+	upstreamModel string
+
 	// errMsg 流已开始后才出错时的原因（HTTP 头已发出、状态码是 200，响应观察器截不到
 	// 失败正文），或请求记录里要写得比回给客户端的更具体的原因（号的代理连不上：客户端不该看到代理名）；
 	// 其余失败的原因从回给客户端的错误响应里取，见 failureReason。
@@ -107,7 +111,7 @@ func (s *chatStat) done() {
 	}
 	s.logged = true
 	logChatRowEx(s.ttfb, time.Since(s.start), s.model, s.mode, s.uid, s.nick, s.status, s.toks,
-		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent)
+		s.requestID, s.outcome, s.attempts, s.credit, s.hasCredit, s.clientIP, s.userAgent, s.upstreamModel)
 }
 
 // chatStatsReader 在流式透传时抓取 SSE 末帧的 usage.completion_tokens 精确值，
@@ -128,6 +132,8 @@ type chatStatsReader struct {
 	hasCredit  bool
 	credit     float64
 	errorFrame bool
+	// upstreamModel 上游首个 data 帧回报的 model（与请求的不同 = 上游改写了路由）。
+	upstreamModel string
 	// cacheHit/cacheMiss 上游末帧 usage 里的前缀缓存命中 / 未命中（口径同非流式，见
 	// upstream.UsageCacheTokens），供用量桶的命中率维度与 reqlog 逐次记录（issue #92）。
 	hasCache  bool
@@ -152,6 +158,9 @@ func (s *chatStatsReader) Credit() (float64, bool) { return s.credit, s.hasCredi
 
 // TotalTokens 返回末帧 usage.total_tokens 与是否缺失。
 func (s *chatStatsReader) TotalTokens() (int, bool) { return s.totalTokens, s.hasTotalTokens }
+
+// UpstreamModel 上游响应里回报的 model id；无 data 帧或上游没给时为空。
+func (s *chatStatsReader) UpstreamModel() string { return s.upstreamModel }
 
 // Usage 返回流式响应中已收到的 token usage 字段。
 func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
@@ -182,9 +191,13 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	var chunk struct {
 		Error json.RawMessage `json:"error"`
 		Usage json.RawMessage `json:"usage"`
+		Model string          `json:"model"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil {
 		return
+	}
+	if s.upstreamModel == "" && chunk.Model != "" {
+		s.upstreamModel = chunk.Model
 	}
 	if len(chunk.Error) > 0 {
 		s.errorFrame = true
@@ -615,14 +628,15 @@ const (
 //     uid8 时人眼无法判断是哪个号，要辨认必须再查 auths/，排障多一跳；
 //   - toks<0 表示 usage 缺失，显示 "-"。
 func logChatRow(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int) {
-	logChatRowEx(ttfb, total, model, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "")
+	logChatRowEx(ttfb, total, model, mode, uid, nick, status, toks, "", "", 0, 0, false, "", "", "")
 }
 
 // logChatRowEx 是带请求 ID、结果、重试、积分与调用来源字段的扩展流水行。旧调用保持
-// 原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段。
+// 原格式；requestID 非空时才追加扩展字段；来源两参均为空时不追加来源段；
+// upstreamModel 非空且与请求的 model 不同时追加 `up=` 段（上游改写了路由）。
 func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, status int, toks int,
 	requestID, outcome string, attempts int, credit float64, hasCredit bool,
-	clientIP, userAgent string) {
+	clientIP, userAgent, upstreamModel string) {
 	if !chatLogEnabled {
 		return
 	}
@@ -672,7 +686,12 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		}
 		src = fmt.Sprintf(" src=%s ua=%s |", dashIfEmpty(clientIP), ua)
 	}
-	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s%s\n",
+	// 上游改写的模型：只在确实不同时追加，正常单子行格式不变（便于既有 grep/脚本）。
+	up := ""
+	if um := strings.TrimSpace(upstreamModel); um != "" && !strings.HasSuffix(strings.TrimSpace(model), um) {
+		up = fmt.Sprintf(" up=%s |", um)
+	}
+	fmt.Fprintf(chatLogOut, "| #%03d | %s | %s | %s | %d | %s | TTFB=%s | tok=%s | %s | total=%.1fs |%s%s%s\n",
 		seq,
 		time.Now().Format("15:04:05"),
 		model,
@@ -685,6 +704,7 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 		total.Seconds(),
 		extra,
 		src,
+		up,
 	)
 }
 
@@ -693,8 +713,8 @@ func logChatRowEx(ttfb, total time.Duration, model, mode, uid, nick string, stat
 // 上游的前缀缓存有的模型按号存（deepseek），有的按会话 id 存、换号也接得上（glm-5.3-flash），
 // 见 docs/official-client.md：新对话的头一轮、换了号、换了会话 id 都可能整段未命中，这些是预期内的。以前按模型笼统判断
 // 「此前命中过」，把它们都报成了异常（issue #2）。现在按对话（会话键）记下上一轮的模型、号、
-// 会话 id 和消息条数；这段对话命中过、这一轮大前缀（≥1000 token）却一点没命中时，对照上一轮说原因：
-//   - 换了模型 / 换了号 / 会话 id 变了 / 消息比上一轮少（客户端压缩或改写了历史）：预期内，记 INFO；
+// 会话 id、消息条数和输入 token 数；这段对话命中过、这一轮大前缀（≥1000 token）却一点没命中时，对照上一轮说原因：
+//   - 换了模型 / 换了号 / 会话 id 变了 / 消息或输入 token 比上一轮少（客户端压缩或改写了历史）：预期内，记 INFO；
 //   - 都没变：同一个号、同一个会话 id，上游没留住缓存，记 WARN，带上距上一轮多久。
 //
 // 每段对话 10 分钟内最多记一行。没有会话键的请求认不出是哪段对话，不判断。
@@ -703,10 +723,12 @@ type cacheMissSignal struct {
 	convs map[string]convCacheState
 }
 
-// convCacheState 一段对话上一轮的缓存观测。
+// convCacheState 一段对话上一轮的缓存观测。prompt 是上一轮的输入 token 数：
+// 客户端压缩/改写历史但消息条数不变时，只有它能认出「输入变少」这种预期内未命中。
 type convCacheState struct {
 	model, uid, acct, convID string
 	msgs                     int
+	prompt                   int64
 	at                       time.Time
 	hit                      bool      // 这段对话命中过
 	logged                   time.Time // 上次记日志的时刻
@@ -747,8 +769,8 @@ func (c *cacheMissSignal) note(o cacheObservation) {
 	if !seen && len(c.convs) >= cacheMissTrackMax {
 		c.evictLocked(now)
 	}
-	cur := convCacheState{model: o.model, uid: o.uid, acct: o.acct, convID: o.convID, msgs: o.msgs, at: now,
-		hit: prev.hit || o.hit > 0, logged: prev.logged}
+	cur := convCacheState{model: o.model, uid: o.uid, acct: o.acct, convID: o.convID, msgs: o.msgs,
+		prompt: o.prompt, at: now, hit: prev.hit || o.hit > 0, logged: prev.logged}
 	c.convs[o.key] = cur
 	// 命中了、小前缀、头一次见到的对话、这段对话从没命中过（模型不缓存或还没缓存上）都不提示。
 	if o.hit > 0 || o.prompt < 1000 || !seen || !prev.hit || now.Sub(prev.logged) < cacheMissWarnEvery {
@@ -779,6 +801,10 @@ func cacheMissReason(prev convCacheState, o cacheObservation) string {
 		return "会话 id 变了，部分模型按会话 id 缓存"
 	case o.msgs < prev.msgs:
 		return fmt.Sprintf("消息比上一轮少（%d → %d 条），客户端压缩或改写了历史", prev.msgs, o.msgs)
+	case o.prompt < prev.prompt:
+		// 消息条数不变、输入却变少：客户端压掉或改写了历史正文（常见于自动摘要、
+		// 工具结果裁剪），整段前缀自然对不上，属预期内。
+		return fmt.Sprintf("输入 token 比上一轮少（%d → %d），客户端压缩或改写了历史", prev.prompt, o.prompt)
 	}
 	return ""
 }

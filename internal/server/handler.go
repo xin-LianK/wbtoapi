@@ -1604,6 +1604,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			credit, hasCredit := stats.Credit()
+			st.upstreamModel = stats.UpstreamModel()
 			if hit, miss, ok := stats.CacheTokens(); ok {
 				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
