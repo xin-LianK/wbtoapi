@@ -122,7 +122,7 @@ checkin 汇总：成功 2 / 已签到 3 / 失败 1 / 跳过 1；失败明细 193
 
 ## 官网积分记录的「使用端」显示什么
 
-官网按出站请求的 User-Agent 归因。默认 UA 按账号所在域对齐官方桌面端：国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.11.4 workbuddy-ai/5.11.4 CLI/2.176.0`；需要时可用 `upstream.user_agent` 整体覆盖，或用 `upstream.client_version` / `upstream.cli_version` 只改版本号。改完需要重启。
+官网按出站请求的 User-Agent 归因。默认 UA 按账号所在域对齐官方桌面端：国内版 `WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0`，国际版 `WorkBuddy/5.11.7 workbuddy-ai/5.11.7 CLI/2.176.0`；需要时可用 `upstream.user_agent` 整体覆盖，或用 `upstream.client_version` / `upstream.cli_version` 只改版本号。改完需要重启。
 
 ## 每天早上的积分到期日报没收到
 
