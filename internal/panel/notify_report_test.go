@@ -48,7 +48,8 @@ func TestNotifyReportSendsDigest(t *testing.T) {
 		},
 	})
 	sch := scheduler.New(scheduler.Config{Pool: pl})
-	n := notify.New(notify.Config{Enabled: true, URL: srv.URL, Format: notify.FormatBark, Timeout: 2 * time.Second})
+	// Bark 的 device key 在路径里（https://api.day.app/<key>），投递就是 POST 到该地址。
+	n := notify.New(notify.Config{Enabled: true, URL: srv.URL + "/devkey", Format: notify.FormatBark, Timeout: 2 * time.Second})
 
 	p := New(Config{Version: "test", Pool: pl, Scheduler: sch, Notify: n})
 	rec := httptest.NewRecorder()

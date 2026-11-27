@@ -175,13 +175,15 @@ func (n *Notifier) deliver(msg Message) error {
 			},
 		})
 	case FormatBark:
-		// Bark 的 push 接口：POST {base}/push，device_key 可由 base 路径携带。
+		// Bark 的 JSON 推送：POST 到 {base}，device key 在路径里（https://api.day.app/<key>）。
+		// 不能再拼 /push——那会落到服务端的 /:key/:body 路由，正文被路径段 "push" 覆盖，
+		// 手机上收到的是一条内容为 "push" 的空通知。
 		base := strings.TrimRight(n.cfg.URL, "/")
-		endpoint := base
-		if !strings.HasSuffix(base, "/push") {
-			endpoint = base + "/push"
+		u, err := url.Parse(base)
+		if err != nil || strings.Trim(u.Path, "/") == "" {
+			return fmt.Errorf("bark 通道的 url 需要带 device key（形如 https://api.day.app/<key>）")
 		}
-		return n.postJSON(endpoint, map[string]any{
+		return n.postJSON(base, map[string]any{
 			"title": msg.Title,
 			"body":  msg.Text,
 			"group": "WorkBuddy",
