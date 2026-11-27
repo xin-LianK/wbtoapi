@@ -167,6 +167,7 @@ func (h *Handler) runSearch(ctx context.Context, q upstream.SearchQuery, model s
 			}
 			continue
 		}
+		refreshed := false
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
 				h.cfg.Pool.Release(acct.UID)
@@ -186,12 +187,35 @@ func (h *Handler) runSearch(ctx context.Context, q upstream.SearchQuery, model s
 				}
 				continue
 			}
+			refreshed = true
+			h.cfg.Pool.ClearSessionDead(acct.UID)
 			if err := acct.SaveAtomic(); err != nil {
 				log.Printf("ERR: [server] search refresh acct=%s: save auth failed: %v", logfmt.Label(acct.UID, acct.Nickname), err)
 			}
 		}
 		st.attempts++
+		usedToken := acct.AccessTokenValue()
 		out, err := h.cfg.Upstream.Search(ctx, acct, q, meta)
+		// 非 12153 的 401 → 按需刷新一次原位重发（同对话）；刷新回 12153 则禁用换号。
+		if !refreshed && ctx.Err() == nil && upstream.IsRefreshableError(err) && strings.TrimSpace(acct.RefreshTokenValue()) != "" {
+			if ok, rerr := h.cfg.Upstream.RefreshAfter401(acct, usedToken); ok {
+				h.cfg.Pool.ClearSessionDead(acct.UID)
+				st.attempts++
+				out, err = h.cfg.Upstream.Search(ctx, acct, q, meta)
+			} else if rerr != nil {
+				var rue *upstream.Error
+				if errors.As(rerr, &rue) && rue.Kind == upstream.ErrSessionDead {
+					h.cfg.Pool.Release(acct.UID)
+					lastErr = rerr
+					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					if !rotateBackoff(i, ctx) {
+						break
+					}
+					continue
+				}
+				log.Printf("WARN: [server] search refresh after 401 acct=%s: %v", logfmt.Label(acct.UID, acct.Nickname), rerr)
+			}
+		}
 		h.cfg.Pool.Release(acct.UID)
 		if err == nil {
 			return out, nil

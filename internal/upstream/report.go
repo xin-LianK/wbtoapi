@@ -17,10 +17,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
@@ -51,23 +53,43 @@ func (c *Client) authServiceJSON(a *auth.Auth, method, path string, body any, ex
 }
 
 func (c *Client) billingDo(a *auth.Auth, method, path string, body any, headers func(*http.Request, *auth.Auth), extra []func(*http.Request)) (json.RawMessage, error) {
-	var rdr io.Reader
+	var payload []byte
 	if body != nil {
-		raw, err := json.Marshal(body)
+		var err error
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		rdr = bytes.NewReader(raw)
 	}
-	req, err := newAccountRequest(context.Background(), a, method, c.billingBase(a)+path, rdr)
-	if err != nil {
-		return nil, err
+	doOnce := func() (json.RawMessage, string, error) {
+		var rdr io.Reader
+		if payload != nil {
+			rdr = bytes.NewReader(payload)
+		}
+		req, err := newAccountRequest(context.Background(), a, method, c.billingBase(a)+path, rdr)
+		if err != nil {
+			return nil, "", err
+		}
+		headers(req, a)
+		for _, f := range extra {
+			f(req)
+		}
+		data, err := c.doJSON(req)
+		return data, bearerToken(req), err
 	}
-	headers(req, a)
-	for _, f := range extra {
-		f(req)
+	data, usedToken, err := doOnce()
+	// 非 12153 的 401 → 按需刷新令牌后重发一次（积分查询/签到都走这里）。
+	if IsRefreshableError(err) {
+		if ok, rerr := c.RefreshAfter401(a, usedToken); ok {
+			data, _, err = doOnce()
+			return data, err
+		} else if isSessionDead(rerr) {
+			return nil, rerr
+		} else if rerr != nil {
+			log.Printf("WARN: [upstream] billing %s refresh after 401 acct=%s: %v", path, logfmt.Label(a.UID, a.Nickname), rerr)
+		}
 	}
-	return c.doJSON(req)
+	return data, err
 }
 
 // withBillingLanguage 积分包查询才带的 Accept-Language（见 billingAcceptLanguage）。
@@ -103,9 +125,10 @@ func isSoftRateErr(err error) bool {
 // 上游 5xx（ErrServer，实测偶发 "code 10000 / API request failed with status
 // code: 500"）或网络层错误（非 *Error 的传输失败）。业务错误（code!=0 的
 // 已签到/参数错、4xx）不重试——重试只会原样再失败一次；429 单独走
-// softRateRetryDelay 的长间隔补打，不在这里。
+// softRateRetryDelay 的长间隔补打，不在这里。代理线路错误（RouteError，换出口才有用）
+// 与主动取消（停机/超时）也不重试：重打同一出口只会再失败一次。
 func isTransientBillingErr(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, context.Canceled) || IsRouteError(err) {
 		return false
 	}
 	var ue *Error
