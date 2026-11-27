@@ -27,8 +27,10 @@ func TestChatRegionSchedulingAndStickyPriority(t *testing.T) {
 	)
 	p.SetScheduling(pool.RegionStrategies{Domestic: pool.RoundRobin, International: pool.SequentialExhaust}, pool.RegionAccountOrder{})
 	p.SetCostExploreInterval(0)
-	// 固定同层，避免成功后成本首观测影响本测试的路由断言。
+	// 固定同层，避免成功后成本首观测影响本测试的路由断言。写两次零成本观测：
+	// tier 0 需两次确认（issue #491），只写一次会让「已观测一次」的号与「两次」的分层不同。
 	for _, uid := range []string{"a", "b", "x", "y"} {
+		p.NoteModelCost(uid, "m", 0, 1000)
 		p.NoteModelCost(uid, "m", 0, 1000)
 	}
 	selected := ""

@@ -227,14 +227,17 @@ func (p *Pool) NoteSuccess(uid string) {
 
 // NoteModelCost 记录一次实测扣费观测，更新该 (账号, 模型) 的成本账本，并顺带
 // 扣减账号余额（credits/creditsExpiring/最早到期批次）。credit 为上游 usage.credit（本次真实
-// 扣费=消耗量），tokens 为本次请求的 token 总数（prompt+completion，用于折算单位
-// 成本）。tokens<=0 时不记录：无法折算单价，记进去会污染账本。
+// 扣费=消耗量），tokens 为本次请求的 token 总数（prompt+completion）。
+//
+// 两个口径：CostPerReq（决策）与 CostPer1k（诊断）。后台实测（issue #491）同一批账号
+// 按 credit/tokens 算差 1300 倍，按每次请求算只差 8 倍——上游 credit 主要是每请求底价，
+// 不随 token 线性增长，所以「谁便宜」必须按次比，per1k 只能用来看「这个号接的请求多长」。
 //
 // 用 EMA 平滑（alpha=0.3，约 5 次观测收敛）：单次异常值不主导选号决策。
 // 账本持久化到 state.json（stateAccount.ModelCosts）：重启后成本知识保留，
 // 限免/夜间免费的跨重启窗口不再重新付学费探测；落盘/恢复均按 modelCostTTL
 // 惰性过滤——陈旧价格（时段性优惠）不跨 TTL 复活。
-// 限免结束事件：tier 0 观测（per1k≤0）被 credit>0 观测覆盖时打一条明确日志
+// 限免结束事件：此前观测到 0 成本被 credit>0 观测覆盖时打一条明确日志
 // （运维据此知道"免费午餐结束了"），判定在写入口做、只看覆盖前值。
 //
 // credits 签到外回写：credit 是本次请求的**消耗量**，不是剩余余额。顺手扣减
@@ -247,7 +250,11 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	if uid == "" || model == "" || tokens <= 0 {
 		return
 	}
-	// 单价按每千 token 归一，消除请求长度差异。
+	// 决策口径按「每次请求」；per1k 只作诊断（见函数头注释）。
+	perReq := credit
+	if perReq < 0 {
+		perReq = 0
+	}
 	per1k := credit / float64(tokens) * 1000
 	if per1k < 0 {
 		per1k = 0
@@ -279,17 +286,18 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
 	if !seen {
-		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
+		e.modelCost[model] = modelCostEntry{CostPerReq: perReq, CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
 	} else {
-		// 限免结束事件（判定在写入口，只看覆盖前值）：此前 tier 0（实测免费，
-		// per1k≤0）且本次实测收费（per1k>0）——账号在该模型上的免费窗口结束。
-		if prev.CostPer1k <= 0 && per1k > 0 {
-			log.Printf("[pool] model %s on uid %s: free tier ended, now %.3f credits/1k", model, logfmt.UID8(uid), per1k)
+		// 限免结束事件（判定在写入口，只看覆盖前值）：此前观测到 0 成本且本次实测收费
+		// ——账号在该模型上的免费窗口结束。
+		if prev.CostPerReq <= 0 && perReq > 0 {
+			log.Printf("[pool] model %s on uid %s: free tier ended, now %.3f credits/req", model, logfmt.UID8(uid), perReq)
 		}
 		e.modelCost[model] = modelCostEntry{
-			CostPer1k: prev.CostPer1k*(1-alpha) + per1k*alpha,
-			LastSeen:  time.Now(),
-			Samples:   prev.Samples + 1,
+			CostPerReq: prev.CostPerReq*(1-alpha) + perReq*alpha,
+			CostPer1k:  prev.CostPer1k*(1-alpha) + per1k*alpha,
+			LastSeen:   time.Now(),
+			Samples:    prev.Samples + 1,
 		}
 	}
 	p.dirty.Store(true) // 账本已持久化：写入口统一置脏
@@ -748,10 +756,11 @@ func (p *Pool) modelCostsStatusLocked(e *entry, now time.Time) []ModelCostStatus
 	for _, m := range models {
 		mc := e.modelCost[m]
 		rows = append(rows, ModelCostStatus{
-			Model:     m,
-			CostPer1k: mc.CostPer1k,
-			LastSeen:  mc.LastSeen,
-			Samples:   mc.Samples,
+			Model:      m,
+			CostPerReq: mc.CostPerReq,
+			CostPer1k:  mc.CostPer1k,
+			LastSeen:   mc.LastSeen,
+			Samples:    mc.Samples,
 		})
 	}
 	return rows

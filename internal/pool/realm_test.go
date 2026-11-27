@@ -238,7 +238,8 @@ func TestCatalogUIDForRealm(t *testing.T) {
 func TestCheapestWeightedUIDsForModelRealm(t *testing.T) {
 	p := realmPool(t)
 	p.SetCostExploreInterval(0)
-	p.NoteModelCost("cn1", "glm-5.2", 0, 1000) // 免费
+	p.NoteModelCost("cn1", "glm-5.2", 0, 1000) // 免费（tier 0 需两次零成本观测确认）
+	p.NoteModelCost("cn1", "glm-5.2", 0, 1000)
 	p.NoteModelCost("cn2", "glm-5.2", 5, 1000) // 收费
 	if got := p.CheapestWeightedUIDsForModelRealm("glm-5.2", "cn", nil); !reflect.DeepEqual(got, []string{"cn1"}) {
 		t.Fatalf("有免费号时只留免费号，got %v", got)

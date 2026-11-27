@@ -357,11 +357,11 @@ function Body({ a, health, proxy, now, busy, run, onBind }: {
         <Separator />
         <Section title="成本台账">
           {costs.length === 0 ? (
-            <p className="text-sm text-muted">暂无实测单价（有效期内没有观测）。</p>
+            <p className="text-sm text-muted">暂无实测成本（有效期内没有观测）。</p>
           ) : (
             costs.map((c) => (
               <Row key={c.model} label={<span className="break-all">{c.model}</span>}>
-                {c.cost_per_1k <= 0 ? <span className="text-success">免费</span> : c.cost_per_1k + ' credits/1K'}
+                {c.cost_per_req <= 0 ? <span className="text-success">免费</span> : c.cost_per_req + ' credits/次'}
                 <span className="block text-xs text-muted">{c.samples ? c.samples + ' 次样本 · ' : ''}{ago(c.last_seen, now)}</span>
               </Row>
             ))

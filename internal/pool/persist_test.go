@@ -87,10 +87,11 @@ func TestLoadAppliesAccountFilters(t *testing.T) {
 			"breaker_until":"` + future + `","retry_count":2,"degrade_until":"` + future + `",
 			"model_cooldowns":{"keep":{"until":"` + future + `","reason":"6004"},
 				"past":{"until":"` + past + `"},"zero":{}},
-			"model_costs":{"keep":{"cost_per_1k":1.5,"last_seen":"` + future + `","samples":2},
-				"old":{"cost_per_1k":1,"last_seen":"` + twoDaysAgo + `"},
-				"zero":{"cost_per_1k":1},
-				"neg":{"cost_per_1k":-1,"last_seen":"` + future + `"}}
+			"model_costs":{"keep":{"cost_per_req":0.4,"cost_per_1k":1.5,"last_seen":"` + future + `","samples":2},
+				"old":{"cost_per_req":0.2,"cost_per_1k":1,"last_seen":"` + twoDaysAgo + `"},
+				"zero":{"cost_per_req":0.3,"cost_per_1k":1},
+				"neg":{"cost_per_req":-0.1,"cost_per_1k":-1,"last_seen":"` + future + `"},
+				"legacy":{"cost_per_1k":2,"last_seen":"` + future + `","samples":3}}
 		},
 		"u2":{"credits":5,"credits_expiring":-3,
 			"credits_earliest_expiry":"` + past + `","credits_earliest_remaining":2},
@@ -134,8 +135,13 @@ func TestLoadAppliesAccountFilters(t *testing.T) {
 	if len(e.modelCost) != 1 {
 		t.Errorf("modelCost 应只留有效观测: %+v", e.modelCost)
 	}
-	if mc := e.modelCost["keep"]; mc.CostPer1k != 1.5 || mc.Samples != 2 {
+	if mc := e.modelCost["keep"]; mc.CostPerReq != 0.4 || mc.CostPer1k != 1.5 || mc.Samples != 2 {
 		t.Errorf("modelCost keep = %+v", mc)
+	}
+	// legacy：只有 cost_per_1k 的旧口径条目必须丢弃（per1k 衡量的是请求长度，不是价格），
+	// 否则跨重启继承错误价格（issue #491）。
+	if _, ok := e.modelCost["legacy"]; ok {
+		t.Error("旧口径条目（无 cost_per_req）应被丢弃重学")
 	}
 
 	u2 := p.byUID["u2"]

@@ -108,12 +108,12 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	onlyExpiring := p.restrictToExpiringLocked(cands, bestTier, reqModel, now)
 	// 权重只算一次：顶 5 截断要排序，若在 sort 比较器里现算 weightOf 会翻成 O(n log n) 次
 	// 冗余浮点计算（46 账号约 500 次）。先做 O(n) 预计算，再按 (权重, uid) 排序。
-	// costTier/modelCostOf 同样每候选只算一次（存入 tier/cost1k），比较器只读缓存字段。
+	// costTier/modelCostOf 同样每候选只算一次（存入 tier/costPerReq），比较器只读缓存字段。
 	type weighted struct {
-		e      *entry
-		w      float64
-		tier   int
-		cost1k float64
+		e          *entry
+		w          float64
+		tier       int
+		costPerReq float64
 	}
 	collect := func(restrictExpiring bool) []weighted {
 		out := make([]weighted, 0, len(cands))
@@ -125,7 +125,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			if restrictExpiring && !p.urgentNow(e, now) {
 				continue
 			}
-			out = append(out, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+			out = append(out, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, costPerReq: ci})
 		}
 		return out
 	}
@@ -169,10 +169,10 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		}
 	}
 	sort.SliceStable(ws, func(i, j int) bool {
-		// costTier 硬过滤后 ws 全员同层，但仍按 cost1k 升序排（tier 2 层内单价低者
-		// 在前；tier 0/1 层 cost1k 恒 0，本比较退化为权重比较）——读缓存字段不现算。
-		if ws[i].cost1k != ws[j].cost1k {
-			return ws[i].cost1k < ws[j].cost1k // 收费层：单价低的在前
+		// costTier 硬过滤后 ws 全员同层，但仍按每次请求单价升序排（tier 2 层内便宜者
+		// 在前；tier 0/1 层单价恒 0，本比较退化为权重比较）——读缓存字段不现算。
+		if ws[i].costPerReq != ws[j].costPerReq {
+			return ws[i].costPerReq < ws[j].costPerReq // 收费层：每次请求更便宜的在前
 		}
 		if ws[i].w != ws[j].w {
 			return ws[i].w > ws[j].w
@@ -227,24 +227,33 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	return e.a
 }
 
-// costTierOf 该号在 reqModel 上的成本层与单价（每千 token 积分）：
+// costTierOf 该号在 reqModel 上的成本层与每次请求单价（积分/次，决策口径）：
 //
 //	0 = 已实测免费（限免期/夜间免费的号，最强偏好）
-//	1 = 无观测（含观测过期）
+//	1 = 无观测（含观测过期、以及只观测到一次零成本尚未确认）
 //	2 = 已实测收费
 //
 // 为什么"无观测"排在"已实测收费"之前：新号的限免状态只能靠实测发现，
 // 若已知收费的号恒压过未知号，那台免费的号永远轮不到，也就永远学不到。
+//
+// 为什么免费要样本数：单次 credit=0 多半是「这次没结算」，一次就判免费会让该号
+// 独占候选池（issue #491 实测一次 max_tokens=5 的探测后，10 个请求有 6 个落在同一个号）。
 func (e *entry) costTierOf(reqModel string, now time.Time) (int, float64) {
 	mc, ok := e.modelCostOf(reqModel, now)
 	if !ok {
 		return 1, 0
 	}
-	if mc.CostPer1k <= 0 {
-		return 0, 0
+	if mc.CostPerReq <= 0 {
+		if mc.Samples >= costFreeSamples {
+			return 0, 0
+		}
+		return 1, 0 // 只观测到一次零成本：先当未知，等第二次确认
 	}
-	return 2, mc.CostPer1k
+	return 2, mc.CostPerReq
 }
+
+// costFreeSamples 判定「已实测免费」所需的零成本观测次数（issue #491）。
+const costFreeSamples = 2
 
 // effectiveCostTierLocked 返回候选集在 reqModel 上的生效成本层：通常是最优层（硬过滤，
 // 而非仅排序：pickWeighted 会在候选内加权随机，只排序的话收费号仍有机会抽中，达不到

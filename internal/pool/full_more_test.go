@@ -177,7 +177,8 @@ func TestFull8PickExplore(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u2"})
 	p.SetCredits("u1", 1000, 0)
 	p.SetCredits("u2", 1000, 0)
-	p.NoteModelCost("u1", "m", 0, 1000) // tier 0：已实测免费
+	p.NoteModelCost("u1", "m", 0, 1000) // tier 0：已实测免费（两次零成本观测才确认，issue #491）
+	p.NoteModelCost("u1", "m", 0, 1000)
 
 	acct := p.PickExcludingForModel(nil, "m")
 	if acct == nil || acct.UID != "u2" {

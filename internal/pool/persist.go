@@ -225,16 +225,25 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			}
 		}
 		// 成本账本：惰性过滤过期（modelCostTTL 外不恢复）+ 剔除结构破损条目
-		// （负 per1k / 零 LastSeen——上游异常或旧文件手改产生的脏数据）。
+		// （负单价 / 零 LastSeen——上游异常或旧文件手改产生的脏数据）。cost_per_req
+		// 缺失 = 旧版本按 per1k 记的错误口径，直接丢弃重新学习（issue #491）。
 		if len(s.ModelCosts) > 0 {
 			for m, mc := range s.ModelCosts {
 				if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL || mc.CostPer1k < 0 {
 					continue
 				}
+				if mc.CostPerReq == nil || *mc.CostPerReq < 0 {
+					continue
+				}
 				if e.modelCost == nil {
 					e.modelCost = map[string]modelCostEntry{}
 				}
-				e.modelCost[m] = modelCostEntry(mc)
+				e.modelCost[m] = modelCostEntry{
+					CostPerReq: *mc.CostPerReq,
+					CostPer1k:  mc.CostPer1k,
+					LastSeen:   mc.LastSeen,
+					Samples:    mc.Samples,
+				}
 			}
 		}
 		p.byUID[uid] = e
@@ -370,7 +379,8 @@ func (p *Pool) stateOverviewLocked() stateFile {
 				if s.ModelCosts == nil {
 					s.ModelCosts = map[string]stateModelCost{}
 				}
-				s.ModelCosts[m] = stateModelCost(mc)
+				perReq := mc.CostPerReq
+				s.ModelCosts[m] = stateModelCost{CostPerReq: &perReq, CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
 			}
 		}
 		sf.Accounts[uid] = s

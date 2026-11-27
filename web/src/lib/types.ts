@@ -19,7 +19,9 @@ export interface TokenUsage {
 
 export interface ModelCost {
   model: string
-  /** 实测每千 token 单价；≤0 = 实测免费 */
+  /** 实测每次请求平均积分（决策口径）；≤0 且样本够 = 实测免费 */
+  cost_per_req: number
+  /** 实测每千 token 积分；只作诊断（衡量请求长度，不用于比价） */
   cost_per_1k: number
   last_seen: string
   samples?: number

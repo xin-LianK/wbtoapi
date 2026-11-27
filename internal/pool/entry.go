@@ -161,11 +161,16 @@ type Status struct {
 }
 
 // ModelCostStatus 单个 (账号, 模型) 的成本台账行（P1-anti-monopoly 可观测性）。
-// tier 不单独落字段：cost_per_1k ≤ 0 即 tier 0（免费），> 0 即 tier 2（收费），
+// tier 不单独落字段：cost_per_req ≤ 0 且样本够即 tier 0（免费），> 0 即 tier 2（收费），
 // 无观测即 tier 1——由调用方/面板按值推出，避免双表示漂移。
 type ModelCostStatus struct {
 	Model string `json:"model"`
-	// CostPer1k 实测每千 token 单价（EMA 平滑值）。≤0 = 实测免费（tier 0）。
+	// CostPerReq 实测每次请求平均积分（EMA 平滑值，**决策口径**）。≤0 且 Samples 够 =
+	// 实测免费（tier 0）。上游返回的 credit 主要是每请求底价、不随 token 线性增长，
+	// 所以比价必须按次算（issue #491）。
+	CostPerReq float64 `json:"cost_per_req"`
+	// CostPer1k 实测每千 token 单价（EMA 平滑值，**仅诊断**）：衡量的是「这个号接到的
+	// 请求有多长」，不是「这个号贵不贵」，不参与选号排序。
 	CostPer1k float64 `json:"cost_per_1k"`
 	// LastSeen 最近一次观测时刻（过期即从台账消失，同 modelCostTTL 口径）。
 	LastSeen time.Time `json:"last_seen"`
@@ -215,10 +220,15 @@ type modelCooldown struct {
 const modelCostTTL = 6 * time.Hour
 
 // modelCostEntry 运行时成本账本（持久化镜像 stateModelCost 与其字段一一对应）。
+//
+// 两个口径并存：CostPerReq 是决策口径（比价、分层），CostPer1k 只留作诊断。
+// 后台实测（issue #491）：同一批账号按 credit/tokens 算差 1300 倍，按每次请求算只差
+// 8 倍——per1k 那 1300 倍差的全是请求长度。
 type modelCostEntry struct {
-	CostPer1k float64
-	LastSeen  time.Time
-	Samples   int
+	CostPerReq float64
+	CostPer1k  float64
+	LastSeen   time.Time
+	Samples    int
 }
 type entry struct {
 	a            *auth.Auth
@@ -566,10 +576,14 @@ type stateModelCooldown struct {
 
 // stateModelCost 单个 (账号, 模型) 的成本观测持久化记录，与运行态 modelCostEntry
 // 同构（单一表示，内存与落盘不搞两套）。
+//
+// CostPerReq 用指针：旧版本只落过错误口径的 cost_per_1k，恢复侧见 nil 即丢弃该条目
+// 重新学习（一次真实请求即可重建），避免把「请求长度」当成「账号价格」跨重启继承。
 type stateModelCost struct {
-	CostPer1k float64   `json:"cost_per_1k"`
-	LastSeen  time.Time `json:"last_seen"`
-	Samples   int       `json:"samples,omitempty"`
+	CostPerReq *float64  `json:"cost_per_req,omitempty"`
+	CostPer1k  float64   `json:"cost_per_1k"`
+	LastSeen   time.Time `json:"last_seen"`
+	Samples    int       `json:"samples,omitempty"`
 }
 
 // stateFile 持久化格式。

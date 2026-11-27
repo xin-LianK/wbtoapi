@@ -194,6 +194,7 @@ func TestSessionConfigRealmAware(t *testing.T) {
 	}
 	// 新会话分配按成本分层：cn1 对 m 实测免费，合池时新会话只分给它（关掉条件探索，免得这一次切去无观测的号）。
 	p.SetCostExploreInterval(0)
+	p.NoteModelCost("cn1", "m", 0, 1000) // 免费（tier 0 要两次零成本观测确认，issue #491）
 	p.NoteModelCost("cn1", "m", 0, 1000)
 	if got := cfg.AssignableForModel("m", "", nil); !reflect.DeepEqual(got, []string{"cn1"}) {
 		t.Errorf("新会话分配应只留免费号，got %v", got)

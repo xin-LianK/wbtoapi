@@ -225,9 +225,29 @@ func TestRoundRobinConcurrentFairnessAndLeases(t *testing.T) {
 }
 func TestSequentialCostExplorationDoesNotReplaceCurrent(t *testing.T) {
 	p := orderedPool(t, SequentialExhaust)
+	// 免费（tier 0）要两次零成本观测：单次 credit=0 可能是「这次没结算」（issue #491）。
+	p.NoteModelCost("a", "m", 0, 1000)
 	p.NoteModelCost("a", "m", 0, 1000)
 	wantPick(t, p, nil, "m", "cn", "a")
 	p.SetCostExploreInterval(time.Hour)
 	wantPick(t, p, nil, "m", "cn", "b")
 	wantPick(t, p, nil, "m", "cn", "a")
+}
+
+// TestSingleZeroCreditIsNotFreeTier 单次 credit=0 不能判免费（issue #491：一次探测后
+// 10 个请求有 6 个落在同一个号）。要两次零成本观测才进 tier 0。
+func TestSingleZeroCreditIsNotFreeTier(t *testing.T) {
+	p := orderedPool(t, SequentialExhaust)
+	p.NoteModelCost("a", "m", 0, 1000)
+	now := time.Now()
+	p.mu.RLock()
+	e := p.byUID["a"]
+	p.mu.RUnlock()
+	if tier, _ := e.costTierOf("m", now); tier != 1 {
+		t.Fatalf("单次零成本观测应是未知层 tier 1，got %d", tier)
+	}
+	p.NoteModelCost("a", "m", 0, 1000)
+	if tier, _ := e.costTierOf("m", now); tier != 0 {
+		t.Fatalf("两次零成本观测后应是免费层 tier 0，got %d", tier)
+	}
 }
