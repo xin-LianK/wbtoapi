@@ -114,6 +114,10 @@ func TestRunFiresBatch(t *testing.T) {
 	oldGrace := wakeupGraceDelay
 	wakeupGraceDelay = 0
 	t.Cleanup(func() { wakeupGraceDelay = oldGrace })
+	// 同槽多类任务默认按 3 秒错峰，测试要整批同时派发。
+	oldStagger := batchKindStagger
+	batchKindStagger = 0
+	t.Cleanup(func() { batchKindStagger = oldStagger })
 
 	hooked := make(chan struct{}, 1)
 	s := New(Config{

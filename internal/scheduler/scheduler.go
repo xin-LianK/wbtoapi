@@ -464,7 +464,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 // ctx 取消时由各任务内部的可取消等待快速收尾。
 func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 	var wg sync.WaitGroup
-	for _, k := range kinds {
+	for i, k := range kinds {
+		// 同槽多类任务错峰：整点同时触发签到与旅行（9 点/21 点）、或保活与黑猫时，
+		// 两类首波并发砸同一个出口，上游按 IP 限流会先拒掉一部分。按序错开首波即可。
+		if i > 0 && !sleepCtx(ctx, time.Duration(i)*batchKindStagger) {
+			return // ctx 取消：放弃本批剩余任务
+		}
 		wg.Add(1)
 		go func(k taskKind) {
 			defer wg.Done()
@@ -560,7 +565,7 @@ func (s *Scheduler) RunCheckinNow() {
 		// 下方余额查询照常跑（企业额度走 get-enterprise-user-usage 口径，且是
 		// credit_floor 判定与面板额度展示的唯一数据源）。
 		if !a.IsEnterprise() {
-			if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+			if err := retrySoftRate(func() error { return s.cfg.Upstream.DailyCheckin(a) }); err != nil {
 				// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
 				if upstream.IsAlreadyCheckin(err) {
 					s.cfg.Pool.NoteCheckinDone(st.UID)
@@ -582,7 +587,7 @@ func (s *Scheduler) RunCheckinNow() {
 		}
 		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次与
 		// 按自然日聚合的全部批次（首页快照与「检查」共用同一口径）。
-		remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
+		remain, total, expiring, earliestAt, earliestRemaining, buckets, err := fetchUserSnapshot(s, a, expiringSoon)
 		if err != nil {
 			balanceFailN++
 			balanceFails = append(balanceFails, logfmt.Label(st.UID, st.Nickname)+"：余额查询失败（"+err.Error()+"）")
@@ -632,6 +637,52 @@ func (s *Scheduler) gapWait(i int) {
 		return
 	}
 	time.Sleep(s.cfg.AccountGap + time.Duration(i%3)*s.cfg.AccountGap/5)
+}
+
+// 批量任务的上游保护参数（对齐上游 a3bf839 的实测口径）。
+const (
+	// taskRetryDelay 签到/余额查询遇 429 软限流时的退避间隔：整点批量打同一出口，
+	// 上游按 IP 限流会把连发的前几个号拒掉，退避一次通常就能过去。
+	taskRetryDelay = 3 * time.Second
+	// balanceRefreshConcurrency 余额刷新最大并发。全池同时建连（几十个号）会把容器
+	// DNS 打爆、也容易撞上游维护接口限流，实测 3 并发足够快且稳。
+	balanceRefreshConcurrency = 3
+)
+
+// batchKindStagger 同一时刻多类任务（如 9 点签到 + 旅行）的首波错开间隔。
+// 变量而非常量：排程测试把整批同时触发，置 0 才不会拖慢用例。
+var batchKindStagger = 3 * time.Second
+
+// isSoftRateError 是否上游 429 软限流（不含「今天已签到」这类幂等拒绝：
+// 它同样是 code!=0，但重试没有意义）。
+func isSoftRateError(err error) bool {
+	if err == nil || upstream.IsAlreadyCheckin(err) {
+		return false
+	}
+	var ue *upstream.Error
+	return errors.As(err, &ue) && ue.Kind == upstream.ErrSoftRate
+}
+
+// retrySoftRate 对 429 软限流退避重试一次；其它错误原样返回。只补 429——
+// 5xx 与网络错已由 upstream 内部重试处理，这里再叠一层会放大流量。
+func retrySoftRate(fn func() error) error {
+	err := fn()
+	if !isSoftRateError(err) {
+		return err
+	}
+	time.Sleep(taskRetryDelay)
+	return fn()
+}
+
+// fetchUserSnapshot 查余额快照（含到期批次），遇 429 退避重试一次。签到后的余额
+// 查询与后台余额刷新共用：两者都是整点连发，是最容易被上游限流打中的调用。
+func fetchUserSnapshot(s *Scheduler, a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, buckets []upstream.ExpiryBucket, err error) {
+	err = retrySoftRate(func() error {
+		var e error
+		remain, total, expiring, earliestAt, earliestRemaining, buckets, e = s.cfg.Upstream.UserResourceSnapshot(a, soon)
+		return e
+	})
+	return
 }
 
 // head 取前 n 项：日志一行、推送一条，多的靠面板明细看。
@@ -824,7 +875,7 @@ func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
 // （轮换用法下据此判断下一个该启用谁）。注意 ReenableIfCredits 对 disabled 是
 // no-op，所以本开关**不会**导致禁用号被自动解冻——它只让已有账号的积分保持新鲜。
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
-// 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
+// 但不做签到；token 平时不主动刷新，仅在上游返回非 12153 的 401 时由 upstream 按需刷新重试一次。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
 func (s *Scheduler) RunBalanceRefreshNow() {
 	// 没装配账号池时无事可做：单测会只构造 Scheduler 验证排程逻辑，
@@ -839,6 +890,9 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		return
 	}
 	var wg sync.WaitGroup
+	// 限并发：以前每个号一个 goroutine 全量并发，几十个号同时建连会把容器 DNS
+	// 打爆、也容易撞上游维护接口限流（上游 a3bf839 实测）。
+	sem := make(chan struct{}, balanceRefreshConcurrency)
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
@@ -853,13 +907,24 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			continue
 		}
 		wg.Add(1)
-		go func(a *auth.Auth, uid string) {
+		go func(a *auth.Auth, uid string, disabled bool) {
 			defer wg.Done()
-			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := fetchUserSnapshot(s, a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+				// 12153 连续 N 次才禁用（误判防护，同对话侧）：token 刷新已在上游按需重试过，
+				// 走到这里仍是 session dead 说明 RT 链真的废了。
+				var ue *upstream.Error
+				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !disabled {
+					if s.cfg.Pool.NoteSessionDead(uid) {
+						log.Printf("balance %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(uid, a.Nickname), pool.SessionDeadThreshold())
+					}
+				}
 				return
 			}
+			s.cfg.Pool.ClearSessionDead(uid)
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
 			s.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
 				Remain:            remain,
@@ -869,7 +934,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 				EarliestRemaining: earliestRemaining,
 				ExpiryBuckets:     poolExpiryBuckets(buckets),
 			})
-		}(a, st.UID)
+		}(a, st.UID, st.Disabled)
 	}
 	wg.Wait()
 	s.lastBalanceRefresh.Store(time.Now().UnixNano())
