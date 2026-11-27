@@ -192,6 +192,8 @@ func TestCacheMissSignal(t *testing.T) {
 		{"换了号", func(o *cacheObservation) { o.uid, o.acct = "u2", "u2(乙)" }, "acct=u2(乙) 这一轮大前缀未命中（prompt=9000 miss=9000）：换了号（上一轮在 u1(甲)），部分模型按号缓存，属预期"},
 		{"会话 id 变了", func(o *cacheObservation) { o.convID = "c-2" }, "会话 id 变了"},
 		{"消息变少", func(o *cacheObservation) { o.msgs = 2 }, "消息比上一轮少（3 → 2 条），客户端压缩或改写了历史"},
+		// 消息条数不变、输入 token 变少：客户端压掉/改写了历史正文（issue #491 同批上游修复）。
+		{"输入变少", func(o *cacheObservation) { o.msgs = 4; o.prompt = 6000 }, "输入 token 比上一轮少（9000 → 6000），客户端压缩或改写了历史"},
 		{"换了模型", func(o *cacheObservation) { o.model = "glm-5.3" }, "换了模型（上一轮是 glm-5.3-flash）"},
 	}
 	for i, tc := range cases {
